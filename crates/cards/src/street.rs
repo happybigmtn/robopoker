@@ -20,6 +20,7 @@ use rbp_core::KMEANS_TURN_TRAINING_ITERATIONS;
 /// - Turn: ~14M isomorphisms
 /// - River: ~123M isomorphisms
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Street {
     #[default]
     Pref = 0isize,
@@ -260,4 +261,3 @@ impl Arbitrary for Street {
         }
     }
 }
-

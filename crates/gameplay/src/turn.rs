@@ -9,6 +9,7 @@
 /// - `Chance` — Dealer reveals cards (no player decision)
 /// - `Terminal` — Hand is over, compute payoffs
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Turn {
     Terminal,
     Chance,
@@ -59,7 +60,6 @@ impl From<usize> for Turn {
         Self::Choice(player)
     }
 }
-
 
 impl TryFrom<&str> for Turn {
     type Error = anyhow::Error;
