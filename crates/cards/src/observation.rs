@@ -21,6 +21,7 @@ use std::cmp::Ordering;
 /// efficient database storage. The separator `~` distinguishes hole from board
 /// in string representation.
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Observation {
     pocket: Hand,
     public: Hand,

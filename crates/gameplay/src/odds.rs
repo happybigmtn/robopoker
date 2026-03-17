@@ -8,6 +8,7 @@ use rbp_core::*;
 /// See [`Size`] for the full sizing abstraction that handles both pot-relative
 /// and BB-relative interpretations.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Odds(Chips, Chips);
 
 impl Odds {

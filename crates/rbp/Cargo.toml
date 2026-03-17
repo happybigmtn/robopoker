@@ -12,6 +12,7 @@ categories      = ["game-development", "algorithms", "mathematics"]
 
 [features]
 default         = []
+serde           = ["rbp-nlhe/serde"]
 database        = ["rbp-auth/database", "rbp-gameroom/database"]
 server          = ["rbp-auth/server"]
 

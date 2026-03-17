@@ -26,12 +26,14 @@ use std::collections::BTreeMap;
 /// With the `database` feature, supports loading/saving to PostgreSQL
 /// via [`Hydrate`] and [`Schema`] implementations.
 #[derive(Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NlheProfile {
     /// Current training iteration (epoch).
     pub iterations: usize,
     /// Nested map: Info → NlheEdge → Encounter (weight, regret, evalue).
     pub encounters: BTreeMap<NlheInfo, BTreeMap<NlheEdge, Encounter>>,
     /// Training metrics collector.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub metrics: Metrics,
 }
 

@@ -17,7 +17,7 @@ use std::hash::Hash;
 /// Packed as `[8 bits street][8 bits index]` in a `u16`, enabling efficient
 /// storage and comparison.
 #[derive(Default, Copy, Clone, Hash, Eq, PartialEq, Debug, PartialOrd, Ord)]
-#[cfg_attr(feature = "client", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Abstraction(u16);
 
 

@@ -20,6 +20,7 @@ use rbp_core::Arbitrary;
 /// This is a form of imperfect recall that trades some strategic precision
 /// for dramatic space savings.
 #[derive(Copy, Clone, Hash, Eq, PartialEq, Debug, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Isomorphism(pub Observation);
 
 impl From<Observation> for Isomorphism {

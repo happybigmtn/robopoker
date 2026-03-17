@@ -1757,6 +1757,7 @@ dependencies = [
  "rayon",
  "rbp-core",
  "rbp-transport",
+ "serde",
 ]
 
 [[package]]
@@ -1774,6 +1775,7 @@ dependencies = [
  "rbp-gameplay",
  "rbp-mccfr",
  "rbp-transport",
+ "serde",
  "tokio-postgres",
 ]
 

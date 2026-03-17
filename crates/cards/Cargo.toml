@@ -12,6 +12,7 @@ categories   = ["game-development", "algorithms"]
 
 [features]
 default   = []
+serde     = ["dep:serde"]
 client    = ["serde"]
 shortdeck = []
 
