@@ -1,4 +1,5 @@
 //! Test serde serialization/deserialization for NLHE types
+#![cfg(feature = "serde")]
 
 use rbp_cards::*;
 use rbp_core::Arbitrary;
