@@ -1,0 +1,22 @@
+[package]
+name         = "robopoker-tui"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.90"
+authors      = ["Kelechi Ukah <ukahkelechi@gmail.com>"]
+description  = "Read-only Ratatui dashboard for robopoker"
+license      = "MIT"
+
+[[bin]]
+name = "robopoker-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = { workspace = true }
+clap       = { workspace = true }
+crossterm  = "0.29"
+ratatui    = { version = "0.30.0", default-features = false, features = ["crossterm", "std", "all-widgets"] }
+rbp-cards  = { path = "../../crates/cards" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tachyonfx  = "0.25.0"
