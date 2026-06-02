@@ -203,6 +203,20 @@ cargo test --workspace
 cargo doc --workspace --no-deps --open
 ```
 
+## TUI Preview
+
+`robopoker-tui` is a read-only Ratatui dashboard for local inspection of the
+evaluator and training posture. It does not connect to the server, database, or
+any live play path. The interactive view advances one poker beat at a time:
+`Space` / `Enter` steps forward, `b` / `Backspace` steps back, `r` loads a new
+seeded hand, and TachyonFX marks each transition.
+
+```bash
+cargo run -p robopoker-tui
+cargo run -p robopoker-tui -- --headless --seed 49363 --export-dir .auto/tui
+cargo test -p robopoker-tui
+```
+
 ## References
 
 1. (2019). Superhuman AI for multiplayer poker. [(Science)](https://science.sciencemag.org/content/early/2019/07/10/science.aay2400)

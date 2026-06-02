@@ -5,6 +5,7 @@
 /analysis
 /.vscode
 /.claude
+/.auto
 
 .cursorrules
 .DS_Store

@@ -21,6 +21,7 @@ members  = [
     # Binary crates
     "bin/backend",
     "bin/trainer",
+    "bin/tui",
 ]
 
 [workspace.package]
