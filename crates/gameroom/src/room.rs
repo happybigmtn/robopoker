@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::Hand as HandRecord;
 use rbp_auth::Member;
 use rbp_auth::User;
 use rbp_core::*;
@@ -113,7 +114,30 @@ impl Room {
         };
         self.context = HandContext::new(hand_number, game);
     }
-    async fn flush_hand(&self) {
+    /// Run exactly one hand cycle through the room and persist it.
+    ///
+    /// This is the same sequence the production loop body executes
+    /// (`reset → play → showdown → flush`), exposed publicly so a
+    /// test can drive a single hand end-to-end without entering the
+    /// `Room::run` infinite loop. The production `run` continues to
+    /// call this method (or its equivalents) until the engine
+    /// reports `is_finished()`; nothing in the public production
+    /// surface has changed.
+    ///
+    /// The engine must be in `Seating` phase. After this call the
+    /// engine has transitioned `Dealing → Showdown` (it has not
+    /// concluded, so a follow-up `Room::run` could keep playing
+    /// from the same state). Returns the `ID<Hand>` of the
+    /// just-persisted hand.
+    pub async fn play_hand_once(&mut self) -> ID<HandRecord> {
+        self.engine.start();
+        self.reset_hand();
+        self.play_hand().await;
+        self.engine.into_showdown();
+        self.run_showdown().await;
+        self.flush_hand().await
+    }
+    async fn flush_hand(&self) -> ID<HandRecord> {
         let game = match &self.engine {
             EngineState::Showdown(e) => e.game(),
             _ => panic!("flush_hand called in wrong phase"),
@@ -138,6 +162,7 @@ impl Room {
                 .expect("failed to record action");
         }
         log::info!("recorded hand {}", hand.id());
+        hand.id()
     }
 }
 
