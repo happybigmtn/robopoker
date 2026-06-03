@@ -210,6 +210,65 @@ context.
   integration test passes; `cargo test --workspace` and
   `cargo fmt --check` are green.
 
+- [x] `STW-010` Head-to-head bench harness for trained `DatabasePlayer` vs `Fish`.
+  Owner files: `crates/autotrain/src/{bench,mode,lib}.rs`,
+  `crates/autotrain/Cargo.toml`, `crates/gameroom/src/room.rs`,
+  `crates/autotrain/tests/bench.rs`, `IMPLEMENTATION_PLAN.md`,
+  `genesis/plans/000-ceo-testnet-roadmap.md`.
+  Scope boundary: add a `trainer --bench` mode that drives K
+  heads-up hands of `DatabasePlayer` (seat 0) vs `Fish` (seat 1)
+  through the production `Room` shell, accumulates per-hand
+  `settlements()[0]`, and prints a single-line JSON `BenchReport`
+  on stdout with mbb/100, 95% CI, win-rate, and a `blueprint_trained`
+  boolean. Do not redesign the room protocol, do not introduce a
+  new `Player` type, do not change any `Schema` method body, do not
+  pre-empt the next benchmark (a stronger baseline bot, a CI
+  pipeline) — those are later slices.
+  Acceptance criteria: a new `crates/autotrain/src/bench.rs` exists
+  with `bench::run`, `bench::run_hands`, `bench::summarize`,
+  `bench::BenchReport`, and `Mode::Bench` wired through
+  `crates/autotrain/src/mode.rs`. `Room` exposes two new public
+  methods required by the bench loop: `Room::settlements` (read
+  per-seat `Settlement::won()` from the showdown snapshot) and
+  `Room::conclude` (advance from `Showdown` to `Dealing` or
+  `Finished`, mirroring the production `Room::run` loop body). The
+  bench tolerates an empty-blueprint DB by falling back to a
+  default-constructed `Flagship` (so a freshly-`--reset` DB
+  doesn't crash on `NlheProfile::hydrate`'s
+  `expect("to have already created epoch metadata")`) and the
+  `blueprint_trained: false` JSON field flags the fallback for
+  downstream consumers. A new `crates/autotrain/tests/bench.rs`
+  integration test (gated on `database` + `DATABASE_URL` like
+  `crates/autotrain/tests/smoke.rs`) drives
+  `trainer --reset` then `trainer --bench` end-to-end and asserts
+  the binary exits 0, the JSON line parses, the headline
+  accounting is internally consistent
+  (`mbb_per_100 == net_chips * 100 / (hands * blind)` within
+  `1e-3`), and the post-reset `blueprint_trained` flag is
+  `false`. Six lib tests pin the math:
+  `mbb_per_100_formula_matches_mean_times_hundred_over_blind`,
+  `zero_mean_vector_yields_zero_mbb_and_zero_ci`,
+  `mixed_wins_and_losses_split_count`,
+  `win_rate_ci95_matches_normal_approx_formula`,
+  `to_json_contains_every_field`,
+  `bench_hands_env_override_round_trip`.
+  Verification commands:
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the 6 lib tests in `bench.rs::tests` + the
+  `crates/autotrain/tests/bench.rs` integration test.
+  Dependencies: `STW-006` (Schema/BulkSchema split) for the
+  `Schema::creates()` paths the `Room` history writes need;
+  `STW-008` (hand-persistence round-trip) for the live-DB
+  `HistoryRepository` writes `Room::flush_hand` issues.
+  Estimated scope: M.
+  Completion signal: `trainer --bench` exits 0 on a freshly-`--reset`
+  DB and prints a parseable single-line JSON `BenchReport`; the
+  integration test passes; `cargo test --workspace` and
+  `cargo fmt --check` are green.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
@@ -229,7 +288,7 @@ context.
 |                | user-facing                                           | not user-facing                                  |
 |----------------|-------------------------------------------------------|--------------------------------------------------|
 | mainnet-block  | `STW-003` database-backed build; `STW-004` auth holes | `STW-005` formatter drift                            |
-| not mainnet-b  | `STW-008` hand round-trip; ~~`STW-009` trainer smoke~~ | `STW-001` planning surface; `STW-007` artifact retirement |
+| not mainnet-b  | `STW-008` hand round-trip; ~~`STW-009` trainer smoke~~; `STW-010` bench harness | `STW-001` planning surface; `STW-007` artifact retirement |
 
 ## Promotion provenance
 

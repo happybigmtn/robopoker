@@ -12,6 +12,7 @@ pub enum Mode {
     Slow,
     Reset,
     Smoke,
+    Bench,
 }
 
 impl Mode {
@@ -24,11 +25,12 @@ impl Mode {
                 "--slow" => Some(Self::Slow),
                 "--reset" => Some(Self::Reset),
                 "--smoke" => Some(Self::Smoke),
+                "--bench" => Some(Self::Bench),
                 _ => None,
             })
             .unwrap_or_else(|| {
                 eprintln!(
-                    "Usage: trainer --status | --cluster | --fast | --slow | --reset | --smoke"
+                    "Usage: trainer --status | --cluster | --fast | --slow | --reset | --smoke | --bench"
                 );
                 std::process::exit(1);
             })
@@ -43,6 +45,7 @@ impl Mode {
             Self::Status => client.status().await,
             Self::Cluster => PreTraining::run(&client).await,
             Self::Smoke => Self::smoke(client).await,
+            Self::Bench => crate::bench::run(client).await,
         }
     }
     async fn reset(client: &tokio_postgres::Client) {

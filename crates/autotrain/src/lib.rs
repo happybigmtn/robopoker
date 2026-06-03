@@ -18,6 +18,7 @@
 //! ## Submodules
 //!
 //! - [`workers`] — Distributed training workers for MCCFR
+mod bench;
 mod epoch;
 mod fast;
 mod mode;
@@ -27,6 +28,7 @@ mod trainer;
 
 pub mod workers;
 
+pub use bench::*;
 pub use epoch::*;
 pub use fast::*;
 pub use mode::*;

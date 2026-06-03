@@ -34,6 +34,27 @@ impl Room {
     pub fn stakes(&self) -> Chips {
         self.stakes
     }
+    /// Per-seat net chip accounting for the just-completed hand.
+    ///
+    /// Returns the `Settlement::won()` value for every seat in seat
+    /// order: `settlements()[i]` is the net chips won by seat `i`
+    /// (negative for losses). This is the same per-hand PnL the
+    /// `Event::HandEnd` broadcast reports, but in a flat
+    /// index-aligned `Vec` that a benchmark harness can sum across
+    /// hands without walking the engine internals.
+    ///
+    /// The room must be in `Showdown` phase (i.e. `play_hand_once`
+    /// has just returned, or `Room::run` has reached the
+    /// `run_showdown` step). Calling this in any other phase
+    /// panics, matching the `flush_hand` invariant — both read the
+    /// same `Engine<Showdown>::game()` snapshot.
+    pub fn settlements(&self) -> Vec<Chips> {
+        let game = match &self.engine {
+            EngineState::Showdown(e) => e.game(),
+            _ => panic!("settlements called in wrong phase"),
+        };
+        game.settlements().iter().map(|s| s.won()).collect()
+    }
     pub fn sit<P, U>(&mut self, player: P, user: U)
     where
         P: Player + 'static,
@@ -136,6 +157,28 @@ impl Room {
         self.engine.into_showdown();
         self.run_showdown().await;
         self.flush_hand().await
+    }
+    /// Advance the engine from `Showdown` to the next hand
+    /// (`Dealing`) or to `Finished` if a player is busted.
+    ///
+    /// This is the missing public hook between successive
+    /// [`play_hand_once`](Self::play_hand_once) calls. The
+    /// production [`run`](Self::run) loop body interleaves
+    /// `conclude` with the `is_finished` check (see `room.rs`
+    /// `Room::run`); the public method exposes that same step so
+    /// a test, benchmark, or external coordinator can drive the
+    /// room one hand at a time without entering the
+    /// `start`/`done` oneshot protocol that `run` requires.
+    ///
+    /// The engine MUST be in `Showdown` phase (i.e. the caller
+    /// has just finished a `play_hand_once`). Any other phase
+    /// panics, matching the `run` loop's invariant. Returns
+    /// `true` if the engine is now `Finished` (game over — no
+    /// further hand is playable) and `false` if a next hand is
+    /// ready to start.
+    pub fn conclude(&mut self) -> bool {
+        self.engine.conclude();
+        self.engine.is_finished()
     }
     async fn flush_hand(&self) -> ID<HandRecord> {
         let game = match &self.engine {
