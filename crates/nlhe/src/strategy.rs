@@ -6,7 +6,9 @@ use rbp_mccfr::*;
 use rbp_transport::*;
 use std::collections::BTreeMap;
 
-// TODO: Import from rbp-core or define locally
+/// Minimum probability floor for policy entries.
+/// Chosen as 1e-6 (distinct from rbp_core::POLICY_MIN which is f32::MIN_POSITIVE)
+/// to avoid starving actions during normalization while still preventing true zeros.
 const POLICY_MIN: Probability = 1e-6;
 
 /// A trained strategy for a specific information set.
