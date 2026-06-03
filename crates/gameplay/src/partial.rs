@@ -116,10 +116,10 @@ impl From<(Turn, Arrangement)> for Partial {
     }
 }
 
-/// random non-folding actions lead to this street
+/// Starting partial state for a given street (no actions yet).
 impl From<Street> for Partial {
-    fn from(_: Street) -> Self {
-        todo!()
+    fn from(street: Street) -> Self {
+        Self::from((Turn::Choice(0), Arrangement::from(street)))
     }
 }
 
