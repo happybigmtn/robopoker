@@ -1,13 +1,11 @@
 use super::*;
-use rbp_core::Utility;
+use rbp_core::{Utility, SUBGAME_ITERATIONS};
 use rbp_gameplay::*;
 use rbp_mccfr::*;
 use rbp_mccfr::Posterior;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
-// TODO: Import from rbp-core or define locally
-const SUBGAME_ITERATIONS: usize = 100;
 const CFR_TREE_COUNT_NLHE: usize = 1;
 const CFR_BATCH_SIZE_NLHE: usize = 1000;
 
