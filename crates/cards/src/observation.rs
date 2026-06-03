@@ -59,9 +59,45 @@ impl Observation {
             _ => won as Probability / sum as Probability,
         }
     }
-    /// Monte Carlo equity estimation (not yet implemented).
-    pub fn simulate(&self, _: usize) -> Probability {
-        todo!("run out some number of simulations and take equity as average")
+    /// Monte Carlo equity estimation via random opponent sampling.
+    ///
+    /// Samples `n` random opponent hole cards from the remaining deck
+    /// (respecting hero's known cards) and computes average win rate
+    /// using hand strength comparison. Falls back to exact `equity()`
+    /// on the river or when n=0.
+    pub fn simulate(&self, n: usize) -> Probability {
+        if n == 0 || self.street() == Street::Rive {
+            return self.equity();
+        }
+        let hero = Strength::from(Hand::from(*self));
+        let mut wins = 0usize;
+        let mut trials = 0usize;
+        for _ in 0..n {
+            let mut deck: Deck = Deck::from(*self);
+            if Hand::from(deck).size() < 2 {
+                continue;
+            }
+            let hole = deck.hole();
+            let villain_pocket: Hand = Hand::from(hole);
+            let villain = Strength::from(Hand::add(villain_pocket, self.public));
+            match hero.cmp(&villain) {
+                Ordering::Greater => {
+                    wins += 1;
+                    trials += 1;
+                }
+                Ordering::Equal => {
+                    trials += 1;
+                }
+                Ordering::Less => {
+                    trials += 1;
+                }
+            }
+        }
+        if trials == 0 {
+            0.5
+        } else {
+            wins as Probability / trials as Probability
+        }
     }
     /// Infers the street from total observed cards.
     pub fn street(&self) -> Street {
