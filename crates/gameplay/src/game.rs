@@ -76,9 +76,11 @@ impl Game {
     /// Used for computing opponent reach: sets all non-hero seats to the
     /// assumed opponent hole while preserving hero's cards.
     ///
-    /// TODO
-    /// this might be incorrect, i don't know if it takes into considration the relativity of
-    /// dealer position in Turn.
+    /// Seat indices in `Turn::Choice` are absolute (0..N-1) and match the
+    /// `seats` array order from `enumerate()`. The `dealer` + `ticker`
+    /// mechanism only determines action order, not the indexing used here
+    /// for hole-card assignment. Therefore `assume` correctly targets the
+    /// non-hero player regardless of button position.
     pub fn assume(mut self, hero: Turn, hole: Hole) -> Self {
         self.seats
             .iter_mut()
