@@ -32,7 +32,7 @@ context.
   Estimated scope: S.
   Completion signal: feature-specific server and gameroom checks are green.
 
-- [ ] `STW-004` Harden auth secrets and session validation.
+- [x] `STW-004` Harden auth secrets and session validation.
   Owner files: `crates/auth/src/crypto.rs`, `crates/auth/src/handlers.rs`,
   `crates/auth/src/middleware.rs`, `crates/auth/src/repository.rs`,
   `crates/auth/src/session.rs`, `crates/auth/Cargo.toml`.

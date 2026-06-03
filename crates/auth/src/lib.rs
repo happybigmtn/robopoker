@@ -31,9 +31,8 @@ pub use identity::*;
 pub use lurker::*;
 pub use member::*;
 pub use session::*;
-
 #[cfg(feature = "database")]
-mod repository;
+pub mod repository;
 #[cfg(feature = "database")]
 pub use repository::*;
 

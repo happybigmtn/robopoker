@@ -43,7 +43,15 @@ async fn health(client: web::Data<Arc<Client>>) -> impl Responder {
 pub async fn run() -> Result<(), std::io::Error> {
     let client = rbp_database::db().await;
     let api = web::Data::new(analysis::API::new(client.clone()));
-    let crypto = web::Data::new(rbp_auth::Crypto::from_env());
+    // `from_env` is now fallible (STW-004). The previous behavior was to
+    // silently fall back to an empty signing key, which let anyone mint
+    // valid tokens; we now refuse to start instead.
+    let crypto = web::Data::new(
+        rbp_auth::Crypto::from_env().map_err(|e| {
+            log::error!("refusing to start: {}", e);
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+        })?,
+    );
     let casino = web::Data::new(hosting::Casino::new(client.clone()));
     let client = web::Data::new(client);
     log::info!("starting unified server");

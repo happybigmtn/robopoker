@@ -10,10 +10,27 @@ use tokio_postgres::Client;
 #[allow(async_fn_in_trait)]
 pub trait AuthRepository {
     async fn signin(&self, session: &Session) -> Result<(), PgErr>;
+    /// Bind a freshly-issued JWT to an existing session row. We sign the
+    /// token first, then write `sha256(jwt)` back so the middleware can
+    /// verify the presented token against the row that was created at
+    /// login. The split (insert empty, then update) keeps the `Session`
+    /// constructor pure and avoids threading the JWT through the domain
+    /// type.
+    async fn update_token_hash(
+        &self,
+        session: ID<Session>,
+        hash: &[u8],
+    ) -> Result<(), PgErr>;
     async fn revoke(&self, session: ID<Session>) -> Result<(), PgErr>;
     async fn exists(&self, username: &str, email: &str) -> Result<bool, PgErr>;
     async fn create(&self, member: &Member, hashword: &str) -> Result<(), PgErr>;
     async fn lookup(&self, username: &str) -> Result<Option<(Member, String)>, PgErr>;
+    /// Look up the persisted `token_hash` for a session id. Middleware
+    /// compares this against `sha256(presented_jwt)` to reject tokens
+    /// that decode to a valid `Claims` but do not match the row stored at
+    /// login (a different login on another device, a forged session id,
+    /// etc.).
+    async fn token_hash(&self, session: ID<Session>) -> Result<Option<Vec<u8>>, PgErr>;
 }
 
 impl AuthRepository for Arc<Client> {
@@ -90,6 +107,23 @@ impl AuthRepository for Arc<Client> {
         .map(|_| ())
     }
 
+    async fn update_token_hash(
+        &self,
+        session: ID<Session>,
+        hash: &[u8],
+    ) -> Result<(), PgErr> {
+        self.execute(
+            const_format::concatcp!(
+                "UPDATE ",
+                SESSIONS,
+                " SET token_hash = $1 WHERE id = $2"
+            ),
+            &[&hash, &session.inner()],
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn revoke(&self, session: ID<Session>) -> Result<(), PgErr> {
         self.execute(
             const_format::concatcp!("UPDATE ", SESSIONS, " SET revoked = TRUE WHERE id = $1"),
@@ -97,5 +131,18 @@ impl AuthRepository for Arc<Client> {
         )
         .await
         .map(|_| ())
+    }
+
+    async fn token_hash(&self, session: ID<Session>) -> Result<Option<Vec<u8>>, PgErr> {
+        self.query_opt(
+            const_format::concatcp!(
+                "SELECT token_hash FROM ",
+                SESSIONS,
+                " WHERE id = $1"
+            ),
+            &[&session.inner()],
+        )
+        .await
+        .map(|opt| opt.map(|row| row.get::<_, Vec<u8>>(0)))
     }
 }

@@ -41,3 +41,45 @@ impl Claims {
         &self.usr
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessors_return_what_was_constructed() {
+        let user = ID::<Member>::default();
+        let sid = ID::<Session>::default();
+        let claims = Claims::new(user, sid, "alice".to_string());
+        assert_eq!(claims.user(), user);
+        assert_eq!(claims.session(), sid);
+        assert_eq!(claims.username(), "alice");
+    }
+
+    #[test]
+    fn fresh_claims_are_not_expired() {
+        let claims = Claims::new(ID::default(), ID::default(), "alice".to_string());
+        assert!(!claims.expired());
+    }
+
+    #[test]
+    fn claims_with_past_exp_are_expired() {
+        let mut claims = Claims::new(ID::default(), ID::default(), "alice".to_string());
+        claims.exp = 0;
+        claims.iat = 0;
+        assert!(claims.expired());
+    }
+
+    #[test]
+    fn exp_is_far_enough_in_future() {
+        // Sanity: the duration we configure gives us 15 minutes.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = Claims::new(ID::default(), ID::default(), "alice".to_string());
+        let skew = claims.exp - now;
+        assert!(skew >= 14 * 60, "exp too close to now: {skew}");
+        assert!(skew <= 16 * 60, "exp too far from now: {skew}");
+    }
+}

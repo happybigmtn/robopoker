@@ -31,8 +31,7 @@ pub async fn register(
     if let Err(e) = db.create(&member, &hashword).await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
-    let token_hash = Crypto::hash(&format!("{}", member.id()));
-    let session = Session::new(ID::default(), member.id(), token_hash);
+    let session = Session::new(ID::default(), member.id(), Vec::new());
     if let Err(e) = db.signin(&session).await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
@@ -41,6 +40,9 @@ pub async fn register(
         Ok(t) => t,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
+    if let Err(e) = db.update_token_hash(session.id(), &Crypto::hash(&token)).await {
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
     HttpResponse::Ok().json(AuthResponse {
         token,
         user: UserInfo {
@@ -63,8 +65,7 @@ pub async fn login(
     if !password::verify(&req.password, &hashword) {
         return HttpResponse::Unauthorized().body("invalid credentials");
     }
-    let token_hash = Crypto::hash(&format!("{}", member.id()));
-    let session = Session::new(ID::default(), member.id(), token_hash);
+    let session = Session::new(ID::default(), member.id(), Vec::new());
     if let Err(e) = db.signin(&session).await {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
@@ -73,6 +74,9 @@ pub async fn login(
         Ok(t) => t,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
+    if let Err(e) = db.update_token_hash(session.id(), &Crypto::hash(&token)).await {
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
     HttpResponse::Ok().json(AuthResponse {
         token,
         user: UserInfo {

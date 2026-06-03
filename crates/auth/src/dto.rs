@@ -1,26 +1,26 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RegisterRequest {
     pub email: String,
     pub username: String,
     pub password: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AuthResponse {
     pub token: String,
     pub user: UserInfo,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct UserInfo {
     pub id: String,
     pub username: String,
