@@ -322,7 +322,7 @@ pub fn interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
         || DEADLINE
             .get()
-            .map_or(false, |d| std::time::Instant::now() >= *d)
+            .is_some_and(|d| std::time::Instant::now() >= *d)
 }
 /// No-op interrupt check when server feature disabled.
 #[cfg(not(feature = "server"))]
@@ -333,11 +333,11 @@ pub fn interrupted() -> bool {
 /// Optionally set TRAIN_DURATION env var (e.g., "2h", "30m") for timed runs.
 #[cfg(feature = "server")]
 pub fn brb() {
-    if let Ok(duration) = std::env::var("TRAIN_DURATION") {
-        if let Some(deadline) = parse_duration(&duration) {
-            let _ = DEADLINE.set(std::time::Instant::now() + deadline);
-            log::info!("training will stop after {}", duration);
-        }
+    if let Ok(duration) = std::env::var("TRAIN_DURATION")
+        && let Some(deadline) = parse_duration(&duration)
+    {
+        let _ = DEADLINE.set(std::time::Instant::now() + deadline);
+        log::info!("training will stop after {}", duration);
     }
     std::thread::spawn(|| {
         loop {
