@@ -1,10 +1,10 @@
 //! Zero-temperature player that always takes the most likely action.
-use rbp_gameplay::*;
 use crate::*;
+use rand::prelude::*;
+use rbp_gameplay::*;
 use rbp_mccfr::*;
 use rbp_nlhe::*;
 use rbp_transport::Density;
-use rand::prelude::*;
 
 /// Compute player using subgame solving with deterministic action selection.
 ///

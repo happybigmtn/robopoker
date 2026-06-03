@@ -1,9 +1,9 @@
 use super::*;
-use rbp_core::ID;
-use rbp_core::Unique;
 use actix_web::HttpResponse;
 use actix_web::Responder;
 use actix_web::web;
+use rbp_core::ID;
+use rbp_core::Unique;
 use std::sync::Arc;
 use tokio_postgres::Client;
 
@@ -40,7 +40,10 @@ pub async fn register(
         Ok(t) => t,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
-    if let Err(e) = db.update_token_hash(session.id(), &Crypto::hash(&token)).await {
+    if let Err(e) = db
+        .update_token_hash(session.id(), &Crypto::hash(&token))
+        .await
+    {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
     HttpResponse::Ok().json(AuthResponse {
@@ -74,7 +77,10 @@ pub async fn login(
         Ok(t) => t,
         Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
     };
-    if let Err(e) = db.update_token_hash(session.id(), &Crypto::hash(&token)).await {
+    if let Err(e) = db
+        .update_token_hash(session.id(), &Crypto::hash(&token))
+        .await
+    {
         return HttpResponse::InternalServerError().body(e.to_string());
     }
     HttpResponse::Ok().json(AuthResponse {

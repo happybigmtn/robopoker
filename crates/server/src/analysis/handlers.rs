@@ -1,10 +1,10 @@
 use super::API;
-use rbp_cards::*;
-use rbp_core::*;
-use rbp_gameplay::*;
 use actix_web::HttpResponse;
 use actix_web::Responder;
 use actix_web::web;
+use rbp_cards::*;
+use rbp_core::*;
+use rbp_gameplay::*;
 
 pub async fn replace_obs(api: web::Data<API>, req: web::Json<ReplaceObs>) -> impl Responder {
     match Observation::try_from(req.obs.as_str()) {

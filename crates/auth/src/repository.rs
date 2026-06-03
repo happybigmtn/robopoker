@@ -16,11 +16,7 @@ pub trait AuthRepository {
     /// login. The split (insert empty, then update) keeps the `Session`
     /// constructor pure and avoids threading the JWT through the domain
     /// type.
-    async fn update_token_hash(
-        &self,
-        session: ID<Session>,
-        hash: &[u8],
-    ) -> Result<(), PgErr>;
+    async fn update_token_hash(&self, session: ID<Session>, hash: &[u8]) -> Result<(), PgErr>;
     async fn revoke(&self, session: ID<Session>) -> Result<(), PgErr>;
     async fn exists(&self, username: &str, email: &str) -> Result<bool, PgErr>;
     async fn create(&self, member: &Member, hashword: &str) -> Result<(), PgErr>;
@@ -107,17 +103,9 @@ impl AuthRepository for Arc<Client> {
         .map(|_| ())
     }
 
-    async fn update_token_hash(
-        &self,
-        session: ID<Session>,
-        hash: &[u8],
-    ) -> Result<(), PgErr> {
+    async fn update_token_hash(&self, session: ID<Session>, hash: &[u8]) -> Result<(), PgErr> {
         self.execute(
-            const_format::concatcp!(
-                "UPDATE ",
-                SESSIONS,
-                " SET token_hash = $1 WHERE id = $2"
-            ),
+            const_format::concatcp!("UPDATE ", SESSIONS, " SET token_hash = $1 WHERE id = $2"),
             &[&hash, &session.inner()],
         )
         .await
@@ -135,11 +123,7 @@ impl AuthRepository for Arc<Client> {
 
     async fn token_hash(&self, session: ID<Session>) -> Result<Option<Vec<u8>>, PgErr> {
         self.query_opt(
-            const_format::concatcp!(
-                "SELECT token_hash FROM ",
-                SESSIONS,
-                " WHERE id = $1"
-            ),
+            const_format::concatcp!("SELECT token_hash FROM ", SESSIONS, " WHERE id = $1"),
             &[&session.inner()],
         )
         .await

@@ -83,13 +83,32 @@ mod schema {
             )
         }
         fn copy() -> &'static str {
-            unimplemented!()
+            const_format::concatcp!(
+                "COPY ",
+                HANDS,
+                " (id, room_id, board, pot, dealer) FROM STDIN BINARY"
+            )
         }
         fn truncates() -> &'static str {
-            unimplemented!()
+            // `hands` has FK references from `players` and `actions`
+            // (`ON DELETE CASCADE`), and `TRUNCATE` does not fire
+            // `ON DELETE`, so we must cascade explicitly or the
+            // statement fails with `foreign key violation`.
+            const_format::concatcp!("TRUNCATE TABLE ", HANDS, " CASCADE;")
         }
         fn freeze() -> &'static str {
-            unimplemented!()
+            // `hands` is append-only after a hand completes (no
+            // UPDATE path in `HistoryRepository`), so the row layout
+            // is stable and `fillfactor = 100` + disabled autovacuum
+            // is the right read-heavy tuning.
+            const_format::concatcp!(
+                "ALTER TABLE ",
+                HANDS,
+                " SET (fillfactor = 100);
+                 ALTER TABLE ",
+                HANDS,
+                " SET (autovacuum_enabled = false);"
+            )
         }
     }
 }

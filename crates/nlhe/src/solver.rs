@@ -1,8 +1,8 @@
 use super::*;
-use rbp_core::{Utility, SUBGAME_ITERATIONS};
+use rbp_core::{SUBGAME_ITERATIONS, Utility};
 use rbp_gameplay::*;
-use rbp_mccfr::*;
 use rbp_mccfr::Posterior;
+use rbp_mccfr::*;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 

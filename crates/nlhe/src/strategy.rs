@@ -110,7 +110,11 @@ impl From<(NlheInfo, Vec<Decision<NlheEdge>>)> for Strategy {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        Self { info, accumulated, counts }
+        Self {
+            info,
+            accumulated,
+            counts,
+        }
     }
 }
 
@@ -131,7 +135,11 @@ impl TryFrom<ApiStrategy> for Strategy {
             .into_iter()
             .map(|(edge_str, count)| Edge::try_from(edge_str.as_str()).map(|edge| (edge, count)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        Ok(Self { info, accumulated, counts })
+        Ok(Self {
+            info,
+            accumulated,
+            counts,
+        })
     }
 }
 
@@ -144,7 +152,11 @@ mod tests {
         let accumulated = data.iter().map(|(a, p)| (Edge::from(*a), *p)).collect();
         let counts = data.iter().map(|(a, _)| (Edge::from(*a), 0u32)).collect();
         let info = NlheInfo::random();
-        Strategy { info, accumulated, counts }
+        Strategy {
+            info,
+            accumulated,
+            counts,
+        }
     }
     fn sums(s: &Strategy) -> Probability {
         s.policy().values().sum()

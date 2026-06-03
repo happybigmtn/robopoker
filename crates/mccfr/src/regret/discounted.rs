@@ -68,7 +68,10 @@ mod tests {
     /// accumulated regret is the immediate gain itself.
     #[test]
     fn discount_zero_at_epoch_zero() {
-        assert_eq!(DiscountedRegret::discount(0.0, DiscountedRegret::ALPHA), 0.0);
+        assert_eq!(
+            DiscountedRegret::discount(0.0, DiscountedRegret::ALPHA),
+            0.0
+        );
         assert_eq!(DiscountedRegret::discount(0.0, DiscountedRegret::BETA), 0.0);
         assert_eq!(DiscountedRegret::gain(0.0, 2.0, 0), 0.0);
     }
@@ -115,8 +118,14 @@ mod tests {
         // sanity: positive branch must use the larger α discount at the same T
         let g_pos = DiscountedRegret::gain(2.0, 4.0, 3);
         let expected_pos = (2.0 + 4.0) * d_alpha;
-        assert!((g_pos - expected_pos).abs() < 1e-5, "got {g_pos}, expected {expected_pos}");
-        assert!(g.abs() < g_pos.abs(), "β-discount must shrink negative regret more than α shrinks positive");
+        assert!(
+            (g_pos - expected_pos).abs() < 1e-5,
+            "got {g_pos}, expected {expected_pos}"
+        );
+        assert!(
+            g.abs() < g_pos.abs(),
+            "β-discount must shrink negative regret more than α shrinks positive"
+        );
     }
 
     /// The floor REGRET_MIN is a *lower* bound: a discounted regret may lift

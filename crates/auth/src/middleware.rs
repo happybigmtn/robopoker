@@ -1,10 +1,10 @@
 use super::*;
-use rbp_core::ID;
-use rbp_database::*;
 use actix_web::FromRequest;
 use actix_web::HttpRequest;
 use actix_web::dev::Payload;
 use actix_web::web;
+use rbp_core::ID;
+use rbp_database::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,13 +40,15 @@ impl FromRequest for Auth {
             .and_then(|h| h.to_str().ok())
             .map(|s| s.to_owned());
         Box::pin(async move {
-            let header = auth_header
-                .ok_or_else(|| actix_web::error::ErrorUnauthorized("missing authorization header"))?;
-            let token = header
-                .strip_prefix("Bearer ")
-                .ok_or_else(|| actix_web::error::ErrorUnauthorized("invalid authorization format"))?;
-            let service = token_service
-                .ok_or_else(|| actix_web::error::ErrorInternalServerError("token service not configured"))?;
+            let header = auth_header.ok_or_else(|| {
+                actix_web::error::ErrorUnauthorized("missing authorization header")
+            })?;
+            let token = header.strip_prefix("Bearer ").ok_or_else(|| {
+                actix_web::error::ErrorUnauthorized("invalid authorization format")
+            })?;
+            let service = token_service.ok_or_else(|| {
+                actix_web::error::ErrorInternalServerError("token service not configured")
+            })?;
             let claims = service
                 .decode(token)
                 .map_err(|_| actix_web::error::ErrorUnauthorized("invalid token"))?;

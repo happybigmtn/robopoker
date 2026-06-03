@@ -78,13 +78,32 @@ mod schema {
             )
         }
         fn copy() -> &'static str {
-            unimplemented!()
+            // Column order MUST match `columns()` above and the INSERT
+            // shape in `HistoryRepository::create_action`. Composite key
+            // (hand_id, seq) is preserved by the table PRIMARY KEY.
+            const_format::concatcp!(
+                "COPY ",
+                ACTIONS,
+                " (hand_id, seq, player_id, encoded) FROM STDIN BINARY"
+            )
         }
         fn truncates() -> &'static str {
-            unimplemented!()
+            const_format::concatcp!("TRUNCATE TABLE ", ACTIONS, ";")
         }
         fn freeze() -> &'static str {
-            unimplemented!()
+            // `actions` is append-only — the row is written once when
+            // the action occurs and never updated — so disabling
+            // autovacuum and packing to fillfactor=100 is the
+            // read-heavy tuning. ON-DELETE-CASCADE from `hands` is
+            // respected by the row writer, not by TRUNCATE.
+            const_format::concatcp!(
+                "ALTER TABLE ",
+                ACTIONS,
+                " SET (fillfactor = 100);
+                 ALTER TABLE ",
+                ACTIONS,
+                " SET (autovacuum_enabled = false);"
+            )
         }
     }
 }

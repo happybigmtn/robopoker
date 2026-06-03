@@ -755,7 +755,6 @@ impl Game {
     }
 }
 
-
 impl std::fmt::Display for Game {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         for seat in self.seats.iter() {

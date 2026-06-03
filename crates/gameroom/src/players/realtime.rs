@@ -1,11 +1,11 @@
 //! Subgame-solving player that refines blueprint at decision time.
-use rbp_gameplay::*;
 use crate::*;
+use rand::distr::weighted::WeightedIndex;
+use rand::prelude::*;
+use rbp_gameplay::*;
 use rbp_mccfr::*;
 use rbp_nlhe::*;
 use rbp_transport::Density;
-use rand::distr::weighted::WeightedIndex;
-use rand::prelude::*;
 
 /// Compute player using real-time subgame solving.
 ///

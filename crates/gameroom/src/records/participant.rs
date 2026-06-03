@@ -111,13 +111,35 @@ mod schema {
             )
         }
         fn copy() -> &'static str {
-            unimplemented!()
+            // Column order MUST match `columns()` above and the INSERT
+            // shape in `HistoryRepository::create_player`. Composite
+            // key (hand_id, seat) is preserved by the table PRIMARY KEY.
+            // `user_id` is nullable (anonymous seats); `showed`/`mucked`
+            // arrive as the participant's final state at flush time.
+            const_format::concatcp!(
+                "COPY ",
+                PLAYERS,
+                " (hand_id, user_id, seat, hole, stack, showed, mucked) FROM STDIN BINARY"
+            )
         }
         fn truncates() -> &'static str {
-            unimplemented!()
+            const_format::concatcp!("TRUNCATE TABLE ", PLAYERS, ";")
         }
         fn freeze() -> &'static str {
-            unimplemented!()
+            // `players` is mostly append-only — the only UPDATEs are
+            // `update_showed` / `update_mucked` toggling the two
+            // booleans at showdown — so the row layout is stable and
+            // fillfactor=100 + disabled autovacuum is still the right
+            // read-heavy tuning; the rare post-insert UPDATE is
+            // unaffected.
+            const_format::concatcp!(
+                "ALTER TABLE ",
+                PLAYERS,
+                " SET (fillfactor = 100);
+                 ALTER TABLE ",
+                PLAYERS,
+                " SET (autovacuum_enabled = false);"
+            )
         }
     }
 }
