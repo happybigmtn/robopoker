@@ -47,3 +47,47 @@ impl Player for DatabasePlayer {
         Self::sample(&game, policy)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Confirms the static-blueprint constructor path compiles and yields
+    /// a `DatabasePlayer` wrapping the same `Flagship` reference. This is
+    /// the always-available construction (no database required) that
+    /// `from_database` funnels into after `Flagship::hydrate` succeeds.
+    #[test]
+    fn new_wraps_blueprint() {
+        let blueprint: &'static Flagship = Box::leak(Box::new(Flagship::new(
+            NlheProfile::default(),
+            NlheEncoder::default(),
+        )));
+        let player = DatabasePlayer::new(blueprint);
+        assert!(std::ptr::eq(player.0, blueprint));
+    }
+
+    /// Compile-time check that the `database`-feature `from_database`
+    /// constructor exists with the expected async signature. This pins
+    /// the `rbp-nlhe/database` feature chain: if the `Hydrate` impl for
+    /// `Flagship` is ever removed, this test will stop compiling under
+    /// `--features database` and flag the regression.
+    #[cfg(feature = "database")]
+    #[test]
+    fn from_database_signature_is_stable() {
+        fn _assert_takes_arc_client(
+            _f: for<'a> fn(
+                std::sync::Arc<tokio_postgres::Client>,
+                &'a (),
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = DatabasePlayer> + Send + 'a>,
+            >,
+        ) {
+        }
+        let blueprint: &'static Flagship = Box::leak(Box::new(Flagship::new(
+            NlheProfile::default(),
+            NlheEncoder::default(),
+        )));
+        let _ = blueprint;
+        _assert_takes_arc_client(|c, _| Box::pin(DatabasePlayer::from_database(c)));
+    }
+}
