@@ -107,3 +107,86 @@ mod schema {
         }
     }
 }
+
+#[cfg(all(test, feature = "database"))]
+mod schema_tests {
+    //! Unit tests for the `Play` [`Schema`] contract.
+    //!
+    //! Pure-string guards on `copy` / `truncates` / `freeze` so a
+    //! refactor that drops a column, drops the table name, or breaks
+    //! the COPY column arity fails CI before it ever reaches a live
+    //! Postgres. No database connection required.
+    use super::Play;
+    use rbp_database::Schema;
+
+    #[test]
+    fn copy_targets_actions_table() {
+        let sql = Play::copy();
+        assert!(
+            sql.contains("actions"),
+            "copy() must reference the actions table; got: {sql}"
+        );
+        assert!(
+            sql.contains("FROM STDIN BINARY"),
+            "copy() must use the binary COPY protocol; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn copy_column_arity_matches_columns_helper() {
+        let sql = Play::copy();
+        let parens = sql.split_once('(').expect("copy() has a column list");
+        let header_cols: Vec<&str> = parens
+            .1
+            .split_once(')')
+            .expect("copy() has a closing paren")
+            .0
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            header_cols.len(),
+            Play::columns().len(),
+            "copy() column arity {} must match columns() arity {} (copy columns: {:?})",
+            header_cols.len(),
+            Play::columns().len(),
+            header_cols,
+        );
+    }
+
+    #[test]
+    fn truncates_clears_actions_table() {
+        let sql = Play::truncates();
+        assert!(
+            sql.contains("TRUNCATE TABLE"),
+            "truncates() must issue TRUNCATE TABLE; got: {sql}"
+        );
+        assert!(
+            sql.contains("actions"),
+            "truncates() must target the actions table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn freeze_sets_fillfactor_and_disables_autovacuum() {
+        let sql = Play::freeze();
+        assert!(
+            sql.contains("fillfactor"),
+            "freeze() must set fillfactor; got: {sql}"
+        );
+        assert!(
+            sql.contains("autovacuum_enabled"),
+            "freeze() must disable autovacuum; got: {sql}"
+        );
+        assert!(
+            sql.contains("actions"),
+            "freeze() must target the actions table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn name_matches_const_table_name() {
+        assert_eq!(Play::name(), rbp_database::ACTIONS);
+    }
+}

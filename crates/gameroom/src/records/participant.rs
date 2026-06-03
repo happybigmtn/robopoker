@@ -143,3 +143,86 @@ mod schema {
         }
     }
 }
+
+#[cfg(all(test, feature = "database"))]
+mod schema_tests {
+    //! Unit tests for the `Participant` [`Schema`] contract.
+    //!
+    //! Pure-string guards on `copy` / `truncates` / `freeze` so a
+    //! refactor that drops a column, drops the table name, or breaks
+    //! the COPY column arity fails CI before it ever reaches a live
+    //! Postgres. No database connection required.
+    use super::Participant;
+    use rbp_database::Schema;
+
+    #[test]
+    fn copy_targets_players_table() {
+        let sql = Participant::copy();
+        assert!(
+            sql.contains("players"),
+            "copy() must reference the players table; got: {sql}"
+        );
+        assert!(
+            sql.contains("FROM STDIN BINARY"),
+            "copy() must use the binary COPY protocol; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn copy_column_arity_matches_columns_helper() {
+        let sql = Participant::copy();
+        let parens = sql.split_once('(').expect("copy() has a column list");
+        let header_cols: Vec<&str> = parens
+            .1
+            .split_once(')')
+            .expect("copy() has a closing paren")
+            .0
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            header_cols.len(),
+            Participant::columns().len(),
+            "copy() column arity {} must match columns() arity {} (copy columns: {:?})",
+            header_cols.len(),
+            Participant::columns().len(),
+            header_cols,
+        );
+    }
+
+    #[test]
+    fn truncates_clears_players_table() {
+        let sql = Participant::truncates();
+        assert!(
+            sql.contains("TRUNCATE TABLE"),
+            "truncates() must issue TRUNCATE TABLE; got: {sql}"
+        );
+        assert!(
+            sql.contains("players"),
+            "truncates() must target the players table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn freeze_sets_fillfactor_and_disables_autovacuum() {
+        let sql = Participant::freeze();
+        assert!(
+            sql.contains("fillfactor"),
+            "freeze() must set fillfactor; got: {sql}"
+        );
+        assert!(
+            sql.contains("autovacuum_enabled"),
+            "freeze() must disable autovacuum; got: {sql}"
+        );
+        assert!(
+            sql.contains("players"),
+            "freeze() must target the players table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn name_matches_const_table_name() {
+        assert_eq!(Participant::name(), rbp_database::PLAYERS);
+    }
+}

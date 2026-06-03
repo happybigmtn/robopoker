@@ -112,3 +112,90 @@ mod schema {
         }
     }
 }
+
+#[cfg(all(test, feature = "database"))]
+mod schema_tests {
+    //! Unit tests for the `Hand` [`Schema`] contract.
+    //!
+    //! These tests guard the `copy` / `truncates` / `freeze` SQL
+    //! strings so a refactor that drops a column, drops the table
+    //! name, or breaks the COPY column arity fails CI before it ever
+    //! reaches a live Postgres. They are pure string checks — no
+    //! database connection required.
+    use super::Hand;
+    use rbp_database::Schema;
+
+    #[test]
+    fn copy_targets_hand_table() {
+        let sql = Hand::copy();
+        assert!(
+            sql.contains("hands"),
+            "copy() must reference the hands table; got: {sql}"
+        );
+        assert!(
+            sql.contains("FROM STDIN BINARY"),
+            "copy() must use the binary COPY protocol; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn copy_column_arity_matches_columns_helper() {
+        // The columns listed in the COPY header must match the
+        // `columns()` arity byte-for-byte, otherwise the binary
+        // stream rows would silently desync from the server.
+        let sql = Hand::copy();
+        let parens = sql.split_once('(').expect("copy() has a column list");
+        let header_cols: Vec<&str> = parens
+            .1
+            .split_once(')')
+            .expect("copy() has a closing paren")
+            .0
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            header_cols.len(),
+            Hand::columns().len(),
+            "copy() column arity {} must match columns() arity {} (copy columns: {:?})",
+            header_cols.len(),
+            Hand::columns().len(),
+            header_cols,
+        );
+    }
+
+    #[test]
+    fn truncates_clears_hand_table() {
+        let sql = Hand::truncates();
+        assert!(
+            sql.contains("TRUNCATE TABLE"),
+            "truncates() must issue TRUNCATE TABLE; got: {sql}"
+        );
+        assert!(
+            sql.contains("hands"),
+            "truncates() must target the hands table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn freeze_sets_fillfactor_and_disables_autovacuum() {
+        let sql = Hand::freeze();
+        assert!(
+            sql.contains("fillfactor"),
+            "freeze() must set fillfactor; got: {sql}"
+        );
+        assert!(
+            sql.contains("autovacuum_enabled"),
+            "freeze() must disable autovacuum; got: {sql}"
+        );
+        assert!(
+            sql.contains("hands"),
+            "freeze() must target the hands table; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn name_matches_const_table_name() {
+        assert_eq!(Hand::name(), rbp_database::HANDS);
+    }
+}
