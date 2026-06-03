@@ -1,0 +1,29 @@
+# robopoker — CEO Testnet Roadmap (CEO-SIGNED 2026-06-03)
+Testnet north star: A public, reproducible NLHE benchmark where a trained robopoker blueprint bot beats a named baseline head-to-head, with every match downloadable as a replayable, signed transcript.
+signed_off: true  (CEO sign-off 2026-06-03)
+
+## Goals (sequenced now -> testnet)
+- [medium] Produce a real, reproducible blueprint artifact — the GTO bot has to exist before it can compete.
+  - proof: `trainer --cluster` then `trainer --fast` produces a non-empty blueprint in Postgres on a documented small-abstraction config; `trainer --status` reports trained epochs + row counts.
+  - proof: `DatabasePlayer::from_database` hydrates that blueprint and plays a full hand vs `Fish` without panicking (exercises the just-landed `Flagship::hydrate` end-to-end).
+- [medium] Make hand histories durable and replayable — a benchmark is only credible if every hand can be re-derived.
+  - proof: the `unimplemented!()` `Schema` contracts in `records/{hand,play,participant}.rs` are implemented; a played hand round-trips DB write -> `Replay` read -> identical action sequence.
+  - proof: a committed integration test plays N hands through `Room` and asserts persisted transcripts replay deterministically.
+- [long] Public reproducible benchmark surface — the externally-verifiable testnet milestone.
+  - proof: a `bench` harness runs blueprint-bot vs a named baseline over K hands (mirrored duplicate dealing), emits mbb/100 with a confidence interval, and writes a transcript bundle anyone can replay from the README.
+  - proof: harden auth (STW-004) so the WebSocket play surface can be exposed; a remote client connects via `/room/enter` and plays the hosted bot.
+
+## Immediate P0 — testnet proof points (dispatch now)
+- [ ] [P0] Implement the `Schema` (copy/columns/indices/freeze) contracts that currently `unimplemented!()` in `crates/gameroom/src/records/{hand,play,participant}.rs` so completed hands persist to Postgres instead of panicking on flush.
+- [ ] [P0] Add an end-to-end test in `crates/gameroom` that plays a full hand through `Room` with two `Fish` players, flushes to a real (or test-harnessed) DB, then loads it back via `Replay` and asserts the action sequence and stacks round-trip identically.
+- [ ] [P0] Implement a `trainer` smoke path: a small-abstraction `--fast` config (env-gated, e.g. reduced k / iterations) that clusters + trains to a checkpointed non-empty blueprint, with `--status` reporting trained epochs and blueprint row count.
+- [ ] [P0] Build a `bin/bench` (or `trainer --bench`) head-to-head harness: deal K mirrored/duplicate hands, seat `DatabasePlayer` (blueprint) vs `Fish`, accumulate net chips, and print mbb/100 with a sample-size-based confidence interval plus a JSON result line.
+- [ ] [P0] Land STW-004 auth hardening: make `Crypto::from_env` reject an empty/missing `JWT_SECRET`, bind the stored session-token hash to middleware verification, and add positive/negative request tests (login/me, missing-secret, invalid/revoked/mismatched token).
+
+## Lens verdicts
+CEO: Testnet is the right north star but for an engine repo it means a public reproducible benchmark, not a chain deploy. robopoker's highest ecosystem leverage is being the proof that "trained strategy is real and replayable" — the same claim myosu and poker-arena depend on. The blueprint-exists + transcript-replays + beats-baseline trio de-risks the whole game-solving thesis; prioritize it over the live WebSocket casino, which is downstream.
+Design: A credible engine testnet demo MUST show artifacts a stranger can re-run: a trained blueprint, a head-to-head result with a confidence interval, and downloadable transcripts that replay bit-for-bit. Today the only opponent is `Fish` (random) and hand histories panic on persist, so there is nothing to show or replay. The receipts gap, not the UI, is the blocker.
+Eng: The hardest blocker (`Flagship::hydrate`, STW-003) just landed, unblocking the DB-backed bot path. The remaining critical path is concrete and bounded: implement the panicking `Schema` record contracts, add a reproducible small-scale train, and write the benchmark harness. No new chain or transport integration is required for the engine testnet milestone — it is all within the existing crates.
+
+## Sequencing & risks
+The lenses agree the milestone is a reproducible benchmark with replayable transcripts, and disagree only on emphasis: Design wants receipts first, CEO wants the strategic proof trio, Eng wants the compile/persist path solid. These reconcile into one ordering — persistence (records Schema) and reproducible training first, because the benchmark and transcripts depend on both; auth hardening runs in parallel since it gates only the optional live WebSocket surface and has no dependency on training. Key risks: (1) full Pluribus-scale abstractions are 3GB+ and slow, so the P0 train MUST be a small env-gated config or the benchmark never runs in CI/worker time — "reproducible small bot beats random" is the honest first milestone, with full-scale parity a later goal. (2) "named baseline" is currently only `Fish`; beating random is necessary but weak, so frame v1 as "blueprint beats random with significance" and treat a stronger named baseline (e.g. a rule-based or a second trained config) as the next slice. (3) hand-history determinism depends on capturing the dealt deck/seed in `Replay`; the round-trip test must pin that or transcripts won't replay.
