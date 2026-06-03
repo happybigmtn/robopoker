@@ -21,9 +21,26 @@ pub trait Trainer: Send + Sync + Sized {
 
     async fn train(mut self) {
         log::info!("training blueprint");
-        log::info!("press 'Q + ↵' to stop gracefully");
+        // The `RBP_FAST_EPOCHS` smoke knob caps the loop to a fixed
+        // number of steps. When unset (the production default), the
+        // loop runs until the graceful `interrupted()` signal fires
+        // (Ctrl+C, `Q` from stdin, or `TRAIN_DURATION` deadline).
+        let budget = rbp_core::fast_epochs();
+        if let Some(n) = budget {
+            log::info!("smoke budget: {n} epoch(s) (RBP_FAST_EPOCHS)");
+        } else {
+            log::info!("press 'Q + ↵' to stop gracefully");
+        }
+        let mut taken: usize = 0;
         loop {
+            if let Some(n) = budget
+                && taken >= n
+            {
+                log::info!("smoke budget exhausted after {taken} epoch(s)");
+                break;
+            }
             self.step().await;
+            taken += 1;
             self.checkpoint().await.map(|s| log::info!("{}", s));
             if rbp_core::interrupted() {
                 log::info!("{}", self.summary().await);

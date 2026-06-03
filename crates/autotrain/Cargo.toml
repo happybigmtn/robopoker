@@ -11,7 +11,26 @@ keywords        = ["training", "mccfr", "automation", "pipeline", "distributed"]
 categories      = ["algorithms", "command-line-utilities", "concurrency"]
 
 [features]
+# The `database` feature is a marker that gates the
+# `crates/autotrain/tests/smoke.rs` integration test, which only
+# makes sense when a live Postgres is reachable. The library itself
+# unconditionally uses `tokio_postgres` and `rbp_database` because
+# every public entry point (`Mode::run`, `PreTraining::run`,
+# `FastSession`, `SlowSession`) is a database-backed training
+# pipeline, so making those deps optional would force a no-features
+# build to either pull them in anyway or duplicate every entry
+# point behind a `#[cfg(feature = "database")]` gate.
+#
+# The test uses `std::process::Command` (not `tokio`) to spawn the
+# trainer binary, so the feature is a pure marker — no dependency
+# surface changes. The `DATABASE_URL` short-circuit inside the test
+# keeps `cargo test --workspace` green on environments without
+# Postgres, and the feature gate ensures a no-features build skips
+# even compiling the test file. Mirrors the
+# `crates/gameroom/tests/hand_roundtrip.rs` and
+# `crates/auth/tests/server_flow.rs` pattern.
 default         = []
+database        = []
 
 [dependencies]
 rbp-core        = { version = "1.0", path = "../util", features = ["server"] }

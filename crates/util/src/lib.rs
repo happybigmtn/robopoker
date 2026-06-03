@@ -255,6 +255,30 @@ pub const SUBGAME_ITERATIONS: usize = 1024;
 /// Interval between progress log messages during training.
 pub const TRAINING_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Read the optional `RBP_FAST_EPOCHS` smoke knob.
+///
+/// Returns `Some(n)` when the env var is set to a positive integer;
+/// returns `None` otherwise (including when it is set to `0`, an
+/// empty string, or a non-numeric value — those are treated as
+/// "unset" so the production infinite loop stays the default).
+///
+/// The env var is read at the top of every `Trainer::train` call so
+/// a worker can flip it without restarting the binary, but the
+/// typical pattern is to set it before launch.
+pub fn fast_epochs() -> Option<usize> {
+    let raw = std::env::var("RBP_FAST_EPOCHS").ok()?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// Read the optional `RBP_FAST_BATCH` smoke knob. Same semantics as
+/// [`fast_epochs`]: `Some(n)` only when the env var is a positive
+/// integer, `None` otherwise. The default 1000 is returned from the
+/// `NlheSolver::batch_size` impl when this returns `None`.
+pub fn fast_batch() -> Option<usize> {
+    let raw = std::env::var("RBP_FAST_BATCH").ok()?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
 // ============================================================================
 // REGRET INITIALIZATION BIAS
 // Weights (not probabilities) for initial regret seeding. Only ratios matter.

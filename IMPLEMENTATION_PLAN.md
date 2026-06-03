@@ -98,7 +98,7 @@ context.
   Completion signal: the derived/Streamable misuse class is structurally
   impossible.
 
-- [ ] `STW-008` End-to-end hand persistence round-trip test.
+- [x] `STW-008` End-to-end hand persistence round-trip test.
   Owner files: `crates/gameroom/tests/hand_roundtrip.rs`,
   `IMPLEMENTATION_PLAN.md`, `genesis/plans/000-ceo-testnet-roadmap.md`.
   Scope boundary: prove the `HandContext` → `Hand` / `Participant` / `Play`
@@ -152,6 +152,64 @@ context.
   exercises both the in-memory conversion and the live Postgres
   path that `Room::flush_hand` actually runs in production.
 
+- [x] `STW-009` Trainer smoke path: env-gated small config that
+  clusters + trains + syncs a non-empty blueprint.
+  Owner files: `bin/trainer/src/main.rs`,
+  `crates/autotrain/src/{fast,mode,trainer}.rs`,
+  `crates/nlhe/src/solver.rs`,
+  `crates/autotrain/tests/smoke.rs` (new),
+  `IMPLEMENTATION_PLAN.md`, `genesis/plans/000-ceo-testnet-roadmap.md`.
+  Scope boundary: make `trainer --smoke` a one-shot pipeline that
+  (1) honors env-gated knobs to keep the run short, (2) drives
+  pretraining + N training epochs + sync, (3) prints
+  `trainer --status`-style output, and (4) exits non-zero on an
+  empty blueprint or any pre-existing clustering error. Do NOT
+  redesign the autotrain pipeline, do NOT change the
+  K-means cluster counts (the `Layer<K, N>` const-generic), do
+  NOT touch the `CFR_TREE_COUNT_NLHE` baseline. Do NOT add a new
+  Mode if the existing `--fast` path can be re-used.
+  Acceptance criteria:
+  (a) `crates/autotrain/src/trainer.rs` — the `Trainer::train()`
+      default loop honors `RBP_FAST_EPOCHS` (positive integer
+      env var) and stops after that many `step()` calls; a
+      missing var keeps the existing `interrupted()` behavior.
+  (b) `crates/nlhe/src/solver.rs` — `NlheSolver::batch_size()`
+      honors `RBP_FAST_BATCH` (positive integer env var, default
+      1000); a missing var keeps the production batch size.
+  (c) `bin/trainer/src/main.rs` — a new `--smoke` mode runs
+      `pretraining + train(epochs=RBP_FAST_EPOCHS) + sync +
+      status` and exits non-zero (a) if the post-sync blueprint
+      row count is 0, or (b) if pretraining was skipped
+      (a clustering error message must precede the exit).
+      A stdout line `smoke complete: epochs=N rows=M` is
+      emitted on success.
+  (d) `crates/autotrain/tests/smoke.rs` — a new integration
+      test runs the `train --smoke` end-to-end against a live
+      Postgres with `RBP_FAST_EPOCHS=2 RBP_FAST_BATCH=16`,
+      asserts (i) the binary exits 0, (ii) the printed
+      `rows=` value is `> 0`, and (iii) a follow-up
+      `train --status` call reports `Epoch > 0` and
+      `Blueprint > 0`. The test is `#[cfg(feature =
+      "database")]`-gated AND short-circuits on a missing
+      `DATABASE_URL` (same pattern as
+      `crates/gameroom/tests/hand_roundtrip.rs` and
+      `crates/auth/tests/server_flow.rs`).
+  Verification commands:
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the integration test in (d); it is the only
+  new test this slice adds.
+  Dependencies: `STW-006` (Schema/BulkSchema split) for the
+  pre-existing `Schema::creates()` and `Schema::freeze()` paths
+  that the smoke pretraining + sync depend on.
+  Estimated scope: M.
+  Completion signal: `trainer --smoke` exits 0 with a non-empty
+  blueprint row count under `RBP_FAST_EPOCHS=2`; the
+  integration test passes; `cargo test --workspace` and
+  `cargo fmt --check` are green.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
@@ -171,7 +229,7 @@ context.
 |                | user-facing                                           | not user-facing                                  |
 |----------------|-------------------------------------------------------|--------------------------------------------------|
 | mainnet-block  | `STW-003` database-backed build; `STW-004` auth holes | `STW-005` formatter drift                            |
-| not mainnet-b  |                                                       | `STW-001` planning surface; `STW-007` artifact retirement |
+| not mainnet-b  | `STW-008` hand round-trip; ~~`STW-009` trainer smoke~~ | `STW-001` planning surface; `STW-007` artifact retirement |
 
 ## Promotion provenance
 

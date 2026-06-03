@@ -132,7 +132,13 @@ where
         CFR_TREE_COUNT_NLHE
     }
     fn batch_size() -> usize {
-        CFR_BATCH_SIZE_NLHE
+        // The `RBP_FAST_BATCH` smoke knob lets a worker shrink the
+        // per-epoch batch size without recompiling. The env var is
+        // read at every call to keep the knob decoupled from the
+        // `Solver` trait (which requires an associated `usize`),
+        // and falls back to the production 1000 when unset so the
+        // production `train` loop is unchanged in behavior.
+        rbp_core::fast_batch().unwrap_or(CFR_BATCH_SIZE_NLHE)
     }
     fn advance(&mut self) {
         self.profile.increment();

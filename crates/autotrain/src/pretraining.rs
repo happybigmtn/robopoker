@@ -9,8 +9,11 @@ use rbp_cards::*;
 use rbp_clustering::*;
 use rbp_database::*;
 use rbp_gameplay::*;
+use rbp_nlhe::NlheProfile;
 use std::sync::Arc;
 use tokio_postgres::Client;
+
+use crate::EpochMeta;
 
 type PrefLayer = Layer<{ Street::Pref.k() }, { Street::Pref.n_isomorphisms() }>;
 type FlopLayer = Layer<{ Street::Flop.k() }, { Street::Flop.n_isomorphisms() }>;
@@ -34,11 +37,55 @@ impl PreTraining {
         }
         Self::derive::<Abstraction>(client).await;
         Self::derive::<Street>(client).await;
+        // The blueprint and epoch tables are created lazily by
+        // the `Schema::creates()` DDL on first use. A fresh
+        // operator environment (or a CI worker that just stood
+        // up Postgres) lands here with neither table present, so
+        // the very first `trainer --fast` / `--smoke` call would
+        // panic on `truncate blueprint` (in `--reset`) or on
+        // `CREATE UNLOGGED TABLE staging (LIKE blueprint)` (in
+        // `Stage::stage`). Bootstrapping the tables here keeps
+        // the `--reset` / `--smoke` paths idempotent without
+        // forcing the operator to run a separate `init.sql`
+        // script before the first training run.
+        Self::ensure::<NlheProfile>(client).await;
+        Self::ensure::<EpochMeta>(client).await;
         log::info!("{:<32}{:<32}", "vacuum analyze", "all tables");
         client
             .batch_execute("VACUUM ANALYZE;")
             .await
             .expect("vacuum analyze");
+    }
+
+    /// Idempotently create a [`Schema`]'s table. The same DDL
+    /// is exposed by [`Streamable::finalize`] for the clustering
+    /// tables, but `finalize` also rebuilds indices and applies
+    /// the `freeze` settings — those are unnecessary on a
+    /// never-populated blueprint/epoch table and would just
+    /// churn the catalog. This helper runs `creates()` (which is
+    /// `CREATE TABLE IF NOT EXISTS`) and leaves the rest of the
+    /// lifecycle to the train loop.
+    async fn ensure<S>(client: &Arc<Client>)
+    where
+        S: Schema,
+    {
+        let absent = client
+            .query(
+                &format!(
+                    "SELECT 1 FROM information_schema.tables WHERE table_name = '{}'",
+                    S::name()
+                ),
+                &[],
+            )
+            .await
+            .map(|rows| rows.is_empty())
+            .unwrap_or(true);
+        if absent {
+            log::info!("{:<32}{:<32}", "creating table", S::name());
+            client.batch_execute(S::creates()).await.expect("creates");
+        } else {
+            log::info!("{:<32}{:<32}", "table already exists", S::name());
+        }
     }
 
     /// Cluster a street via k-means. Dependencies loaded from postgres.
