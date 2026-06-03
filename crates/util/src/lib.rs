@@ -341,13 +341,13 @@ pub fn brb() {
     }
     std::thread::spawn(|| {
         loop {
-            let ref mut buffer = String::new();
-            if let Ok(_) = std::io::stdin().read_line(buffer) {
-                if buffer.trim().to_uppercase() == "Q" {
-                    log::warn!("graceful interrupt requested, finishing current batch...");
-                    INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
+            let mut buffer = String::new();
+            if std::io::stdin().read_line(&mut buffer).is_ok()
+                && buffer.trim().to_uppercase() == "Q"
+            {
+                log::warn!("graceful interrupt requested, finishing current batch...");
+                INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                break;
             }
         }
     });
