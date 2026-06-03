@@ -157,12 +157,6 @@ impl rbp_database::Schema for Metric {
     fn name() -> &'static str {
         rbp_database::METRIC
     }
-    fn columns() -> &'static [tokio_postgres::types::Type] {
-        &[
-            tokio_postgres::types::Type::INT4,   // tri (triangular index)
-            tokio_postgres::types::Type::FLOAT4, // dx (distance)
-        ]
-    }
     fn creates() -> &'static str {
         const_format::concatcp!(
             "CREATE TABLE IF NOT EXISTS ",
@@ -184,13 +178,6 @@ impl rbp_database::Schema for Metric {
             " (street);"
         )
     }
-    fn copy() -> &'static str {
-        const_format::concatcp!(
-            "COPY ",
-            rbp_database::METRIC,
-            " (tri, dx) FROM STDIN BINARY"
-        )
-    }
     fn truncates() -> &'static str {
         const_format::concatcp!("TRUNCATE TABLE ", rbp_database::METRIC, ";")
     }
@@ -202,6 +189,23 @@ impl rbp_database::Schema for Metric {
              ALTER TABLE ",
             rbp_database::METRIC,
             " SET (autovacuum_enabled = false);"
+        )
+    }
+}
+
+#[cfg(feature = "database")]
+impl rbp_database::BulkSchema for Metric {
+    fn columns() -> &'static [tokio_postgres::types::Type] {
+        &[
+            tokio_postgres::types::Type::INT4,   // tri (triangular index)
+            tokio_postgres::types::Type::FLOAT4, // dx (distance)
+        ]
+    }
+    fn copy() -> &'static str {
+        const_format::concatcp!(
+            "COPY ",
+            rbp_database::METRIC,
+            " (tri, dx) FROM STDIN BINARY"
         )
     }
 }

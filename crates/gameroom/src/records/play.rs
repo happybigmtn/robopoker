@@ -45,14 +45,6 @@ mod schema {
         fn name() -> &'static str {
             ACTIONS
         }
-        fn columns() -> &'static [tokio_postgres::types::Type] {
-            &[
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::INT2,
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::INT4,
-            ]
-        }
         fn creates() -> &'static str {
             const_format::concatcp!(
                 "CREATE TABLE IF NOT EXISTS ",
@@ -77,16 +69,6 @@ mod schema {
                 " (player_id);"
             )
         }
-        fn copy() -> &'static str {
-            // Column order MUST match `columns()` above and the INSERT
-            // shape in `HistoryRepository::create_action`. Composite key
-            // (hand_id, seq) is preserved by the table PRIMARY KEY.
-            const_format::concatcp!(
-                "COPY ",
-                ACTIONS,
-                " (hand_id, seq, player_id, encoded) FROM STDIN BINARY"
-            )
-        }
         fn truncates() -> &'static str {
             const_format::concatcp!("TRUNCATE TABLE ", ACTIONS, ";")
         }
@@ -106,6 +88,27 @@ mod schema {
             )
         }
     }
+
+    impl BulkSchema for Play {
+        fn columns() -> &'static [tokio_postgres::types::Type] {
+            &[
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::INT2,
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::INT4,
+            ]
+        }
+        fn copy() -> &'static str {
+            // Column order MUST match `columns()` above and the INSERT
+            // shape in `HistoryRepository::create_action`. Composite key
+            // (hand_id, seq) is preserved by the table PRIMARY KEY.
+            const_format::concatcp!(
+                "COPY ",
+                ACTIONS,
+                " (hand_id, seq, player_id, encoded) FROM STDIN BINARY"
+            )
+        }
+    }
 }
 
 #[cfg(all(test, feature = "database"))]
@@ -117,7 +120,7 @@ mod schema_tests {
     //! the COPY column arity fails CI before it ever reaches a live
     //! Postgres. No database connection required.
     use super::Play;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_actions_table() {

@@ -88,25 +88,6 @@ impl rbp_database::Schema for NlheProfile {
     fn name() -> &'static str {
         rbp_database::BLUEPRINT
     }
-    fn columns() -> &'static [tokio_postgres::types::Type] {
-        &[
-            tokio_postgres::types::Type::INT8,   // past (subgame path)
-            tokio_postgres::types::Type::INT2,   // present (abstraction bucket)
-            tokio_postgres::types::Type::INT8,   // choices (available edges)
-            tokio_postgres::types::Type::INT8,   // edge (action taken)
-            tokio_postgres::types::Type::FLOAT4, // weight
-            tokio_postgres::types::Type::FLOAT4, // regret
-            tokio_postgres::types::Type::FLOAT4, // evalue
-            tokio_postgres::types::Type::INT4,   // counts
-        ]
-    }
-    fn copy() -> &'static str {
-        const_format::concatcp!(
-            "COPY ",
-            rbp_database::BLUEPRINT,
-            " (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
-        )
-    }
     fn creates() -> &'static str {
         const_format::concatcp!(
             "CREATE TABLE IF NOT EXISTS ",
@@ -154,6 +135,29 @@ impl rbp_database::Schema for NlheProfile {
             ALTER TABLE ",
             rbp_database::BLUEPRINT,
             " SET (autovacuum_enabled = false);"
+        )
+    }
+}
+
+#[cfg(feature = "database")]
+impl rbp_database::BulkSchema for NlheProfile {
+    fn columns() -> &'static [tokio_postgres::types::Type] {
+        &[
+            tokio_postgres::types::Type::INT8,   // past (subgame path)
+            tokio_postgres::types::Type::INT2,   // present (abstraction bucket)
+            tokio_postgres::types::Type::INT8,   // choices (available edges)
+            tokio_postgres::types::Type::INT8,   // edge (action taken)
+            tokio_postgres::types::Type::FLOAT4, // weight
+            tokio_postgres::types::Type::FLOAT4, // regret
+            tokio_postgres::types::Type::FLOAT4, // evalue
+            tokio_postgres::types::Type::INT4,   // counts
+        ]
+    }
+    fn copy() -> &'static str {
+        const_format::concatcp!(
+            "COPY ",
+            rbp_database::BLUEPRINT,
+            " (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
         )
     }
 }

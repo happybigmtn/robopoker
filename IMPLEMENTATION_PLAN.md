@@ -53,7 +53,7 @@ context.
   Completion signal: `rbp-auth --features server` has meaningful passing tests and no
   empty-secret fallback remains.
 
-- [ ] `STW-005` Restore workspace formatter gate.
+- [x] `STW-005` Restore workspace formatter gate.
   Owner files: every file reported by `cargo fmt --check` (auth, autotrain, cards,
   gameplay, gameroom, mccfr, nlhe, rbp, server).
   Scope boundary: run `cargo fmt` and commit only mechanical formatting changes; no
@@ -67,6 +67,37 @@ context.
   Estimated scope: S.
   Completion signal: formatter gate is green and the diff is purely mechanical.
 
+- [x] `STW-006` Classify and fix schema panic contracts.
+  Owner files: `crates/autotrain/src/epoch.rs`, `crates/auth/src/member.rs`,
+  `crates/auth/src/session.rs`, `crates/gameroom/src/room.rs`,
+  `crates/gameroom/src/records/*.rs`, `crates/clustering/src/{future,lookup,metric}.rs`,
+  `crates/database/src/{traits,schema}.rs`, `crates/nlhe/src/profile.rs`.
+  Resolution: the historical `unimplemented!()` bodies on `Schema::copy` /
+  `Schema::columns` for derived types (`Street`, `Abstraction`) were never
+  meaningful — those tables are populated by `INSERT`, not binary `COPY`.
+  The structural fix splits `Schema` (DDL-only) into `Schema` + `BulkSchema`
+  (DDL + binary-COPY), and tightens the `Streamable` bound to `BulkSchema +
+  Sized + Send` so a misuse that hands a derived type to `Streamable::stream`
+  is now a compile-time error, not a runtime panic. Every implementor
+  (`Room`, `Member`, `Session`, `Hand`, `Play`, `Participant`, `EpochMeta`,
+  `Future`, `Lookup`, `Metric`, `NlheProfile`) now provides real `copy` /
+  `columns` bodies on its `BulkSchema` impl, and the `Schema` DDL
+  methods (`name`, `creates`, `indices`, `truncates`, `freeze`) are kept
+  on every persisted table.
+  Acceptance criteria: `cargo check --workspace`,
+  `cargo check -p rbp-clustering --features database`,
+  `cargo check -p rbp-gameroom --features database`,
+  `cargo check -p rbp-auth --features server,database`,
+  `cargo check -p rbp --features database`, `cargo test --workspace`,
+  `cargo fmt --check` all pass; no `unimplemented!()` body remains on any
+  `Schema` or `BulkSchema` method for a derived or persisted table.
+  Verification commands: same as above.
+  Required tests: existing workspace tests (now 384 passing).
+  Dependencies: none.
+  Estimated scope: M.
+  Completion signal: the derived/Streamable misuse class is structurally
+  impossible.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
@@ -74,16 +105,6 @@ context.
   Blocker: `auto corpus` cannot run because `gbrain` is not configured in the
   operator environment (probe exits 1 with "No brain configured"). Operator must
   either init `gbrain` or hand-author a queue before this becomes claimable.
-
-- [!] `STW-006` Classify and fix schema panic contracts.
-  Owner files: `crates/autotrain/src/epoch.rs`, `crates/auth/src/member.rs`,
-  `crates/auth/src/session.rs`, `crates/gameroom/src/room.rs`,
-  `crates/gameroom/src/records/*.rs`, `crates/database/src/traits.rs`.
-  Blocker: operator must decide whether the `Schema::copy` / `Schema::columns` /
-  `Schema::indices` / `Schema::freeze` panics represent intentional unsupported
-  derived-table operations or missing production implementations. Each one
-  affects autotrain resumability, room/hand-history persistence safety, and
-  database maintenance command safety.
 
 - [!] `STW-007` Retire stale generated/local artifacts.
   Owner files: `.auto/corpus-staging/`, `.auto/logs/steward-*-prompt.md`,
@@ -95,7 +116,7 @@ context.
 
 |                | user-facing                                           | not user-facing                                  |
 |----------------|-------------------------------------------------------|--------------------------------------------------|
-| mainnet-block  | `STW-003` database-backed build; `STW-004` auth holes | `STW-005` formatter drift; `STW-006` schema panics |
+| mainnet-block  | `STW-003` database-backed build; `STW-004` auth holes | `STW-005` formatter drift                            |
 | not mainnet-b  |                                                       | `STW-001` planning surface; `STW-007` artifact retirement |
 
 ## Promotion provenance

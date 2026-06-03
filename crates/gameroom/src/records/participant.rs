@@ -72,17 +72,6 @@ mod schema {
         fn name() -> &'static str {
             PLAYERS
         }
-        fn columns() -> &'static [tokio_postgres::types::Type] {
-            &[
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::INT2,
-                tokio_postgres::types::Type::INT8,
-                tokio_postgres::types::Type::INT2,
-                tokio_postgres::types::Type::BOOL,
-                tokio_postgres::types::Type::BOOL,
-            ]
-        }
         fn creates() -> &'static str {
             const_format::concatcp!(
                 "CREATE TABLE IF NOT EXISTS ",
@@ -110,18 +99,6 @@ mod schema {
                 " (user_id);"
             )
         }
-        fn copy() -> &'static str {
-            // Column order MUST match `columns()` above and the INSERT
-            // shape in `HistoryRepository::create_player`. Composite
-            // key (hand_id, seat) is preserved by the table PRIMARY KEY.
-            // `user_id` is nullable (anonymous seats); `showed`/`mucked`
-            // arrive as the participant's final state at flush time.
-            const_format::concatcp!(
-                "COPY ",
-                PLAYERS,
-                " (hand_id, user_id, seat, hole, stack, showed, mucked) FROM STDIN BINARY"
-            )
-        }
         fn truncates() -> &'static str {
             const_format::concatcp!("TRUNCATE TABLE ", PLAYERS, ";")
         }
@@ -142,6 +119,32 @@ mod schema {
             )
         }
     }
+
+    impl BulkSchema for Participant {
+        fn columns() -> &'static [tokio_postgres::types::Type] {
+            &[
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::INT2,
+                tokio_postgres::types::Type::INT8,
+                tokio_postgres::types::Type::INT2,
+                tokio_postgres::types::Type::BOOL,
+                tokio_postgres::types::Type::BOOL,
+            ]
+        }
+        fn copy() -> &'static str {
+            // Column order MUST match `columns()` above and the INSERT
+            // shape in `HistoryRepository::create_player`. Composite
+            // key (hand_id, seat) is preserved by the table PRIMARY KEY.
+            // `user_id` is nullable (anonymous seats); `showed`/`mucked`
+            // arrive as the participant's final state at flush time.
+            const_format::concatcp!(
+                "COPY ",
+                PLAYERS,
+                " (hand_id, user_id, seat, hole, stack, showed, mucked) FROM STDIN BINARY"
+            )
+        }
+    }
 }
 
 #[cfg(all(test, feature = "database"))]
@@ -153,7 +156,7 @@ mod schema_tests {
     //! the COPY column arity fails CI before it ever reaches a live
     //! Postgres. No database connection required.
     use super::Participant;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_players_table() {

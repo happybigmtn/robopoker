@@ -51,15 +51,6 @@ mod schema {
         fn name() -> &'static str {
             HANDS
         }
-        fn columns() -> &'static [tokio_postgres::types::Type] {
-            &[
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::INT8,
-                tokio_postgres::types::Type::INT2,
-                tokio_postgres::types::Type::INT2,
-            ]
-        }
         fn creates() -> &'static str {
             const_format::concatcp!(
                 "CREATE TABLE IF NOT EXISTS ",
@@ -80,13 +71,6 @@ mod schema {
                 "CREATE INDEX IF NOT EXISTS idx_hands_room ON ",
                 HANDS,
                 " (room_id);"
-            )
-        }
-        fn copy() -> &'static str {
-            const_format::concatcp!(
-                "COPY ",
-                HANDS,
-                " (id, room_id, board, pot, dealer) FROM STDIN BINARY"
             )
         }
         fn truncates() -> &'static str {
@@ -111,6 +95,25 @@ mod schema {
             )
         }
     }
+
+    impl BulkSchema for Hand {
+        fn columns() -> &'static [tokio_postgres::types::Type] {
+            &[
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::INT8,
+                tokio_postgres::types::Type::INT2,
+                tokio_postgres::types::Type::INT2,
+            ]
+        }
+        fn copy() -> &'static str {
+            const_format::concatcp!(
+                "COPY ",
+                HANDS,
+                " (id, room_id, board, pot, dealer) FROM STDIN BINARY"
+            )
+        }
+    }
 }
 
 #[cfg(all(test, feature = "database"))]
@@ -123,7 +126,7 @@ mod schema_tests {
     //! reaches a live Postgres. They are pure string checks — no
     //! database connection required.
     use super::Hand;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_hand_table() {

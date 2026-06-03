@@ -37,20 +37,6 @@ impl rbp_database::Schema for EpochMeta {
         // so no additional indices are required.
         ""
     }
-    fn copy() -> &'static str {
-        // Column order MUST match `columns()` below. `epoch` has no
-        // `Streamable` impl — the single row is upserted at table
-        // creation time and updated by `Mode::reset` — so this
-        // statement is not actually executed today. We still emit a
-        // well-formed `COPY` header so the trait compiles and a
-        // future `Streamable` impl (e.g. for checkpoint metadata
-        // import) can use it without panic.
-        const_format::concatcp!(
-            "COPY ",
-            rbp_database::EPOCH,
-            " (key, value) FROM STDIN BINARY"
-        )
-    }
     fn truncates() -> &'static str {
         // The "truncate" semantic for the epoch counter is to reset
         // the `'current'` value to 0 without dropping the row — the
@@ -79,6 +65,9 @@ impl rbp_database::Schema for EpochMeta {
             " SET (fillfactor = 100);"
         )
     }
+}
+
+impl rbp_database::BulkSchema for EpochMeta {
     fn columns() -> &'static [tokio_postgres::types::Type] {
         // Binary COPY column type list — must match the column order
         // in `copy()`. Two columns: `key` (TEXT) and `value` (BIGINT).
@@ -86,6 +75,20 @@ impl rbp_database::Schema for EpochMeta {
             tokio_postgres::types::Type::TEXT,
             tokio_postgres::types::Type::INT8,
         ]
+    }
+    fn copy() -> &'static str {
+        // Column order MUST match `columns()` below. `epoch` has no
+        // `Streamable` impl — the single row is upserted at table
+        // creation time and updated by `Mode::reset` — so this
+        // statement is not actually executed today. We still emit a
+        // well-formed `COPY` header so the trait compiles and a
+        // future `Streamable` impl (e.g. for checkpoint metadata
+        // import) can use it without panic.
+        const_format::concatcp!(
+            "COPY ",
+            rbp_database::EPOCH,
+            " (key, value) FROM STDIN BINARY"
+        )
     }
 }
 
@@ -98,7 +101,7 @@ mod schema_tests {
     //! the COPY column arity fails CI before it ever reaches a live
     //! Postgres. No database connection required.
     use super::EpochMeta;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_epoch_table() {

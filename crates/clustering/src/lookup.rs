@@ -78,12 +78,6 @@ impl rbp_database::Schema for Lookup {
     fn name() -> &'static str {
         rbp_database::ISOMORPHISM
     }
-    fn columns() -> &'static [tokio_postgres::types::Type] {
-        &[
-            tokio_postgres::types::Type::INT8, // obs (observation/isomorphism)
-            tokio_postgres::types::Type::INT2, // abs (abstraction bucket)
-        ]
-    }
     fn creates() -> &'static str {
         const_format::concatcp!(
             "CREATE TABLE IF NOT EXISTS ",
@@ -109,13 +103,6 @@ impl rbp_database::Schema for Lookup {
             " (abs, position);"
         )
     }
-    fn copy() -> &'static str {
-        const_format::concatcp!(
-            "COPY ",
-            rbp_database::ISOMORPHISM,
-            " (obs, abs) FROM STDIN BINARY"
-        )
-    }
     fn truncates() -> &'static str {
         const_format::concatcp!("TRUNCATE TABLE ", rbp_database::ISOMORPHISM, ";")
     }
@@ -127,6 +114,23 @@ impl rbp_database::Schema for Lookup {
              ALTER TABLE ",
             rbp_database::ISOMORPHISM,
             " SET (autovacuum_enabled = false);"
+        )
+    }
+}
+
+#[cfg(feature = "database")]
+impl rbp_database::BulkSchema for Lookup {
+    fn columns() -> &'static [tokio_postgres::types::Type] {
+        &[
+            tokio_postgres::types::Type::INT8, // obs (observation/isomorphism)
+            tokio_postgres::types::Type::INT2, // abs (abstraction bucket)
+        ]
+    }
+    fn copy() -> &'static str {
+        const_format::concatcp!(
+            "COPY ",
+            rbp_database::ISOMORPHISM,
+            " (obs, abs) FROM STDIN BINARY"
         )
     }
 }

@@ -31,13 +31,6 @@ impl rbp_database::Schema for Future {
     fn name() -> &'static str {
         rbp_database::TRANSITIONS
     }
-    fn columns() -> &'static [tokio_postgres::types::Type] {
-        &[
-            tokio_postgres::types::Type::INT2,   // prev (source abstraction)
-            tokio_postgres::types::Type::INT2,   // next (target abstraction)
-            tokio_postgres::types::Type::FLOAT4, // dx (transition probability)
-        ]
-    }
     fn creates() -> &'static str {
         const_format::concatcp!(
             "CREATE TABLE IF NOT EXISTS ",
@@ -59,13 +52,6 @@ impl rbp_database::Schema for Future {
             " (next);"
         )
     }
-    fn copy() -> &'static str {
-        const_format::concatcp!(
-            "COPY ",
-            rbp_database::TRANSITIONS,
-            " (prev, next, dx) FROM STDIN BINARY"
-        )
-    }
     fn truncates() -> &'static str {
         const_format::concatcp!("TRUNCATE TABLE ", rbp_database::TRANSITIONS, ";")
     }
@@ -77,6 +63,24 @@ impl rbp_database::Schema for Future {
              ALTER TABLE ",
             rbp_database::TRANSITIONS,
             " SET (autovacuum_enabled = false);"
+        )
+    }
+}
+
+#[cfg(feature = "database")]
+impl rbp_database::BulkSchema for Future {
+    fn columns() -> &'static [tokio_postgres::types::Type] {
+        &[
+            tokio_postgres::types::Type::INT2,   // prev (source abstraction)
+            tokio_postgres::types::Type::INT2,   // next (target abstraction)
+            tokio_postgres::types::Type::FLOAT4, // dx (transition probability)
+        ]
+    }
+    fn copy() -> &'static str {
+        const_format::concatcp!(
+            "COPY ",
+            rbp_database::TRANSITIONS,
+            " (prev, next, dx) FROM STDIN BINARY"
         )
     }
 }

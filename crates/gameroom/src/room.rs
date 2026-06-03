@@ -151,12 +151,6 @@ impl Schema for Room {
     fn name() -> &'static str {
         ROOMS
     }
-    fn columns() -> &'static [tokio_postgres::types::Type] {
-        &[
-            tokio_postgres::types::Type::UUID,
-            tokio_postgres::types::Type::INT2,
-        ]
-    }
     fn creates() -> &'static str {
         const_format::concatcp!(
             "CREATE TABLE IF NOT EXISTS ",
@@ -172,16 +166,6 @@ impl Schema for Room {
         // primary-key index already covers lookups, so no extra
         // indices are required.
         ""
-    }
-    fn copy() -> &'static str {
-        // Column order MUST match `columns()` above. `rooms` has no
-        // `Streamable` impl in the current pipeline — rows are inserted
-        // row-at-a-time by `HistoryRepository::create_room` — so this
-        // statement is not actually executed today. We still emit a
-        // well-formed `COPY` header so the trait compiles and a future
-        // `Streamable` impl (e.g. for room-batch imports) can use it
-        // without panic.
-        const_format::concatcp!("COPY ", ROOMS, " (id, stakes) FROM STDIN BINARY")
     }
     fn truncates() -> &'static str {
         // `rooms` has FK references from `hands` (`ON DELETE CASCADE`
@@ -207,6 +191,25 @@ impl Schema for Room {
     }
 }
 
+impl BulkSchema for Room {
+    fn columns() -> &'static [tokio_postgres::types::Type] {
+        &[
+            tokio_postgres::types::Type::UUID,
+            tokio_postgres::types::Type::INT2,
+        ]
+    }
+    fn copy() -> &'static str {
+        // Column order MUST match `columns()` above. `rooms` has no
+        // `Streamable` impl in the current pipeline — rows are inserted
+        // row-at-a-time by `HistoryRepository::create_room` — so this
+        // statement is not actually executed today. We still emit a
+        // well-formed `COPY` header so the trait compiles and a future
+        // `Streamable` impl (e.g. for room-batch imports) can use it
+        // without panic.
+        const_format::concatcp!("COPY ", ROOMS, " (id, stakes) FROM STDIN BINARY")
+    }
+}
+
 #[cfg(all(test, feature = "database"))]
 mod schema_tests {
     //! Unit tests for the `Room` [`Schema`] contract.
@@ -216,7 +219,7 @@ mod schema_tests {
     //! the COPY column arity fails CI before it ever reaches a live
     //! Postgres. No database connection required.
     use super::Room;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_rooms_table() {

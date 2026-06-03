@@ -50,15 +50,6 @@ mod schema {
         fn name() -> &'static str {
             SESSIONS
         }
-        fn columns() -> &'static [tokio_postgres::types::Type] {
-            &[
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::UUID,
-                tokio_postgres::types::Type::BYTEA,
-                tokio_postgres::types::Type::TIMESTAMPTZ,
-                tokio_postgres::types::Type::BOOL,
-            ]
-        }
         fn creates() -> &'static str {
             const_format::concatcp!(
                 "CREATE TABLE IF NOT EXISTS ",
@@ -96,20 +87,6 @@ mod schema {
                 " (expires_at) WHERE NOT revoked;"
             )
         }
-        fn copy() -> &'static str {
-            // Column order MUST match `columns()` above. `sessions`
-            // has no `Streamable` impl in the current pipeline — rows
-            // are inserted row-at-a-time by `AuthRepository::signin` —
-            // so this statement is not actually executed today. We
-            // still emit a well-formed `COPY` header so the trait
-            // compiles and a future `Streamable` impl (e.g. for bulk
-            // session import) can use it without panic.
-            const_format::concatcp!(
-                "COPY ",
-                SESSIONS,
-                " (id, user_id, token_hash, expires_at, revoked) FROM STDIN BINARY"
-            )
-        }
         fn truncates() -> &'static str {
             // `sessions` has no child tables that reference it, so a
             // plain TRUNCATE is sufficient and faster than CASCADE.
@@ -132,6 +109,32 @@ mod schema {
             const_format::concatcp!("ALTER TABLE ", SESSIONS, " SET (fillfactor = 100);")
         }
     }
+
+    impl BulkSchema for Session {
+        fn columns() -> &'static [tokio_postgres::types::Type] {
+            &[
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::UUID,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::TIMESTAMPTZ,
+                tokio_postgres::types::Type::BOOL,
+            ]
+        }
+        fn copy() -> &'static str {
+            // Column order MUST match `columns()` above. `sessions`
+            // has no `Streamable` impl in the current pipeline — rows
+            // are inserted row-at-a-time by `AuthRepository::signin` —
+            // so this statement is not actually executed today. We
+            // still emit a well-formed `COPY` header so the trait
+            // compiles and a future `Streamable` impl (e.g. for bulk
+            // session import) can use it without panic.
+            const_format::concatcp!(
+                "COPY ",
+                SESSIONS,
+                " (id, user_id, token_hash, expires_at, revoked) FROM STDIN BINARY"
+            )
+        }
+    }
 }
 
 #[cfg(all(test, feature = "database"))]
@@ -143,7 +146,7 @@ mod schema_tests {
     //! the COPY column arity fails CI before it ever reaches a live
     //! Postgres. No database connection required.
     use super::Session;
-    use rbp_database::Schema;
+    use rbp_database::{BulkSchema, Schema};
 
     #[test]
     fn copy_targets_sessions_table() {
