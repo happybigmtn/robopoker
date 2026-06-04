@@ -334,6 +334,210 @@ impl fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
+/// Typed parser for the `testnet live_proof complete: ...`
+/// headline line the runbook writes to `SUMMARY.txt`. The
+/// original `STW-023` verifier substring-matched the five
+/// `key=N` pairs (which is fine for the binary
+/// green/red gate a CI scraper needs), but a downstream
+/// testnet dashboard also wants the *values* — a
+/// `--smoke` row count, a `--bench` hand count, a
+/// `--compare` hand count — without re-running a regex
+/// on every scrape. `LiveProofHeadline::parse` is the
+/// typed equivalent: a `parse` returns a `LiveProofHeadline`
+/// with the five `u64` fields a dashboard can chart
+/// over a series of runbook invocations, or a structured
+/// `HeadlineParseError` that names the exact field that
+/// failed to parse (so a regression in the runbook's
+/// `printf` line surfaces as a precise diagnostic, not
+/// a silent `None`).
+///
+/// The `Display` impl is a round-trip with
+/// `LiveProofReceipt::headline`, so a value parsed from
+/// one receipt can be `println!`'d as a new headline and
+/// the next `parse` agrees on every field. The five
+/// keys (`smoke` / `status` / `bench` / `compare` /
+/// `replay`) and their order are pinned in the
+/// `parse` tokeniser (a future chain refactor that
+/// re-orders / drops a key must update the `parse`
+/// `match` block, this struct's field set, the
+/// `LiveProofReceipt::headline` constructor, and the
+/// runbook's `printf` line in the same change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveProofHeadline {
+    /// `smoke_rows` — the `trainer --smoke` artifact row
+    /// count the chain logged.
+    pub smoke: u64,
+    /// `status_blueprint` — the `trainer --status`
+    /// `Blueprint` row count the chain logged.
+    pub status: u64,
+    /// `bench_hands` — the `trainer --bench` JSON-line
+    /// `hands` field the chain logged.
+    pub bench: u64,
+    /// `compare_hands` — the `trainer --compare` JSON-line
+    /// `hands` field the chain logged.
+    pub compare: u64,
+    /// `replay_bytes` — the `trainer --replay` `stdout`
+    /// byte count the chain logged (a proxy for "the
+    /// transcript rendered something non-empty").
+    pub replay: u64,
+}
+
+impl LiveProofHeadline {
+    /// Build a `LiveProofHeadline` line in the same
+    /// `testnet live_proof complete: smoke=N status=N
+    /// bench=N compare=N replay=BYTES` format the
+    /// `LiveProofReceipt::headline` constructor writes.
+    /// The function is a round-trip mirror of
+    /// `LiveProofHeadline::parse` so a parsed value can
+    /// be re-emitted as a headline a future `parse`
+    /// agrees on (the lib test
+    /// `live_proof_headline_round_trips_through_parse`
+    /// pins the property).
+    pub fn to_line(&self) -> String {
+        format!(
+            "{STW023_HEADLINE_PREFIX} smoke={} status={} bench={} compare={} replay={}",
+            self.smoke, self.status, self.bench, self.compare, self.replay
+        )
+    }
+
+    /// Parse a `testnet live_proof complete: ...`
+    /// headline line into a typed `LiveProofHeadline`.
+    /// The parser asserts (a) the line starts with the
+    /// pinned `STW023_HEADLINE_PREFIX`, (b) the five
+    /// pinned keys (`smoke` / `status` / `bench` /
+    /// `compare` / `replay`) each appear exactly once
+    /// with an integer value, and (c) no unknown `key=N`
+    /// pairs are present (a regression that adds a
+    /// `key6=N` pair would silently make the dashboard's
+    /// column-count drift).
+    pub fn parse(line: &str) -> Result<Self, HeadlineParseError> {
+        if !line.starts_with(STW023_HEADLINE_PREFIX) {
+            return Err(HeadlineParseError::WrongPrefix {
+                got: line.chars().take(64).collect::<String>(),
+                expected: STW023_HEADLINE_PREFIX.to_string(),
+            });
+        }
+        // Strip the prefix; what's left is the `key=N`
+        // space-separated tail.
+        let tail = line[STW023_HEADLINE_PREFIX.len()..].trim_start();
+        let mut smoke: Option<u64> = None;
+        let mut status: Option<u64> = None;
+        let mut bench: Option<u64> = None;
+        let mut compare: Option<u64> = None;
+        let mut replay: Option<u64> = None;
+        // We walk the tail with a manual cursor so an
+        // unknown key (anything other than the five
+        // pinned names) is rejected, and a duplicate key
+        // is rejected (the `Option` is `Some` on the
+        // second sight).
+        for token in tail.split_whitespace() {
+            let (key, value) = token
+                .split_once('=')
+                .ok_or_else(|| HeadlineParseError::MalformedToken(token.to_string()))?;
+            let parsed: u64 = value
+                .parse::<u64>()
+                .map_err(|e| HeadlineParseError::NonInteger {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    reason: e.to_string(),
+                })?;
+            let slot = match key {
+                "smoke" => &mut smoke,
+                "status" => &mut status,
+                "bench" => &mut bench,
+                "compare" => &mut compare,
+                "replay" => &mut replay,
+                other => {
+                    return Err(HeadlineParseError::UnknownKey(other.to_string()));
+                }
+            };
+            if slot.is_some() {
+                return Err(HeadlineParseError::DuplicateKey(key.to_string()));
+            }
+            *slot = Some(parsed);
+        }
+        Ok(Self {
+            smoke: smoke.ok_or(HeadlineParseError::MissingKey("smoke"))?,
+            status: status.ok_or(HeadlineParseError::MissingKey("status"))?,
+            bench: bench.ok_or(HeadlineParseError::MissingKey("bench"))?,
+            compare: compare.ok_or(HeadlineParseError::MissingKey("compare"))?,
+            replay: replay.ok_or(HeadlineParseError::MissingKey("replay"))?,
+        })
+    }
+}
+
+impl fmt::Display for LiveProofHeadline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_line())
+    }
+}
+
+/// Structured error from `LiveProofHeadline::parse`. The
+/// variants cover the four failure modes the parser
+/// detects — wrong prefix, malformed token (no `=`),
+/// unknown key, duplicate key, missing key, non-integer
+/// value — so a regression in the runbook's `printf`
+/// line surfaces as a precise diagnostic instead of a
+/// silent `None`. The `Display` impl prefixes every
+/// message with `live_proof headline parse error:` so
+/// dashboard logs are grep-friendly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadlineParseError {
+    /// The headline does not start with the pinned
+    /// `testnet live_proof complete:` prefix.
+    WrongPrefix { got: String, expected: String },
+    /// A `key=value` token in the tail lacked the `=`
+    /// separator (e.g. a stray `smoke` or trailing junk).
+    MalformedToken(String),
+    /// A `key` other than the five pinned names
+    /// (`smoke` / `status` / `bench` / `compare` /
+    /// `replay`) appeared in the tail.
+    UnknownKey(String),
+    /// A pinned `key` appeared twice in the tail.
+    DuplicateKey(String),
+    /// A pinned `key` did not appear in the tail at all.
+    MissingKey(&'static str),
+    /// A `key=N` token's value was not a `u64`.
+    NonInteger {
+        key: String,
+        value: String,
+        reason: String,
+    },
+}
+
+impl fmt::Display for HeadlineParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeadlineParseError::WrongPrefix { got, expected } => write!(
+                f,
+                "live_proof headline parse error: wrong prefix (got {got:?}, expected {expected:?})"
+            ),
+            HeadlineParseError::MalformedToken(t) => write!(
+                f,
+                "live_proof headline parse error: malformed token {t:?} (expected `key=value`)"
+            ),
+            HeadlineParseError::UnknownKey(k) => write!(
+                f,
+                "live_proof headline parse error: unknown key {k:?} (expected one of \
+                 `smoke` / `status` / `bench` / `compare` / `replay`)"
+            ),
+            HeadlineParseError::DuplicateKey(k) => {
+                write!(f, "live_proof headline parse error: duplicate key {k:?}")
+            }
+            HeadlineParseError::MissingKey(k) => {
+                write!(f, "live_proof headline parse error: missing key {k:?}")
+            }
+            HeadlineParseError::NonInteger { key, value, reason } => write!(
+                f,
+                "live_proof headline parse error: key {key:?} value {value:?} is not a u64 \
+                 ({reason})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HeadlineParseError {}
+
 impl LiveProofReceipt {
     /// Read a receipt from disk. The function is the
     /// *consumer* side of the on-disk contract: the
@@ -497,7 +701,13 @@ impl LiveProofReceipt {
     /// receipt, `Err(VerifyError::*)` on a regression.
     /// The three failure modes mirror the three
     /// contract violations the verifier detects:
-    /// recipe shape, step exit, headline format.
+    /// recipe shape, step exit, headline format. The
+    /// headline-format check now goes through the typed
+    /// `LiveProofHeadline::parse` function so a
+    /// regression in the runbook's `printf` line
+    /// (non-integer value, unknown key, duplicate key,
+    /// missing key) surfaces as a precise diagnostic
+    /// rather than a substring-grep miss.
     pub fn verify(&self) -> Result<(), VerifyError> {
         // (1) Recipe shape: the per-step `name` field
         // must equal the pinned `STW023_CHAIN_STEPS`
@@ -523,24 +733,21 @@ impl LiveProofReceipt {
                 });
             }
         }
-        // (2) Headline format: must start with the
-        // pinned prefix and include the five `key=N`
-        // pairs.
-        if !self.summary_line.starts_with(STW023_HEADLINE_PREFIX) {
-            return Err(VerifyError::Headline(format!(
-                "live_proof summary line must start with `{STW023_HEADLINE_PREFIX}`; got: \
-                 {summary:?}",
+        // (2) Headline format: must parse through the
+        // typed `LiveProofHeadline::parse` function
+        // (i.e. start with the pinned prefix AND have
+        // the five `key=N` pairs as parseable u64
+        // integers). The original substring-only check
+        // is preserved inside `parse`, so a regression
+        // that drops a pair still fails verification
+        // with the precise error variant.
+        LiveProofHeadline::parse(&self.summary_line).map_err(|e| {
+            VerifyError::Headline(format!(
+                "live_proof summary line must parse as `LiveProofHeadline` (got: {summary:?}): \
+                 {e}",
                 summary = self.summary_line
-            )));
-        }
-        for key in &["smoke=", "status=", "bench=", "compare=", "replay="] {
-            if !self.summary_line.contains(key) {
-                return Err(VerifyError::Headline(format!(
-                    "live_proof summary line must include `{key}`; got: {summary:?}",
-                    summary = self.summary_line
-                )));
-            }
-        }
+            ))
+        })?;
         Ok(())
     }
 }
@@ -767,5 +974,142 @@ mod tests {
         let names: Vec<&str> = parsed.steps.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, STW023_CHAIN_STEPS);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- LiveProofHeadline parser (typed STW-023 dashboard surface) --
+
+    /// A `LiveProofHeadline` constructed from the five
+    /// `u64` fields `to_line` emits a line that
+    /// `LiveProofHeadline::parse` agrees on. This is
+    /// the round-trip property a downstream testnet
+    /// dashboard relies on: parse a runbook receipt's
+    /// `SUMMARY.txt` headline, chart the five
+    /// `u64` fields, `println!` a new headline from
+    /// the next receipt, and have `parse` accept the
+    /// re-emitted line without manual reformatting.
+    #[test]
+    fn live_proof_headline_round_trips_through_parse() {
+        let original = LiveProofHeadline {
+            smoke: 12,
+            status: 7,
+            bench: 4,
+            compare: 4,
+            replay: 256,
+        };
+        let line = original.to_line();
+        let parsed = LiveProofHeadline::parse(&line)
+            .unwrap_or_else(|e| panic!("parse must accept the re-emitted line; got: {e:?}"));
+        assert_eq!(parsed, original, "round-trip must preserve all five fields");
+        // The line must also start with the pinned
+        // prefix (defensive: a future refactor that
+        // silently drops the prefix from `to_line`
+        // surfaces here).
+        assert!(line.starts_with(STW023_HEADLINE_PREFIX));
+    }
+
+    /// A line that does not start with the pinned
+    /// `STW023_HEADLINE_PREFIX` is rejected with
+    /// `HeadlineParseError::WrongPrefix`. A regression
+    /// in the runbook's `printf` line (e.g. drops
+    /// the `testnet ` part) surfaces as a precise
+    /// diagnostic, not a silent `None`.
+    #[test]
+    fn live_proof_headline_parse_rejects_wrong_prefix() {
+        let err = LiveProofHeadline::parse(
+            "live_proof complete: smoke=0 status=0 bench=0 compare=0 replay=0",
+        )
+        .expect_err("a non-pinned-prefix headline must fail to parse");
+        match err {
+            HeadlineParseError::WrongPrefix { got, expected } => {
+                assert!(
+                    expected == STW023_HEADLINE_PREFIX,
+                    "expected prefix must be the pinned one (got: {expected:?})"
+                );
+                assert!(
+                    got.starts_with("live_proof complete:"),
+                    "the offending prefix should be echoed back (got: {got:?})"
+                );
+            }
+            other => panic!("wrong-prefix headline must produce WrongPrefix error; got: {other:?}"),
+        }
+    }
+
+    /// A headline whose tail is missing one of the
+    /// five pinned keys surfaces as
+    /// `HeadlineParseError::MissingKey`. A regression
+    /// in the runbook's `printf` (e.g. drops `replay=`
+    /// on a future refactor) is detected here.
+    #[test]
+    fn live_proof_headline_parse_rejects_missing_key() {
+        let err = LiveProofHeadline::parse(
+            "testnet live_proof complete: smoke=0 status=0 bench=0 compare=0",
+        )
+        .expect_err("a headline missing `replay=` must fail to parse");
+        match err {
+            HeadlineParseError::MissingKey("replay") => {}
+            other => panic!(
+                "missing-replay headline must produce MissingKey(\"replay\"); got: {other:?}"
+            ),
+        }
+    }
+
+    /// A headline whose `key=N` token has a
+    /// non-integer value is rejected with
+    /// `HeadlineParseError::NonInteger`. The error
+    /// names the offending key + value + parse reason
+    /// so a future runbook regression (e.g. `printf`
+    /// adds a stray `"` or `%s` placeholder) is
+    /// diagnosed without a manual `cat SUMMARY.txt`.
+    #[test]
+    fn live_proof_headline_parse_rejects_non_integer_value() {
+        let err = LiveProofHeadline::parse(
+            "testnet live_proof complete: smoke=abc status=0 bench=0 compare=0 replay=0",
+        )
+        .expect_err("a headline with `smoke=abc` must fail to parse");
+        match err {
+            HeadlineParseError::NonInteger { key, value, .. } => {
+                assert_eq!(key, "smoke", "error must name the offending key");
+                assert_eq!(value, "abc", "error must echo the offending value");
+            }
+            other => panic!("non-integer value must produce NonInteger error; got: {other:?}"),
+        }
+    }
+
+    /// A headline that includes an extra
+    /// `key=value` token the parser does not know is
+    /// rejected with `HeadlineParseError::UnknownKey`.
+    /// A regression that adds a sixth `key` (e.g. a
+    /// `cluster=` row count) without updating the
+    /// dashboard's column schema surfaces here,
+    /// preventing a silent column-count drift.
+    /// Similarly, a headline that repeats a pinned
+    /// key is rejected with
+    /// `HeadlineParseError::DuplicateKey`.
+    #[test]
+    fn live_proof_headline_parse_rejects_unknown_and_duplicate_keys() {
+        // (a) Unknown key
+        let err = LiveProofHeadline::parse(
+            "testnet live_proof complete: smoke=0 status=0 bench=0 compare=0 replay=0 cluster=1",
+        )
+        .expect_err("a headline with an extra `cluster=` key must fail to parse");
+        match err {
+            HeadlineParseError::UnknownKey(k) => {
+                assert_eq!(k, "cluster", "error must name the unknown key");
+            }
+            other => panic!("unknown-key headline must produce UnknownKey error; got: {other:?}"),
+        }
+        // (b) Duplicate key
+        let err = LiveProofHeadline::parse(
+            "testnet live_proof complete: smoke=0 smoke=0 status=0 bench=0 compare=0 replay=0",
+        )
+        .expect_err("a headline with `smoke=` twice must fail to parse");
+        match err {
+            HeadlineParseError::DuplicateKey(k) => {
+                assert_eq!(k, "smoke", "error must name the duplicate key");
+            }
+            other => {
+                panic!("duplicate-key headline must produce DuplicateKey error; got: {other:?}")
+            }
+        }
     }
 }

@@ -55,7 +55,8 @@
 //!    regression that drops the prefix fails the test.
 
 use rbp_autotrain::{
-    LiveProofReceipt, LiveProofRecipe, STW023_CHAIN_STEPS, STW023_HEADLINE_PREFIX,
+    LiveProofHeadline, LiveProofReceipt, LiveProofRecipe, STW023_CHAIN_STEPS,
+    STW023_HEADLINE_PREFIX,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -219,5 +220,74 @@ fn synthetic_receipt_headline_uses_pinned_prefix() {
         }
         other => panic!("wrong-prefix headline must produce Headline error; got: {other:?}"),
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `LiveProofHeadline` typed parser is the
+/// dashboard-side surface the `STW-023` verifier ships
+/// alongside the substring gate. A runbook receipt's
+/// `SUMMARY.txt` headline is parsed into the five
+/// `u64` fields (`smoke` / `status` / `bench` /
+/// `compare` / `replay`) so a testnet dashboard can
+/// chart the per-run artifact counts without re-running
+/// a regex on every scrape. This test drops a synthetic
+/// green receipt (whose `SUMMARY.txt` headline was
+/// stamped by `LiveProofReceipt::write_to`), parses the
+/// first line via `LiveProofHeadline::parse`, and asserts
+/// the five fields match the values the `write_to`
+/// constructor passed in. A regression in the producer
+/// (the `write_to` `format!` line) or the consumer (the
+/// `parse` tokeniser) fails the same test.
+#[test]
+fn synthetic_receipt_headline_parses_via_typed_surface() {
+    let dir = fresh_dir("typed-headline");
+    // Drop a receipt with the five known counts the
+    // dashboard will chart: `smoke=12`, `status=12`,
+    // `bench=4`, `compare=4`, `replay=256`. (The
+    // `write_to` constructor calls
+    // `LiveProofReceipt::headline` with these values
+    // internally, so the headline is pinned by the
+    // `drop_synthetic_green_receipt` helper.)
+    drop_synthetic_green_receipt(&dir);
+    let summary_text = std::fs::read_to_string(dir.join("SUMMARY.txt"))
+        .expect("SUMMARY.txt must exist on a green receipt");
+    let first_line = summary_text
+        .lines()
+        .next()
+        .expect("SUMMARY.txt must have a first line");
+    let parsed = LiveProofHeadline::parse(first_line).unwrap_or_else(|e| {
+        panic!(
+            "parse must accept the headline produced by `LiveProofReceipt::write_to`; got: {e:?}"
+        )
+    });
+    assert_eq!(
+        parsed.smoke, 12,
+        "smoke field must match the write_to input"
+    );
+    assert_eq!(
+        parsed.status, 12,
+        "status field must match the write_to input"
+    );
+    assert_eq!(parsed.bench, 4, "bench field must match the write_to input");
+    assert_eq!(
+        parsed.compare, 4,
+        "compare field must match the write_to input"
+    );
+    assert_eq!(
+        parsed.replay, 256,
+        "replay field must match the write_to input"
+    );
+    // The re-emitted line must also parse back to the
+    // same `LiveProofHeadline` (the round-trip property
+    // the lib test
+    // `live_proof_headline_round_trips_through_parse`
+    // pins).
+    let reemitted = parsed.to_line();
+    let reparsed = LiveProofHeadline::parse(&reemitted)
+        .unwrap_or_else(|e| panic!("re-emitted line must parse; got: {e:?}"));
+    assert_eq!(
+        reparsed, parsed,
+        "to_line + parse round-trip must preserve all five fields"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

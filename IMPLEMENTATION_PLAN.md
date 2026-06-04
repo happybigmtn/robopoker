@@ -1301,7 +1301,7 @@ produces, plus a `recipe.json` manifest the runbook script
 also writes so the two surfaces share a single machine-readable
 schema.
 
-- [ ] `STW-023` Live-proof receipt bundle: shared
+- [x] `STW-023` Live-proof receipt bundle: shared
   `LiveProofReceipt` verifier + runbook `recipe.json` manifest.
   The `steward/HINGES.md` rank #5 `testnet-live-proof` hinge
   names the operator-visible launch-proof gap: "A documented
@@ -1433,7 +1433,22 @@ schema.
   exits 0 (`checked=N ghosts=0`) and the new STW-023
   claim is registered in the gate's `P0_TO_STW` /
   `STW_TO_STW023` claim map; `cargo test --workspace`
-  and `cargo fmt --check` are green.
+  and `cargo fmt --check` are green. The verifier
+  also exposes a typed `LiveProofHeadline` surface
+  (a `LiveProofHeadline { smoke, status, bench,
+  compare, replay }` u64 struct + a
+  `LiveProofHeadline::parse(&str)` parser with a
+  structured `HeadlineParseError` covering
+  WrongPrefix / MalformedToken / UnknownKey /
+  DuplicateKey / MissingKey / NonInteger failure
+  modes) so a testnet dashboard can chart the
+  per-run artifact counts without re-running a regex
+  on every scrape; `LiveProofReceipt::verify` now
+  routes its headline-format check through the typed
+  parser (the substring gate is preserved inside
+  `parse` so a regression that drops a `key=` pair
+  surfaces as a precise error variant, not a
+  substring miss).
 
 - [x] `STW-022` Plan-vs-reality staleness gate:
   `steward/HINGES.md` rank #1 is "Retiring or updating the
