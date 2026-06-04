@@ -7,6 +7,11 @@
 /.claude
 /.auto
 
+# STW-019 runbook receipts (runtime output of `bash scripts/testnet-live-proof.sh`)
+/receipts/
+# `auto steward` planning artifacts (canonical source is /tmp/.../<STEWARD-...>/)
+/steward/
+
 .cursorrules
 .DS_Store
 .todo

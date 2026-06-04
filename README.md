@@ -217,6 +217,30 @@ cargo run -p robopoker-tui -- --headless --seed 49363 --export-dir .auto/tui
 cargo test -p robopoker-tui
 ```
 
+## Testnet launch proof
+
+The end-to-end testnet launch chain
+(`--cluster` → `--reset` → `--smoke` → `--status` → `--bench` →
+`--compare` → `--replay <transcript>`) is wrapped in a single
+operator-visible runbook:
+
+```bash
+DATABASE_URL=postgres://user:***@host:5432/dbname \
+    bash scripts/testnet-live-proof.sh
+```
+
+The runbook drives the `trainer` binary as a subprocess against one
+Postgres, captures each step's stdout + stderr + exit code into a
+per-step receipt under `receipts/testnet-live-proof-<UTC-ISO>/`, and
+emits a one-line `testnet live_proof complete: smoke=N status=N
+bench=N compare=N replay=BYTES` headline in `SUMMARY.txt` a testnet
+dashboard can scrape. See
+[`scripts/testnet-live-proof.md`](scripts/testnet-live-proof.md) for
+the full runbook, the receipt layout, the env knobs honoured, and
+the shell-shape pinner (`cargo test -p rbp-autotrain --test
+script_shape`) that catches a runbook regression without needing a
+live database.
+
 ## References
 
 1. (2019). Superhuman AI for multiplayer poker. [(Science)](https://science.sciencemag.org/content/early/2019/07/10/science.aay2400)

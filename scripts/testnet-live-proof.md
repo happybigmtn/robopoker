@@ -1,0 +1,192 @@
+# Testnet live launch proof runbook (STW-019)
+
+The `testnet-live-proof` hinge in `steward/HINGES.md` is the
+operator-visible counterpart to the `cargo test --workspace` receipts
+`STW-009` (smoke), `STW-010` (bench), `STW-016` (replay), and
+`STW-018` (compare) already pin individually. Component tests prove
+each mode in isolation; this runbook drives the four modes back-to-back
+against a single Postgres and writes a per-step receipt bundle a
+testnet dashboard can scrape.
+
+## What it does
+
+The runbook `scripts/testnet-live-proof.sh` is a pure-bash driver
+that, when given a `DATABASE_URL`, runs the chain
+
+```
+trainer --cluster    # 1. bootstrap pretraining + schema (idempotent)
+trainer --reset      # 2. zero v1 + v2 blueprint + epoch tables
+trainer --smoke      # 3. pretraining + 2-epoch train + sync
+trainer --status     # 4. dashboard read: must show Epoch>0, Blueprint>0
+trainer --bench      # 5. heads-up DatabasePlayer (v1) vs Fish
+trainer --compare    # 6. heads-up v1 DatabasePlayer vs v2 DatabasePlayer2
+trainer --replay <t> # 7. re-derive the (Position, Action) sequence
+                     #    from the first transcript-*.json the bench
+                     #    dropped into the receipt dir
+```
+
+as a sequence of subprocesses, captures each step's stdout + stderr +
+exit code into a per-step sub-directory, and writes a one-line
+`testnet live_proof complete: smoke=N status=N bench=N compare=N replay=BYTES`
+headline to `SUMMARY.txt`. The headline line mirrors the
+`crates/autotrain/tests/live_proof.rs` integration test's
+`live_proof complete: ...` log line so a single dashboard scraper
+can grep either the `cargo test` log or the `SUMMARY.txt` file
+with the same regex.
+
+## Receipt layout
+
+After `bash scripts/testnet-live-proof.sh` completes against a live
+Postgres, the runbook drops a directory tree:
+
+```
+receipts/testnet-live-proof-20260604T050000Z/
+├── SUMMARY.txt                    # headline + per-step exit codes
+├── ENV.txt                        # env the chain ran with (secrets redacted)
+├── cluster/{stdout,stderr,exit}.txt
+├── reset/{stdout,stderr,exit}.txt
+├── smoke/{stdout,stderr,exit}.txt
+├── status/{stdout,stderr,exit}.txt
+├── bench/
+│   ├── {stdout,stderr,exit}.txt   # bench JSON report lives on stdout
+│   └── transcripts/
+│       └── transcript-<hand_id>.json   # what the --replay leg reads
+├── compare/{stdout,stderr,exit}.txt
+└── replay/{stdout,stderr,exit}.txt
+```
+
+Each `exit.txt` contains a single integer (the trainer's exit code
+for that step). The dashboard can grep `SUMMARY.txt` for the
+`testnet live_proof complete:` line and then read the matching
+`*/stdout.txt` to parse the per-step artifact (e.g. the
+`BenchReport` JSON for `--bench`, the rendered seat/action text for
+`--replay`).
+
+## How to run it
+
+Prerequisites:
+- A reachable Postgres (any version that supports `gen_random_uuid()`
+  via `pgcrypto` and the `ON DELETE CASCADE` + `fillfactor` options
+  the schema uses). The schema bootstrap is part of the chain.
+- A built `trainer` binary. The runbook invokes
+  `cargo build --bin trainer` automatically if
+  `target/debug/trainer` is missing; point `TRAINER_BIN` at a
+  `target/release/trainer` to skip the debug build.
+
+```sh
+# One-shot, debug build:
+DATABASE_URL=postgres://user:***@host:5432/dbname \
+    bash scripts/testnet-live-proof.sh
+
+# Release build, custom receipt location:
+TRAINER_BIN=$PWD/target/release/trainer \
+DATABASE_URL=postgres://user:***@host:5432/dbname \
+    bash scripts/testnet-live-proof.sh
+```
+
+The script defaults to a small-budget chain (2 smoke epochs, 4 bench
+hands, 4 compare hands) so a complete run finishes in seconds, not
+minutes. Override the env knobs to scale up; the chain is
+structurally identical to the production launch path so a large
+budget is just "more hands, more epochs".
+
+## Environment knobs honoured
+
+The runbook honours the same env discipline the four integration
+tests use, so a `DATABASE_URL` set for the runbook is also valid
+for `cargo test -p rbp-autotrain --features database --test live_proof`:
+
+| env | default | purpose |
+|---|---|---|
+| `DATABASE_URL` | (required) | Postgres URL. Forwarded as `DB_URL` (the trainer's actual env name). |
+| `DB_URL` | (inherits from `DATABASE_URL`) | Direct override. |
+| `RBP_FAST_EPOCHS` | 2 | smoke step epoch count |
+| `RBP_FAST_BATCH` | 16 | smoke step batch size |
+| `RBP_BENCH_HANDS` | 4 | bench step hand count |
+| `RBP_BENCH_BLIND` | 2 | bench step blind size |
+| `RBP_COMPARE_HANDS` | 4 | compare step hand count |
+| `RBP_COMPARE_BLIND` | 2 | compare step blind size |
+| `RBP_BENCH_TRANSCRIPT_DIR` | (set by runbook) | bench's transcript writer location |
+| `TRAINER_BIN` | `<workspace>/target/debug/trainer` | trainer binary path |
+
+## Exit codes
+
+| code | meaning |
+|---:|---|
+| 0 | chain landed end-to-end |
+| 3 | `DATABASE_URL` (or `DB_URL`) not set — refuse-to-run gate |
+| 4 | trainer binary not found and `cargo build --bin trainer` failed |
+| 5 | `trainer --cluster` exited non-zero |
+| 6 | `trainer --reset` exited non-zero |
+| 7 | `trainer --smoke` exited non-zero |
+| 8 | `trainer --status` exited non-zero |
+| 9 | `trainer --bench` exited non-zero |
+| 10 | `trainer --compare` exited non-zero |
+| 11 | `trainer --replay` exited non-zero (or no transcript was produced) |
+
+## How the dashboard scrapes a receipt
+
+```sh
+# Get the headline line in one shot.
+grep '^testnet live_proof complete:' \
+    receipts/testnet-live-proof-*/SUMMARY.txt
+
+# Parse the bench's JSON `BenchReport` (stdout.txt is single-line JSON).
+python -c "import json,sys; print(json.load(open(sys.argv[1])))" \
+    receipts/testnet-live-proof-*/bench/stdout.txt
+
+# Render the bench's first transcript (the public reproducible surface).
+cat receipts/testnet-live-proof-*/replay/stdout.txt
+```
+
+## What the runbook does NOT do
+
+- It does **not** change the trainer's `--smoke` / `--bench` /
+  `--compare` / `--replay` behaviour. Those are already shipped and
+  pinned by their own integration tests
+  (`crates/autotrain/tests/{smoke,bench,compare,live_proof}.rs`).
+  STW-019 is the *runbook*, not new trainer functionality.
+- It does **not** introduce a Python or `jq` dependency. The
+  runbook is pure bash so a Docker image that ships only the
+  `trainer` binary + bash can run the proof.
+- It does **not** require Docker. A worker that already has
+  `cargo` + `bash` + a `DATABASE_URL` can run the proof as-is.
+- It does **not** push to a remote registry. The receipt directory
+  is local; pushing it to a testnet dashboard bucket is the next
+  slice (`testnet-live-publish`).
+
+## Pinning the runbook's shape
+
+The shell-shape integration test
+`crates/autotrain/tests/script_shape.rs` runs without a database and
+asserts:
+
+1. `scripts/testnet-live-proof.sh` exists and is executable.
+2. `bash -n scripts/testnet-live-proof.sh` parses (catches
+   a syntax regression at CI time).
+3. The runbook doc lists every env knob the script honours
+   (catches a doc drift where the script gains a knob but the
+   doc forgets to mention it).
+4. The runbook doc references every chain step the live proof
+   integration test covers (`--cluster`, `--reset`, `--smoke`,
+   `--status`, `--bench`, `--compare`, `--replay`).
+
+This means a future refactor that, say, removes the `--status` leg
+or renames an env knob fails the shell-shape test even before it
+reaches a live Postgres.
+
+## See also
+
+- `crates/autotrain/tests/live_proof.rs` — the cargo-test counterpart
+  (asserts the chain lands inside a single `cargo test` run; pins
+  the per-step log-line contracts).
+- `crates/autotrain/tests/script_shape.rs` — the shell-shape
+  pinner (no DB required; runs in `cargo test --workspace`).
+- `steward/HINGES.md` — the source of the `testnet-live-proof`
+  hinge and its ranking above the `workspace-parallel` /
+  `STW-001` / `STW-007` / `STW-011` / `STW-015` decisions.
+- `genesis/plans/000-ceo-testnet-roadmap.md` — the CEO-signed
+  testnet north star ("A public, reproducible NLHE benchmark
+  where a trained robopoker blueprint bot beats a named baseline
+  head-to-head, with every match downloadable as a replayable,
+  signed transcript") that this runbook operationally closes.

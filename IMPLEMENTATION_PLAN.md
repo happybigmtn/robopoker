@@ -1131,6 +1131,82 @@ planner's `PROMOTIONS.md` ranks highest.
   integration test passes; `cargo test --workspace` and
   `cargo fmt --check` are green.
 
+## Promoted from steward HINGES (this slice)
+
+The `steward/HINGES.md` and `steward/HAZARDS.md` reports name the
+top open mainnet-blocking, user-facing hinge as `testnet-live-proof`:
+*"A documented live run of `--smoke -> --bench -> --compare -> --replay` on
+the same DB is the operator-visible launch proof not captured by unit
+tests alone."* `cargo test --workspace` already passes per-stem
+(`STW-009` smoke, `STW-010` bench, `STW-016` replay, `STW-018`
+compare), and `crates/autotrain/tests/live_proof.rs` chains those
+four sub-proofs inside one `cargo test --test live_proof` invocation,
+but no **shell-level runbook** an operator (or a cron worker) can
+run against a real Postgres to produce a single receipt directory
+exists. STW-019 lands that runbook and a one-receipt-per-step
+bundle layout a testnet dashboard can scrape.
+
+- [x] `STW-019` Testnet live launch proof runbook + receipt bundle.
+Owner files: `scripts/testnet-live-proof.sh` (new),
+`scripts/testnet-live-proof.md` (new runbook + receipt layout),
+`README.md` (link the runbook under a new `## Testnet launch proof`
+section), and `crates/autotrain/tests/script_shape.rs` (new pure
+shell-shape integration test gated off `database` so it runs in
+`cargo test --workspace`).
+Scope boundary: drive the existing four `trainer` modes
+(`--cluster` -> `--reset` -> `--smoke` -> `--status` -> `--bench` ->
+`--compare` -> `--replay <transcript>`) as subprocesses against a
+single Postgres reachable via `DATABASE_URL`, capture each step's
+stdout + stderr + exit code into a per-step
+`receipts/<step>/{stdout,stderr,exit}.txt` layout, and emit a
+one-line `testnet live_proof complete: ...` summary the dashboard
+scrapes. Do not add new `trainer` modes; do not change the
+integration test's chain; do not require Docker or a wrapper
+runtime. Honour the `RBP_FAST_EPOCHS` / `RBP_FAST_BATCH` /
+`RBP_BENCH_HANDS` / `RBP_BENCH_BLIND` / `RBP_BENCH_TRANSCRIPT_DIR` /
+`RBP_COMPARE_HANDS` / `RBP_COMPARE_BLIND` env discipline the four
+existing integration tests use (small-budget defaults so the
+runbook completes in seconds, not minutes).
+Acceptance criteria: `bash scripts/testnet-live-proof.sh` against a
+Postgres reachable via `DATABASE_URL` exits 0, drops a
+`receipts/testnet-live-proof-<utc-iso>/` directory with one
+sub-directory per chain step (cluster, reset, smoke, status,
+bench, compare, replay) each containing `stdout.txt`,
+`stderr.txt`, `exit.txt`, and a top-level `SUMMARY.txt` that
+prints `testnet live_proof complete: smoke=N status=N bench=N
+compare=N replay=BYTES` matching the
+`crates/autotrain/tests/live_proof.rs` final assertion line.
+`DATABASE_URL` is forwarded as `DB_URL` (the trainer's actual env
+name) and the script refuses to run (exit 3) when neither is set.
+The script is pure bash (no `python`/`jq` dependency at runtime;
+the existing trainer JSON line is captured verbatim) and exits
+non-zero on any chain step that returns non-zero so a worker can
+treat the script as a single testnet launch gate.
+Verification commands: `cargo build --bin trainer`; then
+`DATABASE_URL=postgres://... bash scripts/testnet-live-proof.sh`;
+inspect the resulting `receipts/testnet-live-proof-*/SUMMARY.txt`
+for the headline line. The shell-shape integration test
+(`cargo test -p rbp-autotrain --test script_shape`) runs without
+Postgres and asserts (a) the runbook script exists and is
+executable, (b) the runbook doc lists the same env knobs the
+script honours, (c) `bash -n scripts/testnet-live-proof.sh`
+parses, (d) the runbook doc references every step the live
+proof integration test covers.
+Required tests: existing
+`crates/autotrain/tests/{smoke,bench,compare,live_proof}.rs` +
+new `crates/autotrain/tests/script_shape.rs`.
+Dependencies: `STW-009` (smoke), `STW-010` (bench),
+`STW-014`/`STW-015` (transcripts the `--replay` leg reads),
+`STW-016` (`--replay` mode), `STW-018` (compare).
+Estimated scope: M.
+Completion signal: a fresh `bash scripts/testnet-live-proof.sh`
+against a real Postgres drops a `receipts/testnet-live-proof-*/`
+directory whose `SUMMARY.txt` contains the `testnet live_proof
+complete:` line; the new `script_shape` integration test passes;
+`cargo test --workspace` and `cargo fmt --check` are green; the
+new runbook is linked from `README.md` under `## Testnet launch
+proof`.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
