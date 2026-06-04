@@ -6294,3 +6294,590 @@ leverage.
   not by a
   `## Try it now`
   reframe).**
+
+
+## Next wave - review 2026-06-04 (third pass)
+
+The afternoon 2026-06-04 three-lens review (kanban task
+`t_35186537`) shipped STW-042 (compare3-fixture demo-data
++ `GET /bench/compare3-fixture` fallback, commit 5a90622)
+and identified STW-043 / STW-044 / STW-045 / STW-046 as
+the next-wave backlog. STW-042 is the only shipped item;
+STW-043 is still the canonical P0 follow-on. The third
+2026-06-04 review (kanban task `t_6df7de4e`) re-applies
+the three lenses to the *current* state — with STW-042
+shipped and live on `main`, the dashboard's `GET /bench/
+compare3-fixture` route is real, the `crates/dashboard/
+tests/fixtures/compare3-fixture.json` file is committed,
+and a fresh `cargo run -p rbp-dashboard` shows the
+demo-data card to a first-time visitor. The remaining
+gaps the three lenses now name, in priority order:
+
+(a) **The single-config bench shape has no committed
+    demo card.** STW-043 (afternoon wave) is unstarted.
+(b) **The live INDEX.json the dashboard reads has a
+    column-shape gap.** The dashboard table renders
+    `receipt_basename` / `blueprint` / `baseline` /
+    `mbb_per_100` / `ci_95` / `win_rate` / `total_bytes`
+    / `uploaded_at_utc` (render.rs:147-159). The
+    `IndexedEntry` the `PublishIndex` carries does NOT
+    carry `blueprint` / `baseline` / `mbb_per_100` /
+    `ci_95` / `win_rate` (render.rs:164-171 explicitly
+    says "the `INDEX.json`'s `IndexedEntry` shape doesn't
+    carry the per-hand `mbb_per_100` / `win_rate` — those
+    live on the `BenchReport` the next slice will
+    inline. For now the table renders placeholder `—`
+    cells so the column order is visible"). The 5/8
+    placeholder cells are the dashboard's largest single
+    AI-slop risk (a visitor who lands on the URL sees
+    five blank cells in a table the README advertises as
+    populated). The "the next slice will inline" line in
+    render.rs is the open architectural hinge.
+(c) **The "actions" column header + the `<unknown>`
+    literal in the committed INDEX.json timestamp fields
+    are cheap, high-signal Design-UX defects that the
+    afternoon wave did not name.** The "actions" header
+    (render.rs:159) is engineering jargon; a visitor sees
+    the literal string "actions" in the public table. The
+    literal `<unknown>` string in the committed fixture's
+    `created_at_utc` (index.json:4) and every entry's
+    `uploaded_at_utc` (index.json:44, 100) renders to a
+    public visitor when a fresh checkout consumes the
+    committed fixture.
+(d) **The morning wave's `STW-038` `TrainerError` enum
+    refactor + `STW-039` typed `Step` enum Rust module
+    are still the canonical "improve X" anti-patterns
+    the task body explicitly bans.** STW-044 (re-scope
+    to per-arm error-shape audit) and STW-045 (re-scope
+    to bash wrapper, no Rust module) are the right
+    shapes; both are unstarted.
+(e) **The morning wave's `STW-040` README `## Try it
+    now` section + `STW-041` STW-001 retirement are
+    still busywork the testnet north star does not
+    need.** STW-046 (drop both) is the right shape; it
+    is unstarted.
+
+The third 2026-06-04 wave therefore: (1) carries STW-043
+forward unchanged as the first P0 (it is the structural
+twin of the just-shipped STW-042); (2) carries STW-045 +
+STW-046 forward unchanged as P1s (the re-scope + drop
+shapes are correct); (3) introduces two new P0/P1
+slices — STW-047 (the live INDEX.json column-shape
+fix the afternoon wave named as "the next slice" in
+render.rs but did not row up) and STW-048 (the
+"actions" + `<unknown>` design-UX defects the afternoon
+wave did not name) — to close the highest-signal gaps
+the third pass found.
+
+Each row below names a single shippable slice with
+named files, verification command(s), and a `lens:` tag
+tracing the finding it closes. Rows are P0/P1 ordered;
+the top row is the highest single-shipment leverage.
+The `STW-043` / `STW-045` / `STW-046` rows below are
+**re-affirmations of the afternoon wave's open rows**;
+they are NOT new scope. The new scope is `STW-047`
+and `STW-048`.
+
+- [ ] **[P0] `STW-043` (carry-over from afternoon wave
+  `t_35186537`) `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+  + `scripts/commit-bench-fixture.sh` operator shim
+  that produces a byte-stable `BenchReport` from
+  `trainer --bench` against a no-DB deterministic
+  small-config run.** The third pass's three lenses
+  re-confirm this as P0: the afternoon CEO lens
+  named it the only open P0; the third-pass CEO lens
+  re-confirms the testnet north star's "publicly-
+  visible + downloadable" requirement is incomplete
+  without a committed single-config bench result
+  (the just-shipped STW-042 commits the *compare3*
+  result; this commits the *bench* result — the two
+  coexist). The third-pass Eng lens names the exact
+  files (mirror STW-042's `compare3-fixture.json`
+  shape one-for-one): new `scripts/commit-bench-
+  fixture.sh` pure-bash shim, new `crates/autotrain/
+  tests/fixtures/bench-report-fixture.json` byte-
+  stable hand-authored fixture in the `BenchReport::
+  to_json` shape with `run_id` / `started_at_utc`
+  stripped, new `crates/autotrain/tests/bench_report_
+  fixture.rs` integration test that re-runs the shim
+  + diffs against the committed fixture, new
+  `script_shape.rs` pins. The third-pass Design lens
+  names the same completion signal: a CI dashboard
+  can `grep ^mbb_per_100 crates/autotrain/tests/
+  fixtures/bench-report-fixture.json` and receive the
+  number; a fresh `cargo run -p rbp-dashboard` will
+  show a `Demo data: /bench/bench-report-fixture`
+  link alongside the existing `Demo data:
+  /bench/compare3-fixture` link in the static
+  `index.html` empty-state (render.rs:14-21 doc
+  comment + index.html:128-130 existing pattern).
+  Scope boundary: the *production* benchmark path is
+  unchanged; the shim is a *separate* script the
+  operator runs to *produce* the committed fixture.
+  Verification commands: `bash -n scripts/commit-
+  bench-fixture.sh`, `./scripts/commit-bench-
+  fixture.sh /tmp/bench-report.json` (exits 0 +
+  produces a parseable JSON file), `cargo test -p
+  rbp-autotrain --test bench_report_fixture`,
+  `cargo test -p rbp-autotrain --test script_shape`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt --check`.
+  Required tests: 2 new integration sub-tests in
+  `crates/autotrain/tests/bench_report_fixture.rs` +
+  2 new shape pins in `crates/autotrain/tests/
+  script_shape.rs`. Dependencies: STW-010 (the
+  `trainer --bench` mode), STW-031 (the `BenchReport`
+  shape the fixture is in). Estimated scope: S.
+  Completion signal: `cargo test -p rbp-autotrain
+  --test bench_report_fixture` is green with 2 new
+  sub-tests passing; the committed fixture's
+  `sha256sum` matches the in-tree digest the slice
+  ships; a fresh `cargo run -p rbp-dashboard`
+  serves a populated `/bench/bench-report-fixture`
+  card with the v1 numbers visible to a fresh
+  checkout. **`lens:` CEO (the publicly-visible
+  leg of the testnet north star's "downloadable"
+  requirement) + Eng (the bench result is the
+  structural twin of the just-shipped compare3
+  result; the seams are already laid) + Design
+  (the empty-state "Demo data" link is the
+  visitor's first impression of the bench path;
+  one link is half a story).**
+
+- [ ] **[P0] `STW-047` Wire the live `INDEX.json` →
+  dashboard table so the 5/8 placeholder `—` cells
+  render real `blueprint` / `baseline` / `mbb_per_100`
+  / `ci_95` / `win_rate` numbers from the indexed
+  `BenchReport`, not a dash.** Closes the
+  `render.rs:164-171` "the next slice will inline"
+  architectural hinge the third-pass CEO + Design
+  lenses both name as the *single highest-leverage
+  public-surface defect* on `main` today. A fresh
+  `cargo run -p rbp-dashboard` that points at a real
+  published INDEX.json from a `trainer --publish-
+  index` run renders a table with the `receipt_
+  basename` / `total_bytes` / `uploaded_at_utc`
+  columns populated, but the 5/8 `blueprint` /
+  `baseline` / `mbb_per_100` / `ci_95` / `win_rate`
+  cells render `—` for every row — a first-time
+  visitor sees a "real" table that reads as half-
+  empty. The fix is structural: extend the
+  `IndexedEntry` shape in `crates/autotrain` (the
+  `PublishIndex` aggregator that writes INDEX.json)
+  to *include* the per-receipt `blueprint` /
+  `baseline` / `mbb_per_100` / `ci_95` / `win_rate`
+  fields the bench produces (the bench's stdout
+  already has them in a fixed format string the
+  STW-010 + STW-018 + STW-031 lib tests pin), then
+  extend the dashboard's `render_index_table` in
+  `render.rs:163-200` to render the new
+  `entry.bench.blueprint` / `entry.bench.baseline` /
+  `entry.bench.mbb_per_100` / `entry.bench.ci_95` /
+  `entry.bench.win_rate` fields instead of the 5
+  `—` placeholders, then delete the `placeholder_
+  cells_present` lib test (render.rs:171) that
+  *pins* the placeholders. The demo-data fallback
+  (STW-042 compare3-fixture, STW-043 bench-report-
+  fixture) is unchanged — the *live* path is what
+  gets wired. Owner files: `crates/autotrain/src/
+  publish_index.rs` (extend the `IndexedEntry`
+  struct with the 5 new bench fields + extend the
+  `to_json` format string the aggregator emits
+  + extend the `--verify-index` re-verifier to
+  assert the new fields are present + byte-stable),
+  `crates/dashboard/src/render.rs` (extend
+  `render_index_table` to read the 5 new fields
+  from each `IndexedEntry` + render them as
+  numeric monospace `<td>` cells, replacing the 5
+  `—` placeholders at render.rs:180-184; the
+  2 new lib tests pin the per-row column shape
+  + the `<dt>`-shaped cell render for `±ci_95`
+  + the `win_rate` percentage format), `crates/
+  dashboard/tests/smoke.rs` (extend the 4-route
+  drive to assert the new cells contain the
+  fixture's `mbb_per_100` value, not `—`),
+  `crates/dashboard/tests/fixtures/index.json`
+  (extend the committed fixture with realistic
+  per-entry bench fields; STW-048 below is the
+  dedicated `<unknown>`-timestamp sweep; this
+  slice ships realistic bench numbers),
+  `IMPLEMENTATION_PLAN.md` (this row). Scope
+  boundary: does NOT change the `Compare3Report`
+  shape (STW-042 / STW-043 are demo data; this is
+  the live-index path); does NOT change the
+  `BenchReport::to_json` autotrain shape (the
+  aggregator reads the existing bench JSON, it
+  does not change the emitter); does NOT change
+  the room protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means cluster counts,
+  the v1 / v2 / v3 / v4 named baselines, the
+  `CFR_TREE_COUNT_NLHE` baseline, the
+  `trainer --replay` CLI, the
+  `trainer --verify-receipt` CLI, or the
+  `trainer --smoke` / `trainer --bench` /
+  `trainer --compare` / `trainer --compare3`
+  JSON contracts. Verification commands:
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the new
+  `bench_fields_in_index_round_trip` pin
+  passes), `cargo test -p rbp-dashboard --lib`
+  (the 2 new column-shape lib tests pass),
+  `cargo test -p rbp-dashboard --test smoke`
+  (the extended 4-route drive passes + asserts
+  the new cells contain the fixture's bench
+  value, not `—`), `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`. Hand-test command:
+  `cargo run -p rbp-dashboard -- --port 18080
+  &; sleep 2; curl -s http://localhost:18080/
+  api/index | jq '.entries[0] | .bench.
+  mbb_per_100'` (returns a number, not null).
+  Required tests: 2 new lib tests in
+  `crates/dashboard/src/render.rs::tests`
+  (per-row column shape + numeric cell render)
+  + 1 new `script_shape.rs` pin
+  (`bench_fields_in_index_round_trip`) + 1
+  extension to the existing 4-route smoke
+  drive. Dependencies: STW-031 (the
+  `Compare3Report` + `BenchReport` shapes
+  the aggregator reads), STW-034 (the
+  `--publish-index` aggregator the new fields
+  are added to), STW-035 (the `--verify-
+  index` re-verifier the new pin is added
+  to). Estimated scope: M. Completion
+  signal: `cargo run -p rbp-dashboard` on a
+  fresh checkout pointing at the committed
+  `crates/dashboard/tests/fixtures/index.json`
+  serves a table with all 8 columns
+  populated (the `receipt_basename` /
+  `total_bytes` / `uploaded_at_utc` columns
+  are populated today; the 5 new bench
+  columns are populated by this slice) —
+  the `placeholder_cells_present` lib test
+  is removed and the new `live_index_table_
+  renders_bench_cells_with_values` test
+  pins the new behavior; a CI dashboard
+  scraping `GET /api/index` receives the
+  bench numbers, not the `—` placeholder
+  string. **`lens:` CEO (the publicly-
+  visible + downloadable leg of the
+  testnet north star; a half-empty table
+  is a credibility-erosion signal a
+  stranger sees on first visit) + Eng
+  (the render.rs:164-171 "next slice will
+  inline" hinge is named; the seam is
+  small) + Design (the 5/8 placeholder
+  cells are the single largest AI-slop
+  risk in the public surface; the
+  `placeholder_cells_present` lib test
+  *pins* the defect as a feature).**
+
+- [ ] **[P1] `STW-048` Replace the `actions` column
+  header (render.rs:159) with two per-action column
+  headers (`transcript` / `replay`) AND replace the
+  literal `<unknown>` strings in the committed
+  `crates/dashboard/tests/fixtures/index.json` (line
+  4 + lines 41 + 44 + 97 + 100) with realistic
+  fixed-ISO-8601 timestamps the dashboard's
+  `meta` line (index.html:211) renders instead of
+  the `<unknown>` literal.** Closes two cheap
+  high-signal Design-UX defects the third-pass
+  Design lens names that the afternoon wave did
+  not. The `actions` column header at render.rs:159
+  is engineering jargon — a visitor who inspects
+  the page source / a future i18n pass / a screen
+  reader sees the literal string "actions" in the
+  public-facing table. The fix is mechanical:
+  split the single `<th>actions</th>` into two
+  `<th>transcript</th>` + `<th>replay</th>` cells
+  and split the single `<td>` link pair at
+  render.rs:191-198 into two `<td>` cells, one
+  per link. The "actions" / "transcript" /
+  "replay" headers are each short, English, and
+  the rename is a `render.rs` change only (the
+  CSS class names are unchanged; the existing
+  `index-table__link` class still applies). The
+  `<unknown>` literal sweep is also a `index.json`
+  + `render.rs` change: the fixture's
+  `created_at_utc` (line 4) and every entry's
+  `plan.created_at_utc` (lines 41, 97) +
+  `uploaded_at_utc` (lines 44, 100) +
+  `remote_receipt.uploaded_at_utc` (lines 44,
+  100) get realistic fixed-ISO-8601 timestamps
+  (e.g. `"2026-06-04T05:00:00Z"`,
+  `"2026-06-04T14:01:07Z"`); the dashboard's
+  `meta` line (index.html:211) renders the
+  timestamp verbatim, so a public visitor sees
+  a real timestamp instead of `<unknown>`. Owner
+  files: `crates/dashboard/src/render.rs`
+  (replace the `<th>actions</th>` + the single
+  `<td>` link pair with two per-action columns;
+  add 1 new lib test pinning the
+  per-row-column-shape, asserting both
+  per-action cells contain a `<a>` link with
+  the right `href`; no other test changes),
+  `crates/dashboard/tests/fixtures/index.json`
+  (replace 7 literal `<unknown>` strings with
+  realistic fixed-ISO-8601 timestamps; preserve
+  the `entries[].receipt_basename` shape the
+  fixture's smoke test pins; no other field
+  changes), `IMPLEMENTATION_PLAN.md` (this
+  row). Scope boundary: does NOT change the
+  live `IndexedEntry` shape (STW-047 wires
+  the live bench fields; this slice is the
+  committed-fixture timestamp sweep only);
+  does NOT change the live
+  `crates/autotrain::PublishIndex` shape;
+  does NOT change the autotrain pipeline,
+  the bench harness, the room protocol, the
+  `Schema` contracts, the K-means cluster
+  counts, the v1 / v2 / v3 / v4 named
+  baselines, or any `trainer --*` CLI.
+  Verification commands: `cargo test -p
+  rbp-dashboard --lib` (the 1 new per-row-
+  column-shape lib test passes), `cargo
+  test -p rbp-dashboard --test smoke` (the
+  existing 4-route drive still passes; the
+  2-action-link check is now per-cell), `cargo
+  test --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Hand-test command: `cargo run
+  -p rbp-dashboard -- --port 18080 &; sleep
+  2; curl -s http://localhost:18080/ | grep
+  -E 'transcript|replay'` (both strings
+  present, no `actions` literal), `curl -s
+  http://localhost:18080/ | grep -E
+  '<unknown>'` (zero matches), `curl -s
+  http://localhost:18080/api/index | jq
+  '.created_at_utc'` (returns a real ISO
+  timestamp, not `<unknown>`). Required tests:
+  1 new lib test in `crates/dashboard/src/
+  render.rs::tests` (per-row column shape
+  with split actions columns) + zero
+  integration test changes (the existing
+  4-route drive is extended to assert the
+  per-cell link shape). Dependencies: none —
+  STW-048 is independent of STW-043 / STW-047
+  and can ship in any order. Estimated scope:
+  XS. Completion signal: a fresh `cargo
+  run -p rbp-dashboard` serves a table with
+  two per-action column headers
+  (`transcript` / `replay`) and a `meta`
+  line that shows a real ISO-8601
+  timestamp; the literal string
+  `<unknown>` does not appear anywhere in
+  the rendered HTML; the existing `4-route
+  drive` smoke test still passes; the
+  committed fixture's timestamps are
+  realistic + byte-stable. **`lens:` Design
+  (the cheapest, highest-signal public-
+  surface defects the third pass found;
+  the `actions` header is engineering
+  jargon in a public-facing table; the
+  `<unknown>` literal is the single most
+  visible "this is a test fixture" tell
+  in the deployed surface).**
+
+- [ ] **[P1] `STW-045` (carry-over from afternoon wave
+  `t_35186537`) `scripts/trainer-observe.sh` wrapper
+  that prepends `date +%s%3N` to every stderr line
+  the trainer emits and writes a `trainer.step.jsonl`
+  per-run timeline file.** The third pass re-
+  confirms the morning wave's `STW-039` typed
+  `Step` enum Rust module is the canonical
+  "improve X" anti-pattern the task body
+  explicitly bans — a 200+ line Rust module whose
+  only consumer is "a CI worker wants per-step
+  timing" is the wrong shape; a 30-line bash
+  wrapper is the right shape. The third-pass
+  Design lens re-confirms the operator-UX value
+  (a CI dashboard can `jq -c 'select(.stream ==
+  "summary")' run.step.jsonl` and receive a
+  one-line per-run summary) is the highest-signal
+  observability gap on `main` today. The third-
+  pass Eng lens confirms the wrapper is mode-
+  agnostic (the same `scripts/trainer-observe.sh
+  /tmp/run.step.jsonl trainer --bench` works
+  against `--compare3` / `--verify-receipt` /
+  `--publish` / etc.) and the existing
+  `crates/autotrain/tests/script_shape.rs`
+  pinner pattern accommodates a new
+  `trainer_observe_script_exists_and_parses`
+  pin with no new infrastructure. Owner files:
+  `scripts/trainer-observe.sh` (new pure-bash
+  wrapper; the only logic is the `fork + pipe
+  stderr + prepend date +%s%3N + jq` loop;
+  mirrors the `scripts/testnet-live-proof.sh`
+  shape), `crates/autotrain/tests/
+  script_shape.rs` (add 1 new shape pin:
+  `trainer_observe_script_exists_and_parses`),
+  `crates/autotrain/tests/trainer_observe.rs`
+  (new no-DB-shape integration test; requires
+  `DATABASE_URL` to be set for the child
+  `trainer --bench` invocation, mirrors the
+  existing `bench.rs` / `compare.rs` /
+  `compare3.rs` integration tests' database-
+  gating pattern), `IMPLEMENTATION_PLAN.md`
+  (this row; mark the morning-wave STW-039
+  row as `RESCOPED 2026-06-04 by STW-045`).
+  Scope boundary: the wrapper is *additive* —
+  the trainer binary is unchanged; a future
+  operator who runs `trainer --bench`
+  without the wrapper sees the *same* output
+  they see today; an operator who runs
+  `scripts/trainer-observe.sh <out.jsonl>
+  trainer --bench` sees the same output
+  *plus* a parallel JSONL timeline. The
+  wrapper is *transparent* to any existing
+  CI pipeline that runs `trainer --bench`
+  and asserts exit 0 — the wrapper
+  preserves the exit code. Verification
+  commands: `bash -n scripts/trainer-
+  observe.sh`, `scripts/trainer-observe.sh
+  /tmp/test.step.jsonl trainer --bench --
+  blueprint v1 --baseline preflop --bench-
+  hands 4` (exits 0 + the JSONL file has
+  at least 2 lines: one `stream: "stderr"`
+  line + one `stream: "summary"` line),
+  `jq -c . /tmp/test.step.jsonl | head -5`
+  (the JSONL is line-parseable),
+  `cargo test -p rbp-autotrain --test
+  trainer_observe` (the 1 new integration
+  sub-test passes), `cargo test -p
+  rbp-autotrain --test script_shape` (the
+  1 new shape pin passes), `cargo test
+  --workspace -- --test-threads=4`, `cargo
+  check --workspace`, `cargo fmt --check`.
+  Required tests: 1 new integration sub-
+  test in `crates/autotrain/tests/
+  trainer_observe.rs` + 1 new shape pin
+  in `crates/autotrain/tests/
+  script_shape.rs`. Dependencies: STW-010
+  (the `trainer --bench` mode the wrapper
+  is most useful against — the wrapper is
+  mode-agnostic, but the integration test
+  drives `--bench` for the smallest end-
+  to-end smoke). Estimated scope: S.
+  Completion signal: `cargo test -p
+  rbp-autotrain --test trainer_observe`
+  is green with 1 new integration sub-
+  test passing; the
+  `scripts/trainer-observe.sh` wrapper is
+  on disk + executable + parses with
+  `bash -n`; a CI dashboard can
+  `jq -c 'select(.stream == "summary")'
+  run.step.jsonl` the file and receive
+  a one-line per-run summary. **`lens:`
+  Design (the observability audit) —
+  closes the same finding the morning
+  wave named, with the *bash wrapper*
+  shape, not the *Rust module* shape,
+  so no autotrain Rust crate changes
+  and no risk of regressing the
+  existing per-arm log shape.**
+
+- [ ] **[P1] `STW-046` (carry-over from afternoon wave
+  `t_35186537`) Drop the morning-wave `STW-040`
+  README `## Try it now` + the
+  `scripts/replay-locally.sh` shim and the
+  morning-wave `STW-041` STW-001 planning-surface
+  retirement from the active queue.** The third
+  pass re-confirms both rows are busywork the
+  testnet north star does not need and the
+  third-pass Design lens re-confirms a third
+  redundant README section + a zero-test
+  planning-process row are the canonical
+  AI-design-sludge anti-patterns the task body
+  explicitly bans. The existing
+  `## Testnet launch proof` + `## Public
+  dashboard` README sections (lines 220-247 +
+  290-333 in the current README) already
+  answer the first-time-visitor question; the
+  existing `[!] STW-001` deferred row in
+  `IMPLEMENTATION_PLAN.md` already serves as
+  the operator-sign-off blocker the original
+  STW-041 wanted to retire. Owner files:
+  `IMPLEMENTATION_PLAN.md` (mark the morning-
+  wave STW-040 row as
+  `DROPPED 2026-06-04 by STW-046` and the
+  morning-wave STW-041 row as
+  `DROPPED 2026-06-04 by STW-046`; no other
+  changes — the existing `[!] STW-001`
+  deferred row in the
+  `## Deferred items (need operator
+  decision before promotion)` section is
+  *preserved verbatim*), `README.md` (NO
+  CHANGE — the existing
+  `## Testnet launch proof` +
+  `## Public dashboard` sections are the
+  operator-UX answer; no `## Try it now`
+  section is added; the
+  `Public dashboard: <https://robopoker-
+  testnet-dashboard.pages.dev/>` line at
+  line 313 is preserved verbatim),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (NO CHANGE — the v10 follow-on is marked
+  shipped as the STW-036 row already did;
+  the morning wave's STW-040 / STW-041
+  additions to the roadmap are not made).
+  Scope boundary: does NOT add a
+  `## Try it now` section to `README.md`;
+  does NOT add a
+  `scripts/replay-locally.sh` shim; does
+  NOT add a
+  `genesis/AUTHORED-QUEUE.md` fallback
+  queue; does NOT mark `STW-001` as
+  `RETIRED` in `IMPLEMENTATION_PLAN.md`
+  (the deferred `[!]` row is preserved);
+  does NOT change the room protocol, the
+  `Schema` contracts, the autotrain
+  pipeline, the K-means cluster counts,
+  the v1 / v2 / v3 / v4 named baselines,
+  the `CFR_TREE_COUNT_NLHE` baseline, or
+  any `trainer --*` CLI. Verification
+  commands: `git diff -- IMPLEMENTATION_
+  PLAN.md` (the diff is the two `DROPPED`
+  markers + this STW-046 row, nothing
+  else), `grep -q '## Testnet launch
+  proof' README.md` (the existing first-
+  time-visitor section is preserved),
+  `grep -q '## Public dashboard'
+  README.md` (the existing public-
+  dashboard section is preserved),
+  `grep -q '## Try it now' README.md` →
+  exit 1 (the *redundant* section is *not*
+  added — the *absence* of the section is
+  the completion signal), `cargo test
+  --workspace -- --test-threads=4` (the
+  drop does not change the autotrain
+  pipeline), `cargo check --workspace`,
+  `cargo fmt --check`. Required tests:
+  none — STW-046 is a queue-cleanup
+  decision, not a code change. Dependencies:
+  none. Estimated scope: XS. Completion
+  signal: the
+  `IMPLEMENTATION_PLAN.md` morning-wave
+  STW-040 + STW-041 rows are both marked
+  `DROPPED 2026-06-04 by STW-046` with a
+  one-line note; the existing
+  `## Testnet launch proof` +
+  `## Public dashboard` README sections
+  are preserved verbatim; the existing
+  `[!] STW-001` deferred row is preserved
+  verbatim; the `## Try it now` section
+  is *not* added to `README.md`. The
+  operator's review budget is freed for
+  STW-043 (the bench-report demo-data
+  fixture) and STW-047 (the live
+  INDEX.json → dashboard column shape
+  wire). **`lens:` Design (the AI-slop
+  review: a third redundant README
+  section + a zero-test planning-process
+  row are the canonical AI-design-sludge
+  patterns the task body explicitly bans)
+  + CEO (the testnet north star's
+  "publicly-visible" requirement is served
+  by the v10 dashboard + the
+  `## Public dashboard` README section
+  the v10 ships — not by a
+  `## Try it now` reframe).**
