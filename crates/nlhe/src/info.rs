@@ -33,6 +33,7 @@ type NlheBranch = Branch<NlheEdge, NlheGame>;
 /// actions are distinct info sets. This handles cases where different game tree
 /// paths lead to different betting options due to stack constraints.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NlheInfo {
     public: NlhePublic,
     secret: NlheSecret,

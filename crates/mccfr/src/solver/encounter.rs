@@ -19,6 +19,7 @@ use rbp_core::*;
 /// and stored redundantly for each action to enable efficient frontier evaluation
 /// in depth-limited search and safe subgame solving.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Encounter {
     pub weight: Probability,
     pub regret: Utility,

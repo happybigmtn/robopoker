@@ -17,7 +17,7 @@ use rbp_core::*;
 ///
 /// Empty slots are `None`, enabling partial deals (e.g., preflop-only).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "client", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Arrangement([Option<Card>; 7]);
 
 impl Default for Arrangement {

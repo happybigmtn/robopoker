@@ -9,6 +9,7 @@
 ///
 /// [`Permutation`]: super::permutation::Permutation
 #[derive(Debug, Default, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Suit {
     #[default]
     C = 0,

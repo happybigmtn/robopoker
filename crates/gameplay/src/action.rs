@@ -15,6 +15,7 @@ const BITS: u32 = MASK.count_ones();
 /// Actions pack into `u32` for compact storage: 8 bits for the variant tag,
 /// remaining bits for chip amounts or card data.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Action {
     Draw(Hand),
     Fold,

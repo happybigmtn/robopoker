@@ -11,6 +11,7 @@ use rbp_transport::Support;
 ///
 /// Newtype wrapper around gameplay `Edge` for NLHE-specific CFR.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NlheEdge(Edge);
 
 impl NlheEdge {

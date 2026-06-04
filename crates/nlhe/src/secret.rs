@@ -8,6 +8,7 @@ use rbp_transport::Support;
 ///
 /// Newtype wrapper around gameplay `Abstraction` for NLHE-specific CFR.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NlheSecret(Abstraction);
 
 impl NlheSecret {

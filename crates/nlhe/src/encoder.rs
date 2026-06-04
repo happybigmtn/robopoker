@@ -18,6 +18,7 @@ type NlheTree = Tree<NlheTurn, NlheEdge, NlheGame, NlheInfo>;
 /// With the `database` feature, implements [`Hydrate`] to load the
 /// isomorphism→abstraction mapping from PostgreSQL.
 #[derive(Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NlheEncoder(BTreeMap<Isomorphism, Abstraction>);
 
 impl NlheEncoder {

@@ -16,6 +16,7 @@ use std::hash::Hash;
 /// - `Raise(Odds)` — Pot-relative raise (e.g., 1/2 pot, 2x pot)
 /// - `Shove` — All-in bet
 #[derive(Debug, Clone, Copy, Hash, Ord, PartialOrd, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Edge {
     Draw,
     Fold,

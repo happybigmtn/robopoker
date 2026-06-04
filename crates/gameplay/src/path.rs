@@ -19,6 +19,7 @@ use rbp_core::*;
 /// - Strategy table lookups
 /// - Subgame depth tracking (counting trailing raises)
 #[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Path(u64);
 
 impl Path {

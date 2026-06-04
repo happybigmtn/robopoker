@@ -21,6 +21,7 @@ use rbp_core::Arbitrary;
 /// `Hand` implements `Iterator<Item = Card>`, yielding cards from low to high.
 /// This consumes the hand; clone first if you need to preserve it.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Hand(u64);
 
 impl Hand {

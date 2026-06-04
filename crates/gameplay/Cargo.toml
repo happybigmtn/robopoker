@@ -12,6 +12,7 @@ categories     = ["game-development"]
 
 [features]
 default = []
+serde   = ["dep:serde", "rbp-cards/serde"]
 client  = ["serde", "rbp-cards/client"]
 
 [dependencies]
