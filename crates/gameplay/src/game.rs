@@ -1370,10 +1370,16 @@ mod tests {
         assert_eq!(game.pot(), 12);
     }
 
-    /// cannot continue if player busts
+    /// heads-up all-in showdown distributes the pot either to one winner
+    /// (200) or as a 100/100 chop, but never otherwise. The board is
+    /// dealt by `Deck::deal` which draws from a thread-local RNG, so the
+    /// test asserts the conservation property — every chip risked is
+    /// paid out to a player, no chip is created or destroyed — instead
+    /// of the brittle "always winner-takes-all" invariant that broke
+    /// when a random board paired the hole cards into a tie.
     #[test]
     fn bust_prevents_next() {
-        // create game where one player will bust
+        // create game where both players shove all-in
         let game = Game::root();
         let shove = game.to_shove();
         let game = game.apply(Action::Shove(shove));
@@ -1388,13 +1394,88 @@ mod tests {
                 game = game.apply(Action::Draw(cards));
             }
         }
-        // total pot is 200 (100 from each), winner gets it all
+        // total pot is 200 (100 from each). The board can tie the two
+        // hole cards, in which case `Showdown::settle` splits 100/100
+        // (each player gets their own 100 back and 0 of the other's
+        // chips), or one hand wins outright (loser 0, winner 200).
+        // Both outcomes are valid heads-up all-in settlements; the
+        // property the test is really pinning is conservation: every
+        // chip risked is paid out to a player.
         let rewards: Vec<_> = game
             .settlements()
             .iter()
             .map(|s| s.pnl().reward())
             .collect();
-        assert!(rewards.contains(&0) && rewards.contains(&200));
+        assert_eq!(
+            rewards.iter().sum::<Chips>(),
+            200,
+            "showdown must conserve the 200-chip pot"
+        );
+        for r in &rewards {
+            assert!(
+                [0, 100, 200].contains(r),
+                "heads-up all-in reward must be 0 (bust), 100 (chop), or 200 (winner): got {r}"
+            );
+        }
+        // Exactly one of {winner-takes-all, chop} is the outcome; the
+        // rewards themselves are either {0, 200} or {100, 100}.
+        let sorted: Vec<Chips> = {
+            let mut v = rewards.clone();
+            v.sort_unstable();
+            v
+        };
+        assert!(
+            sorted == vec![0, 200] || sorted == vec![100, 100],
+            "expected {{0, 200}} or {{100, 100}} reward split, got {rewards:?}"
+        );
+    }
+
+    /// Regression: the heads-up all-in showdown must conserve the pot
+    /// for every legal board, not just boards where one hand wins. Runs
+    /// the same `bust_prevents_next` flow across many distinct RNG
+    /// draws (multiple threads of `Deck::deal`) and asserts the
+    /// conservation property holds for every draw that lands the hand
+    /// in a terminal state. Before the assertion was relaxed, this
+    /// test reproduced the workspace-parallel flake at
+    /// `crates/gameplay/src/game.rs:1397` (board ties, rewards became
+    /// 100/100, exact `contains(0) && contains(200)` failed).
+    #[test]
+    fn bust_prevents_next_conserves_pot_across_boards() {
+        for trial in 0..32 {
+            let game = Game::root();
+            let shove = game.to_shove();
+            let game = game.apply(Action::Shove(shove));
+            let shove = game.to_shove();
+            let game = game.apply(Action::Shove(shove));
+            let mut game = game;
+            while !game.must_stop() {
+                if game.must_deal() {
+                    let cards = game.deck().deal(game.street());
+                    game = game.apply(Action::Draw(cards));
+                }
+            }
+            let rewards: Vec<Chips> = game
+                .settlements()
+                .iter()
+                .map(|s| s.pnl().reward())
+                .collect();
+            assert_eq!(
+                rewards.iter().sum::<Chips>(),
+                200,
+                "trial {trial}: pot must be conserved (200 chips risked, 200 paid out)"
+            );
+            assert_eq!(
+                rewards.len(),
+                2,
+                "trial {trial}: heads-up must produce 2 settlements"
+            );
+            for r in &rewards {
+                assert!(
+                    [0, 100, 200].contains(r),
+                    "trial {trial}: reward {r} not in {{0, 100, 200}}"
+                );
+            }
+        }
     }
 
     /// actor_idx wraps correctly with ticker
