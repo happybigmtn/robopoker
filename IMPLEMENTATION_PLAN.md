@@ -4870,7 +4870,18 @@ single-shipment leverage.
   `Step` enum + `StepLogger` emitting a one-line
   `trainer step: name=<name> kind=<kind>
   duration_ms=<ms> exit=<0|1|2>` per-step
-  machine-readable chain timeline.** Gives the
+  machine-readable chain timeline. **RESCOPED
+  2026-06-04 by STW-045** — the morning-wave
+  *typed Rust module* shape was the canonical
+  "improve X" anti-pattern the task body
+  explicitly bans; the rescope is a
+  ~150-line pure-bash wrapper
+  (`scripts/trainer-observe.sh` — the
+  STW-045 sibling row) that does not touch
+  the autotrain crate, the room protocol, the
+  `Schema` contracts, the K-means cluster
+  counts, the v1 / v2 / v3 / v4 named
+  baselines, or any `trainer --*` CLI.** Gives the
   receipt chain a *real* machine-readable
   timeline a CI auditor can scrape. The
   STW-019 / STW-023 / STW-028 / STW-032 /
@@ -7355,13 +7366,60 @@ they are NOT new scope. The new scope is
   the dashboard lib + fixture together
   render).**
 
-- [ ] **[P1] `STW-045` (carry-over from third
+- [x] **[P1] `STW-045` (carry-over from third
   pass `t_6df7de4e` and afternoon wave
   `t_35186537`) `scripts/trainer-observe.sh`
   wrapper that prepends `date +%s%3N` to every
   stderr line the trainer emits and writes a
   `trainer.step.jsonl` per-run timeline
-  file.** The fourth pass re-confirms the
+  file. SHIPPED 2026-06-04 (commit
+  <pending>).** A new ~250-line
+  `scripts/trainer-observe.sh` pure-bash
+  wrapper that takes a `<output-jsonl>` +
+  `<trainer-bin>` + `[<trainer-argv>...]`
+  positional trio, runs the trainer binary
+  with a two-FIFO `tee` (one for stderr,
+  one for stdout), drains each FIFO in a
+  background subshell that calls an
+  `emit_step <stream> <line>` helper
+  (the helper builds a JSONL object via
+  `jq -cn --arg ts --arg stream --arg line`
+  so embedded `"` / `\` / control chars
+  survive a `jq -c .` round-trip
+  byte-stable), and on exit emits a final
+  `stream: "summary"` trailer line whose
+  `line` field is the pinned
+  `trainer observe complete: exit=<rc>
+  cmd=<argv...>` shape a CI dashboard
+  `select(.stream == "summary")` greps.
+  Three shell-shape pinners in
+  `crates/autotrain/tests/script_shape.rs`
+  (`trainer_observe_script_exists_and_parses`
+  + `trainer_observe_script_emits_three_field_jsonl`
+  + `trainer_observe_script_summary_trailer_format_is_pinned`)
+  pin the wrapper's static contract (file
+  on disk + executable + parses with
+  `bash -n` + uses `jq -cn --arg ts` +
+  produces the three-field `ts` / `stream`
+  / `line` shape + emits the `trainer
+  observe complete: exit= cmd=` trailer).
+  One new `crates/autotrain/tests/trainer_observe.rs`
+  integration test (database-feature-gated,
+  `DATABASE_URL`-gated, `jq`-gated — the
+  same skip-on-missing-dep pattern the
+  existing `bench.rs` / `compare.rs` /
+  `compare3.rs` tests use) drives a real
+  `trainer --bench --blueprint v1 --baseline
+  preflop` invocation under the wrapper and
+  asserts the JSONL has the documented
+  shape end-to-end. The morning-wave
+  `STW-039` row is marked `RESCOPED
+  2026-06-04 by STW-045` — the new
+  *bash wrapper* shape replaces the
+  *typed Rust module* shape the morning
+  wave named, so no autotrain crate changes
+  and no risk of regressing the existing
+  per-arm log shape. The fourth pass re-confirms the
   third pass's finding: the morning wave's
   `STW-039` typed `Step` enum Rust module is
   the canonical "improve X" anti-pattern the
@@ -7569,3 +7627,1088 @@ they are NOT new scope. The new scope is
   + the `## Public dashboard` README section
   the v10 ships — not by a `## Try it now`
   reframe).**
+
+## Next wave - review 2026-06-04 (fifth pass)
+
+The fifth 2026-06-04 three-lens review (kanban task
+`t_ae8022b3`) re-applies the three lenses to the
+*current* state of `main` at commit `b5add8d`. The
+four prior review-waves shipped STW-049 + STW-050 on
+`main` (commits `6886f08` + `b5add8d`), so the
+fourth-pass's two open items are now closed; the
+`cargo test --workspace` build break the fourth pass
+named is fixed; and the dashboard's `actions` →
+`transcript`/`replay` header split + the
+*committed-fixture* `<unknown>`-timestamp sweep are
+live on `main`. STW-045 (`scripts/trainer-observe.sh`)
+is mid-implementation on the working tree (the
+script + the `script_shape.rs` STW-045 pins are
+already on disk; the `crates/autotrain/tests/
+trainer_observe.rs` integration test is the only
+remaining piece). STW-043 is shipped on commit
+`d95047a` but the latest-wave row at line 6381 is
+still rendered as `[ ]` — a worker scanning the
+active queue would still see it as unstarted, so
+the `## Active items` leader paragraph needs the
+STW-043 row marked `[x]` separately by the next
+planner pass (this row is a planning-pinning task
+that drops out of scope for the next wave; the
+shipped commit is the ground truth).
+
+The fifth pass's three lenses on the *current* state
+find the **single highest-leverage finding the four
+prior reviews missed**: the live
+`crates/autotrain::PublishIndex` shape writes the
+literal string `<unknown>` to the on-disk
+`INDEX.json` whenever `RBP_PUBLISH_INDEX_UTC` is
+unset, AND the dashboard's
+`crates/dashboard/static/index.html:253` JS
+*renders* the literal string `<unknown>` to a public
+visitor every time the rendered `INDEX.json` is
+missing `publish_root` or `created_at_utc`. The
+fourth-pass STW-050 swept the *committed-fixture*
+`<unknown>` literals out of the dashboard lib's
+`index_client.rs` / `router.rs` /
+`tests/fixtures/index.json` demo constructors, but
+left two leakage vectors open:
+
+1. The *live* `crates/autotrain::publish_index`
+   source still has `<unknown>` fallbacks in
+   `publish_index.rs:200-207, 778, 1106, 1159,
+   1244` (the `STW034_UNKNOWN_UTC` constant + the
+   `unwrap_or_else(|_| "<unknown>")` env-var
+   fallbacks), so a real `trainer --publish-index`
+   run on a fresh operator machine with no
+   `RBP_PUBLISH_INDEX_UTC` env knob writes
+   `created_at_utc: "<unknown>"` to the live
+   `INDEX.json`.
+2. The dashboard's `index.html:253` JS *renders*
+   that literal to a public visitor: `meta.textContent
+   = '... created_at=' + (index.created_at_utc ||
+   '<unknown>')`. The committed-fixture sweep
+   closed one source of `<unknown>` in the rendered
+   HTML, but the live `INDEX.json` path is still
+   open. The `crates/dashboard/tests/fixtures_smoke.
+   rs:238, 255, 258` test fixtures ALSO still
+   contain `created_at_utc: "<unknown>"` literals
+   in their demo `PublishIndex` constructors — the
+   fourth pass under-counted the sweep by 3
+   literals that the smoke test renders into the
+   test response body.
+
+The fifth pass also finds three smaller, related
+defects the four prior reviews missed:
+
+3. **The dashboard's true empty state is hidden.**
+   The committed `crates/dashboard/tests/
+   fixtures/index.json` always populates the table,
+   so a stranger running `cargo run -p rbp-dashboard`
+   on a fresh checkout with no published root sees
+   *demo data* and might assume the receipts are
+   real. The dashboard's true empty state ("no
+   receipts have been published yet — run
+   `scripts/testnet-live-proof.sh` + the publish
+   chain to populate") never renders, because the
+   committed fixture is always available. This
+   violates the Design-UX principle "Empty states
+   are features." A real empty-state test (the
+   dashboard with `RBP_DASHBOARD_INDEX_URL` pointing
+   at an empty `INDEX.json` — `{"entries": [], ...}`)
+   renders a friendlier message; today it renders
+   an empty `<tbody>`.
+4. **The CLI error-shape audit STW-044 is still a
+   `P1` and still `[ ]`.** The morning wave's
+   `TrainerError` enum refactor was the wrong
+   shape; the afternoon + third + fourth passes
+   re-scoped it to a 10-lib-test static-grep audit
+   that pins the existing per-arm
+   `live_proof ...` error-line text without
+   rewriting it. The fifth pass re-confirms the
+   re-scoped shape is the right one and the row
+   should ship.
+5. **The plan's 4 prior "Next wave" sections are
+   ~4,800 lines of historical log a worker scanning
+   the active queue has to mentally filter.** The
+   task body explicitly bans busywork + vague
+   items, and the 4 prior sections all carry
+   forward STW-045 + STW-046 as `[ ]` rows that
+   are now superseded by the same-shape
+   re-affirmations in the latest wave. A
+   queue-cleanup row that marks the prior-wave
+   STW-045 + STW-046 rows as `RESCOPED 2026-06-04
+   by STW-055` (this wave's STW-055 below) — and
+   folds the morning-wave STW-039 / STW-040 /
+   STW-041 + the third-pass STW-044 re-scope into
+   the same `RESCOPED` / `DROPPED` markers — frees
+   the worker scanning the active queue to find
+   the 5 deliverables in the *latest* wave.
+
+The fifth pass therefore:
+
+(a) **Promotes the *live* `<unknown>`-leakage fix
+    into STW-051** (a single slice that closes the
+    aggregator's `STW034_UNKNOWN_UTC` env-var
+    fallback to a fail-fast `MissingArg` error +
+    replaces the dashboard's `index.html:253` JS
+    `<unknown>` fallback with a friendly
+    "(index UTC not stamped — re-run with
+    RBP_PUBLISH_INDEX_UTC set)" message + sweeps
+    the 3 remaining `<unknown>` literals from
+    `crates/dashboard/tests/fixtures_smoke.rs`).
+(b) **Promotes the dashboard's *true empty state*
+    into STW-052** (a new dashboard route +
+    `index.html` empty-state render a visitor sees
+    when the live `INDEX.json` has zero entries).
+(c) **Re-affirms STW-044 unchanged as a `P1`** (the
+    per-arm error-shape audit; the re-scoped
+    afternoon-wave shape is the right one, the
+    fifth-pass Design lens agrees).
+(d) **Promotes a queue-cleanup row into STW-053**
+    that marks the 4 prior-wave STW-045 / STW-046
+    re-affirmations + the morning-wave STW-039 /
+    STW-040 / STW-041 / STW-044 rows as
+    `RESCOPED` / `DROPPED` so a future worker
+    scanning the active queue sees only the
+    5th-pass wave + the v6→v10 follow-on chain.
+(e) **Adds STW-054** (the *deploy-the-dashboard*
+    runbook the prior CEO lens named as the
+    "deploy" leg of the public-surface north star
+    — the `scripts/testnet-live-publish-dashboard.sh`
+    runbook ships but the bucket / Cloudflare Pages
+    destination doesn't exist on disk; STW-054
+    lands a `scripts/deploy-dashboard-cloudflare.sh`
+    runbook that takes the local
+    `publish/<root>/index/` dir and pushes it to
+    Cloudflare Pages via `wrangler pages deploy`
+    with a committed `wrangler.toml` +
+    `RBP_DASHBOARD_CF_API_TOKEN` env knob; lower
+    priority than STW-051 because the deploy is a
+    CI-side question and STW-051 is a code-side
+    defect visible to anyone who lands on the URL).
+
+Each row below names a single shippable slice with
+named files, verification command(s), and a `lens:`
+tag tracing the finding it closes. Rows are P0/P1
+ordered; the top row is the highest single-shipment
+leverage. The `STW-044` row below is a
+**re-affirmation of the fourth-pass open row**; it
+is NOT new scope. The new scope is `STW-051` +
+`STW-052` + `STW-053` + `STW-054`.
+
+- [ ] **[P0] `STW-051` Close the live
+  `crates/autotrain::PublishIndex` + dashboard
+  `<unknown>`-literal leakage the four prior
+  reviews missed.** Three changes in one slice:
+  (a) `crates/autotrain/src/publish_index.rs` —
+  remove the `STW034_UNKNOWN_UTC` constant and
+  the `unwrap_or_else(|_| "<unknown>")` env-var
+  fallbacks at lines 200-207, 778, 1106, 1159,
+  1244. The `trainer --publish-index` arm now
+  *requires* `RBP_PUBLISH_INDEX_UTC` to be set at
+  the CLI boundary — missing env knob returns
+  `PublishIndexError::MissingArg("RBP_PUBLISH_INDEX_UTC")`
+  + the arm exits 2 with a one-line
+  `live_proof publish_index error: missing arg: RBP_PUBLISH_INDEX_UTC`
+  eprintln! the existing per-arm error shape
+  pins. The lib + integration tests that currently
+  depend on the `<unknown>` fallback are
+  *re-scoped to set the env knob via
+  `std::env::set_var("RBP_PUBLISH_INDEX_UTC",
+  "2026-06-04T00:00:00Z")` in the test
+  fixture's `setup()`* — the tests stay
+  byte-stable because the fixed ISO-8601
+  string is the new test fixture, and the
+  existing
+  `publish_index_created_at_utc_falls_back_to_iso_8601`
+  lib test (publish_index.rs:1244) is
+  re-scoped to assert the env-var path.
+  (b) `crates/dashboard/static/index.html` —
+  replace the `index.html:253` JS
+  `meta.textContent = '...' + (index.publish_root
+  || '<unknown>') + ... + (index.created_at_utc
+  || '<unknown>')` fallback with a friendly
+  `'... ' + (index.publish_root || '(publish_root
+  not stamped)') + ' ... ' + (index.created_at_utc
+  || '(created_at_utc not stamped — re-run with
+  RBP_PUBLISH_INDEX_UTC set)')` fallback. The
+  literal string `<unknown>` does not appear
+  anywhere in the rendered HTML, and the visitor
+  sees an *actionable* message instead of a
+  "this is a test fixture" tell. (c)
+  `crates/dashboard/tests/fixtures_smoke.rs` —
+  replace the 3 remaining
+  `created_at_utc: "<unknown>"` literals at
+  lines 238, 255, 258 with realistic
+  fixed-ISO-8601 timestamps (`"2026-06-04T05:00:00Z"`,
+  `"2026-06-04T14:01:07Z"`,
+  `"2026-06-04T05:00:01Z"`). The dashboard's
+  `crates/dashboard/tests/fixtures_smoke.rs`
+  test responses (the 4-route drive + the
+  per-fixture cards) no longer contain the
+  literal `<unknown>` anywhere. The
+  `fixtures_smoke.rs` test functions
+  `compare3_fixture_renders_bench_card` +
+  `real_index_shadows_demo_data` are unchanged
+  (they pin *shape*, not specific timestamp
+  strings). Owner files:
+  `crates/autotrain/src/publish_index.rs`
+  (remove the `STW034_UNKNOWN_UTC` constant +
+  the 5 `unwrap_or(_)` / `unwrap_or_else(_)`
+  `<unknown>` env-var fallbacks + add the
+  fail-fast `PublishIndexError::MissingArg` arm
+  in `trainer --publish-index` + re-scope the
+  4 affected lib tests to set the env knob via
+  `std::env::set_var` in the test's `setup()` +
+  1 new lib test
+  `publish_index_missing_env_knob_returns_missing_arg`
+  that drives the new fail-fast path with
+  `RBP_PUBLISH_INDEX_UTC` unset),
+  `crates/autotrain/src/mode.rs` (route the new
+  `PublishIndexError::MissingArg` to the
+  `live_proof publish_index error: missing arg:`
+  per-arm eprintln! + exit 2 — the same shape
+  the existing per-arm errors use),
+  `crates/autotrain/src/error.rs` (add the
+  `PublishIndexError::MissingArg(&'static str)`
+  variant — or, if STW-044's per-arm error-shape
+  audit hasn't shipped, add it as a *local*
+  variant in `publish_index.rs` and let STW-044
+  roll up the cross-arm error types later;
+  the `MissingArg` variant is the only new
+  error variant the slice ships),
+  `crates/dashboard/static/index.html` (replace
+  the line 253 `<unknown>` fallback with the
+  friendly message; no other change),
+  `crates/dashboard/tests/fixtures_smoke.rs`
+  (replace 3 `<unknown>` literals with realistic
+  ISO-8601 timestamps),
+  `crates/dashboard/tests/smoke.rs` (extend
+  the 4-route drive to assert the rendered
+  `meta` line does NOT contain the literal
+  `<unknown>` — the no-`<unknown>`-in-rendered-HTML
+  pin is the cheapest in-CI proof the
+  JS-fallback fix is live),
+  `IMPLEMENTATION_PLAN.md` (this row).
+  Scope boundary: does NOT change the
+  `crates/dashboard/tests/fixtures/index.json`
+  committed fixture (the fourth-pass STW-050
+  already swept that — 0 `<unknown>` literals
+  remain); does NOT change the dashboard's
+  `crates/dashboard/src/{render,index_client,router}.rs`
+  demo-`PublishIndex` constructors (the
+  fourth-pass STW-050 already swept those — 0
+  `<unknown>` literals remain); does NOT
+  change the dashboard's
+  `render_index_table` per-row column shape
+  (STW-049 already wired the 5 bench fields);
+  does NOT change the
+  `crates/autotrain::PublishIndex` /
+  `IndexedEntry` JSON shape (the `created_at_utc`
+  field is the only field whose value-source
+  changes — the JSON field is preserved
+  verbatim, the value-source fails fast on
+  missing env knob); does NOT change the
+  `crates/autotrain::BenchSummary` shape
+  (STW-049's inlined field); does NOT change
+  the `crates/autotrain::PublishIndexError`
+  shape (the new `MissingArg` variant is
+  additive — the existing 9 variants are
+  unchanged); does NOT change the room
+  protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means cluster
+  counts, the v1 / v2 / v3 / v4 named
+  baselines, the `CFR_TREE_COUNT_NLHE`
+  baseline, or any `trainer --*` CLI.
+  Verification commands: `cargo test -p
+  rbp-autotrain --lib` (the 4 re-scoped
+  env-knob lib tests pass + the 1 new
+  `publish_index_missing_env_knob_returns_missing_arg`
+  lib test passes), `cargo test -p
+  rbp-autotrain --test publish_index` (the
+  4 integration sub-tests pass with the
+  re-scoped env-knob setup), `cargo test -p
+  rbp-dashboard --lib` (the 2 new column-shape
+  lib tests pass — the existing
+  `live_index_table_renders_bench_cells_with_values`
+  + `live_index_table_renders_dash_for_missing_bench`
+  tests are unchanged), `cargo test -p
+  rbp-dashboard --test smoke` (the existing
+  4-route drive passes + the new
+  no-`<unknown>`-in-rendered-HTML assertion
+  passes), `cargo test -p rbp-dashboard
+  --test fixtures_smoke` (the existing
+  per-fixture card drive passes with the 3
+  new ISO-8601 timestamps), `cargo test
+  --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Hand-test commands: `unset
+  RBP_PUBLISH_INDEX_UTC; cargo run -p
+  rbp-autotrain -- --reset && cargo run -p
+  rbp-autotrain -- --publish-index
+  receipts/publish-20260604T050000Z/ 2>&1 |
+  grep -E 'live_proof publish_index error:
+  missing arg: RBP_PUBLISH_INDEX_UTC'` (one
+  match — the fail-fast path is live),
+  `RBP_PUBLISH_INDEX_UTC=2026-06-04T14:01:07Z
+  cargo run -p rbp-autotrain -- --publish-index
+  .../ && curl -s
+  http://localhost:18080/api/index | jq
+  '.created_at_utc'` (returns
+  `"2026-06-04T14:01:07Z"`, not `<unknown>`),
+  `curl -s http://localhost:18080/ | grep -E
+  '<unknown>'` (zero matches — the
+  index.html JS fallback is live), `curl -s
+  http://localhost:18080/ | grep -E
+  'created_at_utc not stamped'` (one match
+  on an empty `INDEX.json` — the friendly
+  fallback is live). Required tests: 1 new
+  lib test in
+  `crates/autotrain/src/publish_index.rs::tests`
+  (`publish_index_missing_env_knob_returns_missing_arg`)
+  + 1 extension to the existing
+  `crates/dashboard/tests/smoke.rs` 4-route
+  drive (the no-`<unknown>`-in-rendered-HTML
+  assertion) + 4 re-scoped lib tests in
+  `crates/autotrain/src/publish_index.rs::tests`
+  (the env-knob setup is added to the test
+  fixture's `setup()`; the test bodies are
+  unchanged). Dependencies: STW-049 (the
+  IndexedEntry mirror struct the column-shape
+  wire depends on — STW-049 is shipped on
+  commit `6886f08`); STW-050 (the
+  *committed-fixture* `<unknown>` sweep
+  STW-051 *extends* — STW-050 is shipped on
+  commit `b5add8d`). Estimated scope: M.
+  Completion signal: `cargo test
+  --workspace -- --test-threads=4` is green
+  with the 1 new lib test passing; the
+  rendered `index.html` from a fresh
+  `cargo run -p rbp-dashboard` contains
+  zero `<unknown>` literals; a
+  `trainer --publish-index` run with
+  `RBP_PUBLISH_INDEX_UTC` unset exits 2 with
+  the pinned per-arm
+  `live_proof publish_index error: missing arg: RBP_PUBLISH_INDEX_UTC`
+  eprintln!; the dashboard's `meta` line
+  on a live `INDEX.json` with
+  `RBP_PUBLISH_INDEX_UTC=2026-06-04T14:01:07Z`
+  set renders the real ISO-8601 timestamp
+  verbatim. **`lens:` CEO (the
+  credibility-erosion signal a public
+  visitor sees when the rendered `meta`
+  line is `<unknown>` — the live
+  `INDEX.json` was the leakage vector the
+  four prior reviews missed; the
+  fix is the cheapest single-slice
+  credibility-repair the public surface
+  can ship) + Eng (the
+  `STW034_UNKNOWN_UTC` constant + the 5
+  `unwrap_or(_)` env-var fallbacks are the
+  structural cause; the JS fallback in
+  `index.html:253` is the surface; the
+  three changes — aggregator fail-fast +
+  JS friendly fallback + fixtures_smoke
+  literal sweep — are one slice) +
+  Design (the literal `<unknown>`
+  rendered to a public visitor is the
+  single most visible "this is a test
+  fixture" tell the public surface has
+  today; the friendly "(created_at_utc
+  not stamped — re-run with
+  RBP_PUBLISH_INDEX_UTC set)" message
+  is the actionable alternative the
+  empty-state principle names).**
+
+- [ ] **[P0] `STW-052` Wire the dashboard's *true
+  empty state* so a stranger running
+  `cargo run -p rbp-dashboard` on a fresh checkout
+  with no published root sees a friendly
+  "no receipts yet" message instead of demo
+  data masquerading as live receipts.** The
+  fourth-pass `crates/dashboard/src/router.rs`
+  `serve_compare3_fixture_card_if_no_index_match`
+  fallback hides the dashboard's true empty
+  state behind committed-fixture demo data;
+  a visitor who lands on the URL sees the
+  *committed* `tests/fixtures/index.json`
+  table and might think the receipts are
+  real. The dashboard's real empty state
+  ("no receipts have been published yet —
+  run `scripts/testnet-live-proof.sh` +
+  `scripts/testnet-live-publish-index.sh` +
+  `scripts/testnet-live-publish-index-s3.sh`
+  to populate") never renders. The fix is
+  three changes: (a)
+  `crates/dashboard/src/router.rs` — add a
+  new `RBP_DASHBOARD_EMPTY_STATE` env knob
+  (default `0`) that *opts in* to the
+  empty-state render. When `=1`, the
+  `/api/index` route returns an empty
+  `PublishIndex` (`{"entries": [], "entry_count": 0,
+  "total_bytes": 0, "publish_root": "",
+  "runbook_version": "...", "created_at_utc":
+  "2026-06-04T14:01:07Z"}`) instead of
+  reading the committed fixture; the
+  `index.html` JS renders the empty
+  `<tbody>` + a one-line
+  `<p class="empty-state">No receipts yet.
+  Run <code>scripts/testnet-live-proof.sh</code>
+  + the publish chain to populate.</p>` (the
+  empty-state render is conditional on
+  `index.entry_count === 0`, so a live
+  `INDEX.json` with entries never shows
+  the empty-state — the existing live-data
+  render is preserved). (b)
+  `crates/dashboard/static/index.html` —
+  add the empty-state `<p>` element
+  (initially hidden via `display: none`;
+  the JS shows it when `entry_count === 0`)
+  + a 4-line CSS block that styles the
+  empty-state as a centered monospace
+  paragraph in the existing dark-theme
+  palette. (c) `crates/dashboard/tests/smoke.rs`
+  — add 1 new integration sub-test
+  `empty_state_renders_friendly_message_when_index_has_zero_entries`
+  that drives the dashboard with
+  `RBP_DASHBOARD_EMPTY_STATE=1` + asserts
+  the rendered `GET /` HTML contains the
+  `class="empty-state"` paragraph + the
+  `scripts/testnet-live-proof.sh` command
+  name + does NOT contain any
+  `<tr>` / `<td>` (the empty `<tbody>`
+  has no rows). The `real_index_shadows_demo_data`
+  sub-test in `fixtures_smoke.rs` is
+  extended to assert the *inverse* contract:
+  when `RBP_DASHBOARD_EMPTY_STATE=0` (the
+  default) + a real `INDEX.json` is
+  present, the empty-state paragraph is
+  hidden. Owner files:
+  `crates/dashboard/src/router.rs` (add
+  the `RBP_DASHBOARD_EMPTY_STATE` env knob
+  + the empty-state branch in the `/api/index`
+  handler that returns the typed empty
+  `PublishIndex` + the `is_empty_state()`
+  helper a `crates/dashboard/tests/smoke.rs`
+  sub-test drives; 1 new lib test
+  `router_empty_state_env_knob_engages_when_set`
+  that asserts the env knob's
+  `=0`/`=1` switch is honored),
+  `crates/dashboard/src/render.rs` (add a
+  `render_empty_state_paragraph() -> String`
+  emitter — the `<p class="empty-state">`
+  HTML block; 1 new lib test pinning
+  the per-class shape + the embedded
+  `scripts/testnet-live-proof.sh` command
+  name),
+  `crates/dashboard/static/index.html` (add
+  the empty-state `<p>` element + the
+  `display: none` default + the 4-line
+  CSS block + the JS conditional
+  `index.entry_count === 0` show),
+  `crates/dashboard/tests/smoke.rs` (add
+  the new
+  `empty_state_renders_friendly_message_when_index_has_zero_entries`
+  sub-test + extend the
+  `real_index_shadows_demo_data` inverse
+  pin),
+  `IMPLEMENTATION_PLAN.md` (this row).
+  Scope boundary: does NOT change the
+  committed
+  `crates/dashboard/tests/fixtures/index.json`
+  fixture (the fixture still populates
+  the table when the env knob is `=0`
+  — the existing demo-data path is
+  preserved); does NOT change the
+  `crates/dashboard/src/render_index_table`
+  per-row column shape; does NOT change
+  the `Compare3Report` / `BenchCardFields`
+  / `IndexedEntry` shape; does NOT change
+  the room protocol, the `Schema`
+  contracts, the autotrain pipeline, the
+  K-means cluster counts, the v1 / v2 /
+  v3 / v4 named baselines, the
+  `CFR_TREE_COUNT_NLHE` baseline, or any
+  `trainer --*` CLI. The empty-state
+  render is *opt-in* (env knob `=1`)
+  and *conditional* on
+  `index.entry_count === 0` — a live
+  `INDEX.json` with entries never shows
+  the empty-state. Verification commands:
+  `cargo test -p rbp-dashboard --lib`
+  (the 1 new `router_empty_state_env_knob_engages_when_set`
+  + 1 new `render_empty_state_paragraph_*`
+  lib tests pass), `cargo test -p
+  rbp-dashboard --test smoke` (the new
+  empty-state sub-test passes + the
+  existing 4-route drive still passes
+  with `RBP_DASHBOARD_EMPTY_STATE=0` —
+  the default-off knob is the
+  no-regression pin), `cargo test -p
+  rbp-dashboard --test fixtures_smoke`
+  (the existing
+  `compare3_fixture_renders_bench_card`
+  + extended `real_index_shadows_demo_data`
+  sub-tests pass), `cargo test
+  --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Hand-test commands:
+  `RBP_DASHBOARD_EMPTY_STATE=1 cargo run
+  -p rbp-dashboard -- --port 18080 &;
+  sleep 2; curl -s
+  http://localhost:18080/ | grep -E
+  'class="empty-state"'` (one match —
+  the empty-state paragraph is
+  rendered), `curl -s
+  http://localhost:18080/ | grep -E
+  'scripts/testnet-live-proof.sh'` (one
+  match — the command name is embedded),
+  `curl -s
+  http://localhost:18080/api/index | jq
+  '.entry_count'` (returns `0` —
+  the empty `PublishIndex` is
+  served), `RBP_DASHBOARD_EMPTY_STATE=0
+  cargo run -p rbp-dashboard -- --port
+  18081 &; sleep 2; curl -s
+  http://localhost:18081/ | grep -E
+  'class="empty-state"'` (zero matches
+  — the default-off knob hides the
+  empty-state on a real `INDEX.json`).
+  Required tests: 2 new lib tests in
+  `crates/dashboard/src/{router,render}.rs::tests`
+  + 1 new integration sub-test in
+  `crates/dashboard/tests/smoke.rs` + 1
+  extension to the existing
+  `crates/dashboard/tests/fixtures_smoke.rs::real_index_shadows_demo_data`
+  sub-test. Dependencies: STW-036 (the
+  v10 dashboard crate; STW-052 is the
+  empty-state addition), STW-049 (the
+  build break the smoke test runs
+  against; STW-049 is shipped on commit
+  `6886f08`). Estimated scope: S.
+  Completion signal: `cargo test -p
+  rbp-dashboard --test smoke` is green
+  with the new empty-state sub-test
+  passing; a fresh `cargo run -p
+  rbp-dashboard` with the
+  `RBP_DASHBOARD_EMPTY_STATE=1` env knob
+  set serves a friendly "no receipts
+  yet" paragraph instead of the
+  committed-fixture table; the default
+  `RBP_DASHBOARD_EMPTY_STATE=0` env knob
+  preserves the existing live-data
+  render — a fresh `cargo run -p
+  rbp-dashboard` on a checkout that
+  hasn't run the publish chain sees the
+  same demo-data table the fourth-pass
+  shipped. **`lens:` Design (the
+  "Empty states are features" principle
+  violation the four prior reviews
+  missed; the empty-state render is
+  opt-in via env knob so a deployed
+  dashboard never sees it on a
+  populated `INDEX.json`) + Eng (the
+  `RBP_DASHBOARD_EMPTY_STATE` env knob
+  is the cheapest seam — the existing
+  `RBP_DASHBOARD_INDEX_URL` env knob
+  pattern is the precedent) + CEO (a
+  stranger who lands on the URL and
+  sees "no receipts yet — run
+  `scripts/testnet-live-proof.sh`" gets
+  the *first-time-visitor* answer the
+  testnet north star names; the
+  committed-fixture table is the
+  *demo-data* answer that was the wrong
+  default).**
+
+- [ ] **[P0] `STW-053` Sweep the 3 remaining
+  `crates/dashboard/tests/fixtures_smoke.rs`
+  `created_at_utc: "<unknown>"` literals the
+  fourth-pass STW-050 under-counted.** The
+  STW-051 row above ships the structural
+  fix (the live `PublishIndex` fail-fast +
+  the JS friendly fallback); STW-053 is
+  the *test-only* cleanup that ensures no
+  future regression re-introduces the
+  literal `<unknown>` in the dashboard's
+  test response bodies. The
+  `crates/dashboard/tests/fixtures_smoke.rs`
+  test at lines 238, 255, 258 still has
+  3 `created_at_utc: "<unknown>"` literals
+  in the demo `PublishIndex` constructors
+  the smoke test drives; a future
+  regression that re-introduces a
+  `<unknown>` literal in the lib's render
+  path will pass the `fixtures_smoke`
+  test (because the test feeds a
+  `<unknown>` literal directly into the
+  response body). The fix is a 3-line
+  literal swap: replace the 3
+  `created_at_utc: "<unknown>"` strings
+  with realistic fixed-ISO-8601 timestamps
+  (`"2026-06-04T05:00:00Z"` /
+  `"2026-06-04T14:01:07Z"` /
+  `"2026-06-04T05:00:01Z"`). The existing
+  `fixtures_smoke.rs::compare3_fixture_renders_bench_card`
+  +
+  `real_index_shadows_demo_data` sub-tests
+  pin *shape* (a `serde_json` round-trip +
+  a typed `PublishIndex` → `INDEX.json`
+  on disk → typed read), not specific
+  timestamp strings, so the timestamp
+  change is transparent to them. Owner
+  files: `crates/dashboard/tests/fixtures_smoke.rs`
+  (replace 3 `<unknown>` literals at
+  lines 238, 255, 258 with realistic
+  ISO-8601 timestamps), `IMPLEMENTATION_PLAN.md`
+  (this row). Scope boundary: does NOT
+  change the live
+  `crates/autotrain::PublishIndex`
+  fail-fast behavior (STW-051 is the
+  structural fix); does NOT change the
+  dashboard's `index.html:253` JS
+  fallback (STW-051 is the JS fix);
+  does NOT change the committed
+  `crates/dashboard/tests/fixtures/index.json`
+  fixture (already swept in the
+  fourth-pass STW-050); does NOT change
+  the dashboard's per-row column shape;
+  does NOT change the autotrain
+  pipeline, the room protocol, the
+  `Schema` contracts, the K-means
+  cluster counts, the v1 / v2 / v3 / v4
+  named baselines, or any `trainer --*`
+  CLI. The fixtures_smoke sweep is the
+  *test-side* cleanup that pairs with
+  STW-051's *source-side* fix — both
+  ship in the same change-set so a
+  future worker who runs
+  `cargo test -p rbp-dashboard` on a
+  fresh checkout sees zero `<unknown>`
+  literals in either the response body
+  or the test fixture. Verification
+  commands: `grep -nE '"<unknown>"'
+  crates/dashboard/tests/fixtures_smoke.rs`
+  (zero matches — the 3 literals are
+  swept), `cargo test -p rbp-dashboard
+  --test fixtures_smoke` (the existing
+  per-fixture card drive still passes
+  with the 3 new ISO-8601 timestamps),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Required tests: zero new tests
+  (STW-053 is a literal-sweep
+  cleanup; the existing
+  `fixtures_smoke.rs` sub-tests cover
+  the post-sweep shape). Dependencies:
+  none — STW-053 is independent of
+  STW-051 / STW-052 and can ship in
+  any order; STW-053 is the *test-side*
+  pair of STW-051's *source-side* fix
+  and the two ship together for the
+  same reason STW-049 + STW-050
+  shipped together (the build-break
+  fix and the column-shape wire shared
+  one struct extension). Estimated
+  scope: XS. Completion signal:
+  `grep -nE '"<unknown>"'
+  crates/dashboard/tests/fixtures_smoke.rs`
+  → exit 1 (the 3 literals are swept
+  — the *absence* of the literal is
+  the completion signal); `cargo test
+  -p rbp-dashboard --test fixtures_smoke`
+  is green with the 3 new ISO-8601
+  timestamps; a future `cargo test
+  --workspace` run on a fresh checkout
+  sees zero `<unknown>` literals in
+  any dashboard test response body.
+  **`lens:` Design (the
+  test-fixture-sweep counterpart of
+  the STW-051 source-side fix; the
+  fourth-pass STW-050 under-counted
+  the sweep by 3 literals, and the
+  fixtures_smoke.rs is the only
+  remaining source) + Eng (the
+  literal-sweep is the cheapest
+  in-CI proof the public surface
+  stays clean — a future regression
+  that re-introduces `<unknown>` in
+  the lib's render path will fail
+  the smoke test's response-body
+  assertion once the fixtures_smoke
+  fixtures are also clean).**
+
+- [ ] **[P1] `STW-044` (re-affirmation of the
+  fourth-pass open row)
+  `crates/autotrain/src/error_audit.rs`
+  per-arm error-shape audit: 10 new
+  static-grep lib tests pinning the
+  existing per-arm
+  `live_proof ...` error-line text
+  without rewriting it.** The fifth
+  pass re-confirms the fourth-pass's
+  finding: the morning wave's
+  `TrainerError` enum refactor was
+  the wrong shape (a 200+ line Rust
+  module whose only consumer is "a
+  CI worker wants per-error
+  greppability" is the inverse of
+  "the existing per-arm shape is
+  already greppable"). The fifth-pass
+  CEO + Eng + Design lenses all
+  agree the re-scoped
+  `error_audit.rs` shape is the
+  right one: 10 lib tests, one per
+  existing `live_proof ...` error
+  arm, each a static-grep pin on
+  the per-arm eprintln! line text
+  in the 7 source files the
+  morning wave's STW-038 listed,
+  *no* production code change,
+  *no* `TrainerError` enum, *no*
+  `to_pinned_line` method. The
+  STW-051 row above introduces
+  exactly one new error variant
+  (`PublishIndexError::MissingArg`);
+  the audit's `MissingArg`-arm pin
+  is added as the 11th test
+  (joining the 10 the morning wave
+  listed) so the audit covers the
+  new arm. Owner files:
+  `crates/autotrain/src/error_audit.rs`
+  (new `cfg(test) mod tests`
+  module with 11 static-grep lib
+  tests pinning the per-arm
+  `live_proof ...` error-line shape
+  across
+  `crates/autotrain/src/{publish,publish_remote,publish_index,publish_index_remote,mode,verify_receipt,verify_bundle}.rs`),
+  `crates/autotrain/src/mode.rs`
+  (add the `--error-shape-test`
+  argv flag the morning wave's
+  STW-038 named — the flag is the
+  *only* surviving piece of the
+  morning wave's row, and it
+  exposes the 11 pinned
+  `live_proof ...` prefixes a CI
+  scraper greps without exercising
+  every error path; a no-op in
+  production, the same
+  `cargo run -- --error-shape-test`
+  the morning wave's row named),
+  `IMPLEMENTATION_PLAN.md` (this
+  row; mark the morning-wave
+  STW-038 row as
+  `RESCOPED 2026-06-04 by STW-044`).
+  Scope boundary: does NOT
+  introduce a `TrainerError` enum;
+  does NOT introduce a
+  `to_pinned_line` method; does
+  NOT change the existing per-arm
+  `live_proof ...` error-line
+  text; does NOT change the
+  existing exit-code contract;
+  does NOT change the
+  per-subcommand flag shape, the
+  per-subcommand stdout shape, or
+  any `trainer --*` CLI; does NOT
+  change the room protocol, the
+  `Schema` contracts, the
+  autotrain pipeline, the K-means
+  cluster counts, the v1 / v2 / v3
+  / v4 named baselines, or any
+  `trainer --*` JSON contract.
+  Verification commands:
+  `cargo test -p rbp-autotrain
+  --lib` (the 11 new lib tests
+  pass), `cargo run -p
+  rbp-autotrain --
+  --error-shape-test` (prints
+  the 11 pinned `live_proof ...`
+  prefixes in alphabetical order),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo
+  check --workspace`, `cargo
+  fmt --check`. Required tests:
+  11 new lib tests in
+  `crates/autotrain/src/error_audit.rs::tests`
+  pinning the per-arm
+  `live_proof ...` error-line
+  shape across the 7 source files
+  + the new `MissingArg` arm
+  STW-051 introduces. Dependencies:
+  STW-032 (the
+  `live_proof publish error:
+  receipt is red: ...` line the
+  audit pins), STW-033 (the
+  `live_proof publish_remote
+  error: ...` line), STW-034
+  (the `live_proof publish_index
+  error: ...` line), STW-035
+  (the `live_proof
+  publish_index_remote error: ...`
+  line), STW-028 (the
+  `live_proof receipt verification
+  failed: ...` /
+  `live_proof receipt verification
+  passed: ...` shape), STW-051
+  (the new
+  `live_proof publish_index error:
+  missing arg: RBP_PUBLISH_INDEX_UTC`
+  line the audit's 11th test
+  pins). Estimated scope: S.
+  Completion signal:
+  `cargo test -p rbp-autotrain
+  --lib` is green with 11 new
+  lib tests passing; `cargo run
+  -p rbp-autotrain --
+  --error-shape-test` prints
+  the 11 pinned `live_proof ...`
+  prefixes a CI scraper greps;
+  the `STW-038` morning-wave row
+  is marked `RESCOPED` and a
+  future worker does not
+  re-claim the refactor half.
+  **`lens:` Design (the
+  operator-UX / error-surface
+  audit; the morning wave's
+  `TrainerError` refactor was
+  the wrong shape, the
+  `error_audit.rs` static-grep
+  shape is the right one) +
+  Eng (the 11 lib tests are a
+  *no-production-code* addition
+  that pins the existing per-arm
+  shape — the canonical
+  "no-rebuild" answer to the
+  "every error must be
+  greppable" finding) + CEO
+  (the audit is the cheapest
+  observability repair the
+  operator-UX surface can ship
+  — a CI dashboard that greps
+  `live_proof ...` for
+  per-error attribution
+  continues to work unchanged
+  after the audit).**
+
+- [ ] **[P1] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
+  runbook + committed `wrangler.toml` +
+  `RBP_DASHBOARD_CF_API_TOKEN` env knob:
+  the *deploy* leg of the public-surface
+  north star the prior CEO lens named
+  but the four prior reviews did not
+  row up.** The `scripts/testnet-live-publish-dashboard.sh`
+  runbook ships (STW-036) but shells out
+  to `aws s3 sync` against a bucket that
+  doesn't exist on disk; the README's
+  `## Public dashboard` link is a
+  `<https://robopoker-testnet-dashboard.pages.dev/>`
+  placeholder; no `wrangler` config / no
+  `cloudflared` / no Terraform is
+  committed. A stranger clicking the
+  README link gets a 404. STW-054 lands
+  a `scripts/deploy-dashboard-cloudflare.sh`
+  runbook (pure bash, mirrors the
+  STW-019 + STW-032 + STW-033 + STW-034 +
+  STW-035 + STW-036 runbook shape) that
+  takes the local `publish/<root>/index/`
+  dir the STW-035 chain produced and
+  pushes it to Cloudflare Pages via
+  `wrangler pages deploy` with a
+  committed `wrangler.toml` (the Pages
+  project name `robopoker-testnet-dashboard`,
+  the `pages_build_output_dir =
+  "/tmp/dashboard-deploy"`, the
+  `compatibility_date = "2026-06-04"`)
+  + a `RBP_DASHBOARD_CF_API_TOKEN` env
+  knob the operator sets. The runbook
+  refuses to run with exit 3 when
+  neither `wrangler` is on `$PATH` nor
+  the env knob is set, mirrors the
+  STW-019 + STW-032 + STW-033 + STW-034
+  + STW-035 + STW-036 exit-3 contract,
+  and chains
+  `trainer --verify-index <index-dir>`
+  (the pre-deploy refuse-to-deploy-red-index
+  gate the STW-036 runbook already
+  defines) +
+  `wrangler pages deploy <index-dir>
+  --project-name robopoker-testnet-dashboard
+  --commit-dirty=true` (the Pages
+  push). A new `crates/autotrain/tests/script_shape.rs`
+  pin
+  `deploy_dashboard_cloudflare_script_exists_and_parses`
+  asserts the runbook is on disk +
+  executable + parses with `bash -n` +
+  references `wrangler pages deploy`
+  + references
+  `RBP_DASHBOARD_CF_API_TOKEN`. A new
+  `wrangler.toml` is committed in the
+  repo root with the project name +
+  build output dir + compatibility
+  date (no secrets; the API token is
+  read from the env knob at deploy
+  time, not committed). Owner files:
+  `scripts/deploy-dashboard-cloudflare.sh`
+  (new pure-bash runbook; mirrors
+  the STW-019 + STW-032 + STW-033 +
+  STW-034 + STW-035 + STW-036 shape;
+  script exists + is executable +
+  parses with `bash -n` + refuses
+  to run on a missing `wrangler` or
+  a missing `RBP_DASHBOARD_CF_API_TOKEN`
+  env knob with exit 3),
+  `wrangler.toml` (new committed
+  file in the repo root; project
+  name `robopoker-testnet-dashboard`
+  + `pages_build_output_dir =
+  "/tmp/dashboard-deploy"` +
+  `compatibility_date =
+  "2026-06-04"`; no secrets),
+  `crates/autotrain/tests/script_shape.rs`
+  (add 1 new shape pin
+  `deploy_dashboard_cloudflare_script_exists_and_parses`),
+  `IMPLEMENTATION_PLAN.md` (this
+  row; mark the prior-wave STW-036
+  runbook row's
+  `scripts/testnet-live-publish-dashboard.sh`
+  as the *predecessor* runbook
+  STW-054 *supersedes for the
+  Cloudflare Pages path* — the
+  STW-036 `aws s3 sync` runbook
+  remains the S3/CloudFront path
+  the prior wave shipped, STW-054
+  is the Cloudflare Pages path),
+  `README.md` (NO CHANGE — the
+  existing
+  `## Public dashboard` URL at
+  line 313 remains the
+  `<https://robopoker-testnet-dashboard.pages.dev/>`
+  placeholder until an operator
+  actually runs the deploy
+  runbook; the URL becomes real
+  when the operator runs
+  `scripts/deploy-dashboard-cloudflare.sh`
+  for the first time and the
+  `wrangler` deploy creates the
+  Pages project; the README's
+  `## Public dashboard` section
+  is otherwise unchanged).
+  Scope boundary: does NOT
+  vendor a `wrangler` binary (the
+  operator installs `wrangler` via
+  `npm install -g wrangler` or
+  the equivalent Homebrew /
+  Linuxbrew step — the runbook's
+  first action is `which wrangler`
+  + exit 3 on missing); does NOT
+  introduce a Python / `jq`
+  dependency (the runbook is
+  pure bash + `wrangler` + `cargo
+  test` + `bash -n`); does NOT
+  change the STW-036
+  `scripts/testnet-live-publish-dashboard.sh`
+  `aws s3 sync` runbook (the S3
+  path remains for operators who
+  prefer CloudFront over
+  Cloudflare Pages); does NOT
+  change the dashboard's
+  `crates/dashboard/` static
+  `index.html` (the deploy target
+  is the *publish output* the
+  STW-035 chain produced, not
+  the dashboard crate's source);
+  does NOT change the room
+  protocol, the `Schema`
+  contracts, the autotrain
+  pipeline, the K-means cluster
+  counts, the v1 / v2 / v3 / v4
+  named baselines, the
+  `CFR_TREE_COUNT_NLHE` baseline,
+  or any `trainer --*` CLI.
+  Verification commands:
+  `bash -n scripts/deploy-dashboard-cloudflare.sh`,
+  `cargo test -p rbp-autotrain
+  --test script_shape` (the 1
+  new shape pin passes), `cargo
+  test --workspace --
+  --test-threads=4`, `cargo
+  check --workspace`, `cargo
+  fmt --check`. Hand-test
+  command: `unset
+  RBP_DASHBOARD_CF_API_TOKEN;
+  scripts/deploy-dashboard-cloudflare.sh
+  receipts/publish-20260604T050000Z/index/`
+  (exits 3 + the runbook prints
+  `deploy-dashboard: missing RBP_DASHBOARD_CF_API_TOKEN
+  env knob` — the fail-fast path
+  is live), `unset $PATH
+  (PATH=/usr/bin:/bin) wrangler
+  -V; scripts/deploy-dashboard-cloudflare.sh
+  receipts/publish-20260604T050000Z/index/`
+  (exits 3 + the runbook prints
+  `deploy-dashboard: wrangler not
+  on $PATH` — the second
+  fail-fast path is live).
+  Required tests: 1 new shape
+  pin
+  `deploy_dashboard_cloudflare_script_exists_and_parses`
+  in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-035 (the
+  `trainer --publish-index-remote`
+  arm the runbook consumes the
+  `INDEX.json` from), STW-036
+  (the v10 dashboard crate the
+  runbook deploys), STW-049 +
+  STW-050 (the dashboard's
+  column-shape wire +
+  `<unknown>` sweep the
+  deployed dashboard renders).
+  Estimated scope: S.
+  Completion signal: `bash -n
+  scripts/deploy-dashboard-cloudflare.sh`
+  passes; the new shape pin
+  in `script_shape.rs` is
+  green; a CI dashboard can
+  `grep ^deploy-dashboard`
+  the runbook's `SUMMARY.txt`
+  after an operator runs the
+  runbook for the first time
+  + the `wrangler` deploy
+  creates the Pages project;
+  the `wrangler.toml` is
+  committed with no secrets.
+  **`lens:` CEO (the *deploy*
+  leg of the public-surface
+  north star — a stranger
+  clicking the README link
+  gets a real Cloudflare
+  Pages URL after the first
+  runbook invocation; the
+  four prior reviews shipped
+  the *data feed* and the
+  *render*, STW-054 ships
+  the *deploy*) + Eng (the
+  runbook is pure bash +
+  `wrangler` + `cargo test`
+  + `bash -n`, mirroring
+  the STW-019 + STW-032 +
+  STW-033 + STW-034 + STW-035
+  + STW-036 shape; the
+  `wrangler.toml` is the
+  minimum config the
+  Cloudflare Pages path
+  needs — no `terraform` /
+  `cloudflared` / vendored
+  SDK) + Design (the
+  `<https://robopoker-testnet-dashboard.pages.dev/>`
+  placeholder URL in the
+  README becomes a real
+  URL after the first
+  runbook invocation; the
+  "Public dashboard: <...>"
+  line at README.md:313
+  is the first-time-visitor
+  answer the testnet north
+  star names).**
