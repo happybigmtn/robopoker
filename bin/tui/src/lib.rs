@@ -625,6 +625,10 @@ impl HeadlessReport {
         // field is repurposed to a `Vec<&'static str>` of the
         // *failing* check ids so the existing receipt shape stays
         // stable: a fully green run still has `assertions: []`.
+        // STW-027: `tui.tape.actions_present` and
+        // `tui.board.cards_present` extend the gate to the
+        // decision-tape log + board-stage card render (the two
+        // rendered surfaces STW-021 deliberately deferred).
         let checks = vec![
             check_chrome_branding(&frame),
             check_chrome_players(&frame),
@@ -634,6 +638,8 @@ impl HeadlessReport {
             check_controls_keys_unique(&controls),
             check_controls_count(&controls),
             check_cards_evaluator(app),
+            check_tape_actions_present(app),
+            check_board_cards_present(app),
             check_help_toggle(&controls),
         ];
         let verdict = compute_verdict(&checks);
@@ -886,6 +892,89 @@ fn check_help_toggle(controls: &[Control]) -> QaCheck {
         "help.toggle control is exposed".to_owned()
     } else {
         "no help.toggle control is in the controls list".to_owned()
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+/// Pin the decision-tape data invariant the `render_decision_tape`
+/// renderer consumes: at any step past `step = 0` every visible log
+/// entry must have a non-empty `actor` AND a non-empty `action`, and
+/// `visible_story().len()` must equal `current().log_count`. At
+/// `step = 0` the decision-tape is empty by design (`render_decision_tape`
+/// early-returns on `visible_story().is_empty()`), so the check is
+/// trivially passed on the initial render. STW-027.
+fn check_tape_actions_present(app: &App) -> QaCheck {
+    let id = "tui.tape.actions_present";
+    let label = "decision-tape log entries have populated actor + action fields";
+    let current = app.preview.current();
+    let story = app.preview.visible_story();
+    let expected = current.log_count;
+    let actual = story.len();
+    let all_populated = story
+        .iter()
+        .all(|entry| !entry.actor.is_empty() && !entry.action.is_empty());
+    let count_matches = actual == expected;
+    let passed = all_populated && count_matches;
+    let detail = if passed {
+        if expected == 0 {
+            format!(
+                "{actual} log entr{} visible (initial step, tape empty by design)",
+                if actual == 1 { "y" } else { "ies" }
+            )
+        } else {
+            format!(
+                "{actual} log entr{} visible, all actor/action fields populated",
+                if actual == 1 { "y" } else { "ies" }
+            )
+        }
+    } else if !count_matches {
+        format!(
+            "visible_story().len() = {actual} but current().log_count = {expected} \
+             (delta = {})",
+            actual as isize - expected as isize
+        )
+    } else {
+        let empty_actors = story.iter().filter(|entry| entry.actor.is_empty()).count();
+        let empty_actions = story.iter().filter(|entry| entry.action.is_empty()).count();
+        format!(
+            "{empty_actors} entry/entries with empty actor, {empty_actions} entry/entries with empty action"
+        )
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+/// Pin the board-stage data invariant `visible_board().len() ==
+/// current().board_cards`. `render_board_slots` paints the prefix
+/// of `app.preview.board` whose length is clamped by
+/// `current().board_cards`; any drift between the step's
+/// `board_cards` field and the actual painted slice (e.g. a
+/// `board_cards = 5` step on a `board.len() = 3` model) fails the
+/// check. STW-027.
+fn check_board_cards_present(app: &App) -> QaCheck {
+    let id = "tui.board.cards_present";
+    let label = "visible_board() length matches the current step's board_cards field";
+    let current = app.preview.current();
+    let expected = current.board_cards;
+    let actual = app.preview.visible_board().len();
+    let passed = actual == expected;
+    let detail = if passed {
+        format!("{actual} card(s) visible on the board stage for the current step")
+    } else {
+        format!(
+            "visible_board().len() = {actual} but current().board_cards = {expected} \
+             (delta = {})",
+            actual as isize - expected as isize
+        )
     };
     QaCheck {
         id,
@@ -2545,5 +2634,138 @@ mod tests {
             }
         }
         changed
+    }
+
+    // ---- STW-027: decision-tape + board-stage QA coverage ----
+
+    /// Positive arm: when the current step's `log_count` matches the
+    /// number of `visible_story()` entries and every entry has
+    /// non-empty `actor` + `action` fields, the
+    /// `tui.tape.actions_present` check passes with a detail that
+    /// names the visible entry count. STW-027.
+    #[test]
+    fn check_tape_actions_present_passes_on_populated_log() {
+        // Hand-build a deterministic fixture: a fresh app from a known
+        // seed, then pin `step` to a known-good index and rewrite the
+        // target step's `log_count` so it matches the slice the
+        // renderer will paint. Using the real `RandomPreview::from_seed`
+        // path keeps the populated story entries (actor/action
+        // fields) consistent with what the renderer actually consumes.
+        let mut app = App::with_seed(7);
+        let step = 3_usize;
+        app.preview.step = step;
+        let visible_entries = app.preview.story.len().min(3);
+        app.preview.steps[step].log_count = visible_entries;
+
+        let check = check_tape_actions_present(&app);
+        assert_eq!(check.id, "tui.tape.actions_present");
+        assert!(
+            check.passed,
+            "populated-log check should pass: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains(&visible_entries.to_string()),
+            "detail should name the visible entry count, got `{}`",
+            check.detail
+        );
+    }
+
+    /// Trivially-passed arm: at `step = 0` the decision-tape is empty
+    /// by design (`render_decision_tape` early-returns on
+    /// `visible_story().is_empty()`), and the check is passed with a
+    /// detail that names the empty-by-design state. STW-027.
+    #[test]
+    fn check_tape_actions_present_passes_on_empty_log() {
+        let app = App::default();
+        assert_eq!(app.preview.step, 0);
+        assert_eq!(app.preview.current().log_count, 0);
+
+        let check = check_tape_actions_present(&app);
+        assert_eq!(check.id, "tui.tape.actions_present");
+        assert!(
+            check.passed,
+            "empty-log check should pass (initial step is empty by design): {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("0"),
+            "detail should name the visible entry count (0), got `{}`",
+            check.detail
+        );
+    }
+
+    /// Positive arm: when the current step's `board_cards` matches
+    /// the visible slice length (`visible_board().len()`), the
+    /// `tui.board.cards_present` check passes with a detail that names
+    /// the visible card count. STW-027.
+    #[test]
+    fn check_board_cards_present_passes_when_slice_matches() {
+        let mut app = App::with_seed(7);
+        // `RandomPreview::from_seed` always populates 5 board cards;
+        // we just need to pick a step whose `board_cards` field is
+        // already <= board.len() (the real steps from_seed builds
+        // already satisfy this for the flop, turn, and river steps).
+        let step = 8_usize; // 1-based 9 → step 8, typically the "flop" stage
+        app.preview.step = step;
+        let visible_cards = app.preview.steps[step]
+            .board_cards
+            .min(app.preview.board.len());
+        // The from_seed stage is already consistent (visible_cards is
+        // bounded by both), but pin it explicitly so the test reads
+        // as a positive arm of the contract.
+        app.preview.steps[step].board_cards = visible_cards;
+
+        let check = check_board_cards_present(&app);
+        assert_eq!(check.id, "tui.board.cards_present");
+        assert!(
+            check.passed,
+            "matching-slice check should pass: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains(&visible_cards.to_string()),
+            "detail should name the visible card count, got `{}`",
+            check.detail
+        );
+    }
+
+    /// Negative arm: when the current step's `board_cards` field is
+    /// greater than the actual `visible_board().len()` (the step
+    /// says "reveal 5 board cards" but only 3 are actually in the
+    /// model), the `tui.board.cards_present` check fails with a
+    /// detail that names the `expected` vs `actual` card count
+    /// delta — the exact class of bug the check is designed to
+    /// catch. STW-027.
+    #[test]
+    fn check_board_cards_present_fails_on_inconsistent_state() {
+        let mut app = App::with_seed(7);
+        // Truncate the board to a known smaller length so the test
+        // is reproducible regardless of the seed's exact card count.
+        app.preview.board.truncate(3);
+        let step = 8_usize;
+        app.preview.step = step;
+        // Force an inconsistent state: step says 5 cards visible,
+        // model only has 3.
+        app.preview.steps[step].board_cards = 5;
+
+        let check = check_board_cards_present(&app);
+        assert_eq!(check.id, "tui.board.cards_present");
+        assert!(
+            !check.passed,
+            "inconsistent-state check should fail, got `{}`",
+            check.detail
+        );
+        // The check's detail message uses the exact phrasing
+        // `visible_board().len() = <actual> but current().board_cards
+        // = <expected>` so an operator reading the receipt knows which
+        // side of the contract drifted. The two counts (3 and 5) must
+        // both appear so the breach is locatable from the receipt
+        // alone.
+        assert!(
+            check.detail.contains("3") && check.detail.contains("5"),
+            "detail should name both the actual (3) and expected (5) card counts, got `{}`",
+            check.detail
+        );
     }
 }

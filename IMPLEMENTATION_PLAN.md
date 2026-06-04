@@ -2015,6 +2015,139 @@ have a single source of truth.
   test is green on first run; `cargo test --workspace
   -- --test-threads=4` reports 0 failures.
 
+- [x] `STW-027` `bin/tui` decision-tape + board-stage
+  QA-coverage slice (the remaining `bin/tui` ORPHAN from
+  `steward/DRIFT.md`). The `steward/DRIFT.md` "Orphan
+  Code Surfaces" table flags `bin/tui` as the last
+  ORPHAN crate with no tracked STW item covering it:
+  *"AGENTS names read-only TUI preview, but
+  `IMPLEMENTATION_PLAN.md` has no active TUI item;
+  `bin/tui` exists and `.auto/tui*` artifacts exist"*.
+  `STW-021` shipped the 9-check `HeadlessReport::capture`
+  QA gate (`tui.chrome.brand`, `tui.chrome.players`,
+  `tui.chrome.posture`, `tui.viewport.bounds`,
+  `tui.controls.ids_unique`, `tui.controls.keys_unique`,
+  `tui.controls.count`, `tui.cards.evaluator`,
+  `tui.controls.help`), but the gate covers only the
+  chrome, viewport, controls list, and `rbp-cards`
+  evaluator. The two rendered surfaces the testnet
+  dashboard actually cares about — the decision-tape
+  log (the `actor` / `action` spans `render_decision_tape`
+  lays down for the visible `PreviewLog` entries) and
+  the board-stage card render (the `visible_board()`
+  slice `render_board_slots` paints for the current
+  `board_cards` count) — are not asserted by any QA
+  check. STW-027 lands two additional QA checks that
+  pin those surfaces and four lib tests that exercise
+  both the positive (consistent `RandomPreview`
+  fixture) and negative (deliberately-inconsistent
+  `RandomPreview` fixture with `board_cards = 5` but
+  only 3 actual `CardView`s in `board`) arms so a
+  future regression in either surface is locatable to
+  the exact check + magnitude of the breach on a
+  reproducible input. (a) `check_tape_actions_present`
+  reads `app.preview.current().log_count` and asserts
+  the *data invariant* (every visible log entry has
+  a non-empty `actor` AND a non-empty `action`; the
+  number of `visible_story()` entries equals
+  `current().log_count`); at `step = 0` (`log_count = 0`)
+  the check is trivially passed (the decision-tape is
+  empty by design — `render_decision_tape` early-returns
+  on `visible_story().is_empty()`), and at any later
+  step the check verifies the entries the tape will
+  actually paint. (b) `check_board_cards_present` reads
+  `app.preview.current().board_cards` and asserts the
+  data invariant `visible_board().len() ==
+  current().board_cards` (the slice painted by
+  `render_board_slots` is the prefix of `app.preview.board`
+  whose length is clamped by `current().board_cards` —
+  any drift between the step's `board_cards` field and
+  the actual painted slice fails the check). Both new
+  checks are wired into `HeadlessReport::capture` after
+  `check_cards_evaluator` (the existing per-frame
+  evaluator check is the natural anchor — it already
+  inspects the `App` model, not the rendered frame
+  text, so the new data-invariant checks follow the
+  same pattern and avoid ANSI-escape brittleness). Four
+  new lib tests in `bin/tui/src/lib.rs::tests`: (i)
+  `check_tape_actions_present_passes_on_populated_log`
+  — constructs an `App` from a hand-built `RandomPreview`
+  with 3 `PreviewLog` entries + a 3rd-step `PreviewStep`
+  with `log_count = 3` and asserts the check returns
+  `passed = true` with a non-empty `detail` that names
+  the actor count; (ii)
+  `check_tape_actions_present_passes_on_empty_log` —
+  uses `App::default()` (step 0, `log_count = 0`) and
+  asserts the check returns `passed = true` (the
+  decision-tape is empty by design); (iii)
+  `check_board_cards_present_passes_when_slice_matches`
+  — constructs an `App` from a `RandomPreview` with
+  `board.len() = 5` + a 4th-step `PreviewStep` with
+  `board_cards = 3` and asserts the check returns
+  `passed = true` with a detail naming the visible
+  card count; (iv)
+  `check_board_cards_present_fails_on_inconsistent_state`
+  — constructs an `App` from a `RandomPreview` with
+  `board.len() = 3` but a 4th-step `PreviewStep` with
+  `board_cards = 5` (the step says "reveal 5 board
+  cards" but only 3 are actually in the model — the
+  exact class of bug the check is designed to catch)
+  and asserts the check returns `passed = false` with
+  a detail that names the `expected` vs `actual` card
+  count delta. Owner files: `bin/tui/src/lib.rs` (the
+  two new `check_*` functions + the `vec![...]`
+  registration in `HeadlessReport::capture` + the four
+  new lib tests + the rationale docs above each
+  check), `IMPLEMENTATION_PLAN.md` (this row).
+  Scope boundary: do NOT touch the existing 9 QA
+  checks; do NOT change `check_cards_evaluator`; do
+  NOT touch `render_decision_tape` /
+  `render_board_slots` / `render_board_stage` (the
+  new checks verify the *data invariant* the renderers
+  consume, not the rendered text — a future render
+  rewrite that preserves the model contract stays
+  green); do NOT change the `HeadlessReport` struct
+  shape, the `QaCheck` / `QaReport` field order, the
+  `SURFACE_SCHEMA_VERSION` constant, the
+  `tui.qa.json` / `tui.receipt.md` wire format, the
+  `tachyonfx` motion paths, the `controls()` list, the
+  `App` / `RandomPreview` / `PreviewStep` /
+  `PreviewLog` / `CardView` field order, the seeded
+  `DEFAULT_SEED` (`0xC0D3`), the `with_seed` /
+  `with_seed_and_step` constructors, the
+  `handle_key` dispatch, the `key -> step` mapping, or
+  the `Focus` enum. Verification commands:
+  `cargo test -p robopoker-tui --lib` (the 4 new
+  tests + the 17 existing tests pass); `cargo build
+  -p robopoker-tui` (the new checks compile);
+  `cargo check --workspace` (no downstream breakage —
+  the tui crate is `bin/` and not a `dep` of any
+  other crate); `cargo test --workspace --
+  --test-threads=4` (full workspace remains green);
+  `cargo fmt --check`. Required tests: the 4 new
+  lib tests listed above; no padding of unrelated
+  suites. Dependencies: `STW-021` (the
+  `HeadlessReport::capture` + `QaCheck` + `QaReport`
+  surface the new checks slot into). Estimated
+  scope: S. Completion signal:
+  `cargo test -p robopoker-tui --lib` is green with
+  21 tests passing (17 existing + 4 new); the new
+  `tui.tape.actions_present` and
+  `tui.board.cards_present` check ids appear in
+  the `QaReport.checks` list of a fresh
+  `HeadlessReport::capture` invocation; the negative
+  test (`check_board_cards_present_fails_on_inconsistent_state`)
+  fails the check on a hand-built `RandomPreview`
+  with `board.len() = 3` and `board_cards = 5` and
+  returns the expected-vs-actual delta in the
+  `detail` field; `cargo test --workspace` and
+  `cargo fmt --check` remain green; the
+  `bin/tui/src/lib.rs` `HeadlessReport::capture`
+  `checks` vector is now an 11-entry
+  `vec![...]` (9 existing + 2 new) — closing the
+  last `bin/tui` ORPHAN item in
+  `steward/DRIFT.md`.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
