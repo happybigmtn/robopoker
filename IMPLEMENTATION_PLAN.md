@@ -1283,20 +1283,146 @@ parallel test proof`.
 
 ## Active items (worker-ready)
 
-The most recent shipped slice is `STW-020` (workspace parallel
-proof runbook). The CEO roadmap's `## Immediate P0` list is
-**stale** — all five P0 rows (`P0-schema` / `P0-hand-roundtrip` /
-`P0-smoke` / `P0-bench` / `P0-auth`) are SHIPPED per the prose
-on lines 5-18 of `genesis/plans/000-ceo-testnet-roadmap.md` and
-the `steward/DRIFT.md` table. The next open P0 / mainnet-blocking
-item is `bin/tui`, the read-only Ratatui dashboard the README
-documents as a public surface and `steward/DRIFT.md` flags as an
-**ORPHAN** (live code, no STW row). The slice below promotes
-the TUI's headless QA report from a static "always-passed"
-string into a real gate with a per-check breakdown a CI worker
-can grep when an invariant breaks.
+The most recent shipped slice is `STW-022` (plan-vs-reality
+staleness gate). `STW-021` (TUI headless QA gate) shipped on
+commit `43947b5` per the plan row below; the prior `## Immediate
+P0` list in `genesis/plans/000-ceo-testnet-roadmap.md` has been
+retired — the new `STW-022` `scripts/plan-staleness-gate.sh`
+mechanically prevents the ghost P0 rows from being re-`[ ]`-ed.
+The CEO roadmap's only documented open launch-proof item is
+the deferred `testnet-live-proof` operator receipt (see
+`steward/PROMOTIONS.md` deferred `testnet-live-proof` row);
+no next-slice is currently promoted.
 
-- [ ] `STW-021` `robopoker-tui --headless` QA report becomes a
+- [x] `STW-022` Plan-vs-reality staleness gate:
+  `steward/HINGES.md` rank #1 is "Retiring or updating the
+  stale Immediate P0 checklist removes the largest false
+  backlog signal. Obsoletes `genesis:P0-schema`,
+  `genesis:P0-smoke`, `genesis:P0-bench`, `genesis:P0-auth`;
+  stops workers from reclaiming shipped STW-004/006/008/009/010
+  work." The HAZARDS table in `steward/HAZARDS.md` classifies
+  the ghost-P0 dispatch as `mainnet-block, user-facing`, and
+  the `steward/DRIFT.md` `## Roadmap/Plan Cross-Drift` table
+  lists the five rows as `GHOST` (STW-004/006/008/009/010 all
+  shipped; the `[P0]` checklist in
+  `genesis/plans/000-ceo-testnet-roadmap.md` still unchecked).
+  The fix is a new pure-bash `scripts/plan-staleness-gate.sh`
+  (shebang `#!/usr/bin/env bash`, `set -euo pipefail`) that
+  walks the roadmap's `[ ] [P0] ...` rows, cross-references
+  each one against a static `P0_TO_STW` claim map
+  (mirrored against the `steward/DRIFT.md` GHOST table), and
+  greps `IMPLEMENTATION_PLAN.md` for the matching
+  `- [x] \`STW-NNN\`` shipped marker. If the matching STW is
+  shipped, the P0 row is GHOST and the gate exits 3 with the
+  precise roadmap line + STW id on stderr. If all P0 rows
+  are either retired (row flipped to `[x]`, or claim text
+  rewritten off the published substring) or their STW is
+  genuinely not-yet-shipped, the gate exits 0 with the
+  headline `plan staleness gate complete: checked=N ghosts=0`
+  a CI dashboard greps. Owner files:
+  `scripts/plan-staleness-gate.sh` (new, ~150 lines, pure
+  bash; static `P0_TO_STW` claim map of the five ghost rows:
+  `Implement the \`Schema\` -> STW-006`,
+  `Add an end-to-end test in \`crates/gameroom\` -> STW-008`,
+  `Implement a \`trainer\` smoke path -> STW-009`,
+  `Build a \`bin/bench\` -> STW-010`,
+  `Land STW-004 auth hardening -> STW-004`; knobs
+  `RBP_PLAN_STALENESS_ROADMAP` / `RBP_PLAN_STALENESS_PLAN` for
+  test injection, `RBP_PLAN_STALENESS_QUIET=1` to suppress
+  per-row green output; exit 0 on clean, 3 on ghost, 1 on
+  script-internal error),
+  `crates/autotrain/tests/plan_staleness.rs` (new pinner
+  test — no `database` feature gate, runs in
+  `cargo test --workspace`; mirrors the
+  `script_shape.rs` + `workspace_parallel_proof.rs` pattern
+  with 4 shape tests + 1 end-to-end test:
+  `script_exists_and_is_executable` (executable bit pinned
+  on Unix), `script_parses_with_bash_n` (syntax regression
+  fails the gate at CI time),
+  `gate_claim_map_covers_every_ghost_p0_row` (the static
+  `P0_TO_STW` table inside the script must reference every
+  STW id the `steward/DRIFT.md` GHOST table flags
+  — STW-004/006/008/009/010; a future refactor that drops
+  a mapping fails CI before the gate silently stops
+  checking a P0 path), `gate_headline_format_is_pinned`
+  (the script's stdout must end with the literal
+  `plan staleness gate complete: checked=N ghosts=M`
+  prefix in the order `checked=` then `ghosts=`, and the
+  exit-code contract `exit 3` on ghost / `exit 0` on clean
+  is pinned so a refactor that silently changes the
+  failure exit code fails CI),
+  `gate_runs_end_to_end_with_clean_and_ghost_roadmaps`
+  drives the gate against two fabricated planning
+  surfaces — a ghost roadmap with 5 unchecked `[P0]` rows
+  + a matching 5-shipped-STW plan (asserts exit 3,
+  `ghosts=5`, every ghosted STW id named in stderr), and
+  a clean roadmap with 5 `[x] [P0]` rows (asserts exit 0,
+  `ghosts=0`) — so a regression in the gate's exit code
+  or headline format fails CI without requiring a live
+  Postgres),
+  `genesis/plans/000-ceo-testnet-roadmap.md` (replace the
+  `## Immediate P0 — testnet proof points (dispatch now)`
+  unchecked list with a `Shipped/superseded by STW rows
+  on \`main\`` reference list — every P0 row retired to
+  `[x]` or removed; a one-line note credits the
+  `STW-022` gate as the mechanical anti-regression),
+  `IMPLEMENTATION_PLAN.md` (this row + flip `STW-021` to
+  `[x]` since it shipped on commit `43947b5`),
+  `genesis/plans/000-ceo-testnet-roadmap.md` (one-line
+  note in the `## Lens verdicts` `Eng` paragraph crediting
+  the `STW-022` gate as the anti-regression for the
+  P0 retirement). Scope boundary: do NOT touch the
+  shipped STW-004/006/008/009/010 code paths (the gate
+  is a *retirement* of the false backlog signal, not a
+  re-implementation); do NOT touch the shipped STW-019
+  / STW-020 / STW-021 runbooks; do NOT add a
+  third-party `toml` / `yaml` / `serde_yaml` dep — the
+  roadmap + plan are markdown and the gate greps them
+  raw; do NOT change the `STW-021` TUI gate's surface
+  (the `tui.qa.json` / `tui.receipt.md` shape is
+  locked); do NOT change the `STW-019` /
+  `STW-020` headline format; do NOT change the
+  `gbrain` corpus / `auto` workflow (the gate is
+  repo-local, runs on `bash`, no gbrain roundtrip
+  required). Verification commands:
+  `bash scripts/plan-staleness-gate.sh` (must exit 0 and
+  print `plan staleness gate complete: checked=0 ghosts=0`
+  against the post-retirement planning surface),
+  `cargo test -p rbp-autotrain --test plan_staleness` (the
+  new pinner test, no-DB; green-path + ghost-path +
+  shape contracts all pass),
+  `cargo test --workspace -- --test-threads=4` (full
+  workspace stays green),
+  `cargo check --workspace`, `cargo fmt --check`.
+  Required tests: the new lib tests in
+  `crates/autotrain/tests/plan_staleness.rs::tests`
+  (script exists + executable; `bash -n` parseability;
+  claim map covers all 5 GHOST-P0 STW ids; headline +
+  exit-code format pinned; end-to-end ghost and clean
+  runs through the script with the synthesised
+  planning surfaces); no padding of unrelated suites.
+  Dependencies: `STW-004` (the shipped auth row the
+  `P0-auth` ghost duplicates), `STW-006` (the shipped
+  Schema row the `P0-schema` ghost duplicates),
+  `STW-008` (the shipped hand round-trip row the
+  `P0-hand-roundtrip` ghost duplicates), `STW-009`
+  (the shipped smoke row the `P0-smoke` ghost
+  duplicates), `STW-010` (the shipped bench row the
+  `P0-bench` ghost duplicates), `STW-021` (the
+  shipped TUI gate that flipped this row's own
+  `[ ]` -> `[x]` state). Estimated scope: S.
+  Completion signal: `bash scripts/plan-staleness-gate.sh`
+  against the post-retirement planning surface exits 0
+  and prints `plan staleness gate complete: checked=0
+  ghosts=0`; the same gate against the pre-retirement
+  surface exits 3 and names all 5 ghost rows in stderr;
+  the new `plan_staleness.rs` pinner test passes; the
+  planning surface no longer lists any unchecked `[P0]`
+  row; `cargo test --workspace` and `cargo fmt --check`
+  are green; the workspace is one coherent commit with
+  no orphan code.
+
+- [x] `STW-021` `robopoker-tui --headless` QA report becomes a
   real gate. Today the headless mode writes a `tui.qa.json`
   whose `verdict` is the literal string `"passed"` and whose
   `assertions` is a static `Vec<&'static str>` — the QA report
