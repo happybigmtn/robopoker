@@ -213,6 +213,135 @@ context.
 - [x] `STW-010` Head-to-head bench harness for trained `DatabasePlayer` vs `Fish`.
 
 - [x] `STW-012` v3 named baseline (`PreflopBot`): preflop-tier aware rule bot.
+
+- [x] `STW-013` v4 named baseline (`BlufferBot`): add a semi-bluff-aware
+  rule bot that beats `PreflopBot` by raising on checked-to postflop
+  boards with weak made hands / strong draws (the gap that `EquityBot`
+  and `PreflopBot` both leave open: a passive threshold-only policy
+  never wins the pot uncontested, so the trained bot never has to
+  fold). Wire as `Baseline::Bluffer` so the bench harness can group
+  reports by `baseline` and the v4 framing is honest (a stronger
+  named baseline, not a "second trained config" — that would be a
+  much larger slice).
+  Owner files: `crates/gameroom/src/players/blufferbot.rs` (new),
+  `crates/gameroom/src/players/mod.rs`,
+  `crates/gameroom/src/players/preflopbot.rs` (re-use the
+  `classify_pocket` tier table through a thin `super::` re-export
+  path, *not* by duplicating the table),
+  `crates/autotrain/src/bench.rs` (extend `Baseline` enum +
+  `as_str` + `from_env` + seat-1 dispatch + add a `preflop_tier`
+  re-use assertion),
+  `crates/autotrain/tests/bench.rs` (extend the integration test
+  for the v4 `bluffer` baseline),
+  `IMPLEMENTATION_PLAN.md`,
+  `genesis/plans/000-ceo-testnet-roadmap.md` (mark the "v4 stronger
+  baseline" item as shipped).
+  Scope boundary: add a v4 *named* rule-based baseline that
+  (1) reuses the v3 `PreflopBot` preflop tier table verbatim
+  (smallest legal raise / call / fold) and (2) on the flop, when
+  the bot is *first to act* and `Check` is legal, raises with
+  *either* an above-threshold made hand (≥ 0.65 equity, matching
+  the v2 `EquityBot::choose` raise table) *or* a "bluff-eligible"
+  weak hand (≤ 0.40 equity, ≤ 0.20 chance the bot improves to
+  the nuts on a later street) at a fixed small raise size (the
+  smallest legal raise), with the raise gated on a deterministic
+  per-street frequency (e.g. 30% on the flop, 20% on the turn,
+  0% on the river — the river has no fold equity, so a bluff
+  loses money in expectation). The bot never bluffs *into* a
+  bet (that is a `Call/Fold` decision, not a `Check/Raise`
+  decision). Do NOT introduce a new solver, do NOT change
+  `EquityBot` / `PreflopBot` / `Fish`, do NOT change the
+  autotrain pipeline, do NOT add a new `Player` trait.
+  Acceptance criteria:
+  (a) `crates/gameroom/src/players/blufferbot.rs` exists with
+      `BlufferBot` (a unit struct, `Default` impl, async
+      `Player` impl) and a pure `BlufferBot::classify_bluff`
+      helper that returns a `BluffDecision`
+      (`RaiseSemiBluff | Check | NotBluffEligible`) based on
+      the postflop equity, the street, and the
+      "bluff-eligible" condition (equity ≤ 0.40 AND
+      improvement ≤ 0.20).
+  (b) The `Player::decide` impl:
+      - on `Street::Pref` (no public board), delegates
+        *verbatim* to `PreflopBot::decide_recall` so the
+        v3 preflop tier table is defined in exactly one
+        place;
+      - on later streets, classifies the situation
+        (`BluffDecision`) and acts:
+        - `RaiseSemiBluff` → pick the smallest legal
+          `Raise(_) | Shove(_)` (same sizing convention as
+          `PreflopBot` Tier 1 preflop);
+        - `Check` → take the free card;
+        - `NotBluffEligible` → delegate to
+          `EquityBot::choose` so the postflop value-bet
+          threshold table stays the same as the v2 / v3
+          baselines.
+  (c) `crates/gameroom/src/players/mod.rs` exports
+      `BlufferBot` and re-exports it from `rbp_gameroom`.
+  (d) `crates/autotrain/src/bench.rs`:
+      - adds `Baseline::Bluffer` to the `Baseline` enum,
+      - extends `Baseline::as_str` with `"bluffer"`,
+      - extends `Baseline::from_env` to parse `"bluffer"`,
+      - wires `Baseline::Bluffer` into the `run_hands`
+        match so seat 1 seats a `BlufferBot`,
+      - stamps the variant into `BenchReport.baseline`
+        (the existing `summarize` call already takes a
+        `Baseline` argument),
+      - extends the existing
+        `baseline_as_str_round_trip` and
+        `baseline_from_env_honours_env_var` lib tests
+        with the new `Baseline::Bluffer` literals so a
+        refactor that drops the variant from one of the
+        three sites fails before it lands,
+      - adds a `blufferbot_classify_bluff_eligible_when_weak`
+        lib test that pins `BluffDecision::RaiseSemiBluff`
+        for a flop with `eq=0.30, improve=0.10, street=Flop`
+        and `BluffDecision::Check` for the same with
+        `street=River` (river has 0% bluff frequency, so
+        the decision is `Check` / `NotBluffEligible`),
+      - adds a `blufferbot_preflop_reuses_preflopbot_tier_table`
+        lib test that asserts a `BlufferBot::decide` call
+        on a preflop `Partial` with the AA pocket from
+        the existing `preflop_tier_starts_with_top_pair`
+        test picks the smallest legal raise (the v3
+        tier-table behaviour, not a v4-specific branch).
+  (e) `crates/autotrain/tests/bench.rs` integration test
+      (gated on `database` + `DATABASE_URL` like the
+      existing STW-010 / STW-012 tests) extends the
+      JSON parse to assert the `baseline` field is
+      `"bluffer"` when run with
+      `RBP_BENCH_BASELINE=bluffer`.
+  (f) `genesis/plans/000-ceo-testnet-roadmap.md` gets a
+      one-line note marking the "v4 stronger baseline
+      (e.g. a second trained config)" item as shipped
+      (STW-013) — the note explicitly says the v4 is
+      a *named rule-based* baseline, not a second
+      trained config (which the v4 framing as a
+      "stronger named baseline" replaces), and points
+      to a future "second trained config" as the next
+      slice if a v5 is needed.
+  Verification commands:
+  `cargo test -p rbp-gameroom --tests --lib`,
+  `cargo test -p rbp-gameroom --features database --tests --lib`,
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the new lib tests in (d) + the
+  extended integration test in (e); no padding of
+  unrelated suites.
+  Dependencies: STW-011 (the v2 `EquityBot` postflop
+  threshold table), STW-012 (the v3 `PreflopBot`
+  preflop tier table that `BlufferBot` re-uses
+  verbatim on the preflop street).
+  Estimated scope: M.
+  Completion signal: `trainer --bench` with
+  `RBP_BENCH_BASELINE=bluffer` exits 0 on a
+  freshly-`--reset` DB and prints a parseable
+  single-line JSON `BenchReport` whose `baseline`
+  field is `"bluffer"`; the new lib tests pass;
+  `cargo test --workspace` and `cargo fmt --check`
+  are green.
   Owner files: `crates/gameroom/src/players/preflopbot.rs` (new),
   `crates/gameroom/src/players/mod.rs`,
   `crates/autotrain/src/bench.rs` (extend `Baseline` enum + JSON),

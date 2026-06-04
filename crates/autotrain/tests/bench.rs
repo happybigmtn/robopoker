@@ -394,3 +394,67 @@ fn bench_run_preflop_baseline_round_trips_through_json() {
         parsed.blind
     );
 }
+
+/// STW-013: the v4 `BlufferBot` named baseline must round-trip
+/// through the bench harness's `baseline` JSON field. The
+/// default-baseline test above pins the v1 default (`fish`);
+/// the v3-preflop test pins the v3 (`preflop`) override; this
+/// test pins the v4 (`bluffer`) override so a regression that
+/// drops the variant from `Baseline::as_str`,
+/// `Baseline::from_env`, or the seat-1 dispatch fails the
+/// integration test, not a downstream dashboard. Mirrors the
+/// shape of `bench_run_preflop_baseline_round_trips_through_json`
+/// (same small bench with `RBP_BENCH_HANDS=20` /
+/// `RBP_BENCH_BLIND=2`) but with `RBP_BENCH_BASELINE=bluffer`
+/// set in the env extra. The `blueprint_trained` assertion
+/// is intentionally omitted here (we re-use the empty
+/// blueprint left by the previous test) so this test does
+/// not depend on the order of execution inside the same
+/// test process.
+#[test]
+fn bench_run_bluffer_baseline_round_trips_through_json() {
+    if !database_url_set() {
+        return;
+    }
+    let (stdout, stderr, code) = run_trainer(
+        &["--bench"],
+        &[
+            ("RBP_BENCH_HANDS", "20"),
+            ("RBP_BENCH_BLIND", "2"),
+            ("RBP_BENCH_BASELINE", "bluffer"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "trainer --bench with RBP_BENCH_BASELINE=bluffer must exit 0.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('{') && l.trim_end().ends_with('}'))
+        .unwrap_or_else(|| {
+            panic!(
+                "trainer --bench (bluffer) must print a single-line JSON report on stdout.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+            )
+        });
+    let parsed = parse_bench_line(line).unwrap_or_else(|| {
+        panic!(
+            "trainer --bench (bluffer) stdout must be a parseable \
+             BenchReport JSON; got: {line:?}"
+        )
+    });
+    assert_eq!(
+        parsed.baseline, "bluffer",
+        "bench: baseline field must be `bluffer` when RBP_BENCH_BASELINE=bluffer; got {:?}",
+        parsed.baseline
+    );
+    assert_eq!(
+        parsed.hands, 20,
+        "bench (bluffer): hands field must equal RBP_BENCH_HANDS; got {}",
+        parsed.hands
+    );
+    assert_eq!(
+        parsed.blind, 2,
+        "bench (bluffer): blind field must equal RBP_BENCH_BLIND; got {}",
+        parsed.blind
+    );
+}
