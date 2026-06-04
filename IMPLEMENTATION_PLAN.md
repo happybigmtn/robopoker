@@ -7031,7 +7031,7 @@ they are NOT new scope. The new scope is
   cells render real `blueprint` / `baseline` /
   `mbb_per_100` / `ci_95` / `win_rate` numbers
   from the indexed `BenchReport`.
-  SHIPPED 2026-06-04 (commit <pending>).** Closes BOTH
+  SHIPPED 2026-06-04 (commit 6886f08).** Closes BOTH
   the workspace-test-build break the fourth pass
   names as the *single highest-leverage finding
   on `main` today* AND the `render.rs:164-171`
@@ -7373,7 +7373,7 @@ they are NOT new scope. The new scope is
   stderr line the trainer emits and writes a
   `trainer.step.jsonl` per-run timeline
   file. SHIPPED 2026-06-04 (commit
-  <pending>).** A new ~250-line
+  b5ad974).** A new ~250-line
   `scripts/trainer-observe.sh` pure-bash
   wrapper that takes a `<output-jsonl>` +
   `<trainer-bin>` + `[<trainer-argv>...]`
