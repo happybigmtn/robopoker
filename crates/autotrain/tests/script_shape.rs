@@ -719,13 +719,15 @@ fn testnet_live_publish_s3_script_has_verify_bundle_pre_upload_gate() {
     // so the substring `$TRAINER_BIN" --verify-bundle`
     // is unique to the call site (a docstring
     // comment would not have the trailing `"`).
-    let verify_bundle_call = script.find(r#"$TRAINER_BIN" --verify-bundle"#).unwrap_or_else(|| {
-        panic!(
+    let verify_bundle_call = script
+        .find(r#"$TRAINER_BIN" --verify-bundle"#)
+        .unwrap_or_else(|| {
+            panic!(
             "STW-033 publish-remote runbook must shell out to `trainer --verify-bundle <bundle>` \
              as a pre-upload gate; the runtime call `$TRAINER_BIN\" --verify-bundle` is missing \
              from the script"
         )
-    });
+        });
     // Find the runtime `--publish-remote
     // "$RECEIPT_DIR"` call (it lives inside the
     // REMOTE_ARGS array, so the substring
@@ -1563,5 +1565,212 @@ fn commit_bench_fixture_script_strips_run_id_fields() {
          `started_at_utc` field name (`\"started_at_utc\"`); a future \
          `BenchReport::to_json` revision that drops `started_at_utc` \
          should also drop this pin"
+    );
+}
+
+// ===========================================================================
+// STW-045 shell-shape pinner: the
+// `scripts/trainer-observe.sh` observability wrapper is on disk +
+// executable + parses with `bash -n`, AND the script source
+// contains the `emit_step` helper + the `jq` one-liner + the
+// `trainer observe complete: exit=` summary trailer. Mirrors the
+// STW-019 / STW-032 / STW-033 / STW-034 / STW-035 / STW-036
+// / STW-037 / STW-043 file-on-disk + bash-n pinners; the
+// `emit_step` / `jq` / summary-trailer pinners are the
+// STW-045-specific shape contract a downstream CI dashboard
+// depends on (a `jq -c . <output-jsonl>` round-trip + a
+// `jq -c 'select(.stream == "summary")' <output-jsonl>`
+// grep on the trailing line are the two scraper paths the
+// wrapper's README contract publishes; a regression that
+// drops `emit_step` (the per-line JSONL append) or renames
+// the `summary` stream (the trailer-tag the CI dashboard
+// `select`s on) silently breaks both scraper paths).
+//
+// The shell-shape integration test deliberately does not
+// shell out to the wrapper itself: that would require
+// either a fake trainer binary (a unit test) or a real
+// `DATABASE_URL` (the `trainer_observe.rs` integration
+// test); the shape pin is the *no-DB gate* that lets
+// `cargo test --workspace` stay green even on machines
+// that have no Postgres and no `trainer` binary on PATH.
+
+fn trainer_observe_script_path() -> PathBuf {
+    workspace_root().join("scripts").join("trainer-observe.sh")
+}
+
+#[test]
+fn trainer_observe_script_exists_and_parses() {
+    // The STW-045 observability wrapper script must be on
+    // disk, executable, and parse with `bash -n`. A
+    // regression that drops the file (or breaks the bash
+    // grammar) fails the gate at CI time before a CI
+    // worker can shell out to it. Mirrors the STW-019 /
+    // STW-032 / STW-033 / STW-034 / STW-035 / STW-036 /
+    // STW-037 / STW-043 file-on-disk + bash-n pinners.
+    let p = trainer_observe_script_path();
+    assert!(
+        p.exists(),
+        "STW-045 observability wrapper missing at {}; \
+         the trainer wrapper has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the wrapper.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-045 observability wrapper at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches a live
+    // wrapper invocation.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/trainer-observe.sh");
+    assert!(
+        out.status.success(),
+        "STW-045 observability wrapper must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn trainer_observe_script_emits_three_field_jsonl() {
+    // The wrapper's per-line JSONL encoder is the contract
+    // a CI dashboard scrapes. The encoder must (a) define
+    // a `emit_step <stream> <line>` helper (the per-line
+    // append the drainers call from the stderr / stdout
+    // background subshells), (b) invoke `jq` to
+    // JSON-escape the line content (the `line` field may
+    // contain `"` / `\` / control chars that a hand-rolled
+    // encoder would mishandle), and (c) produce a
+    // three-field object `ts` / `stream` / `line` with the
+    // right `ts` type. A regression that drops the helper,
+    // substitutes a hand-rolled `sed` encoder, or flattens
+    // the `ts` to a string breaks the CI dashboard's
+    // `jq -c .` round-trip silently.
+    let script = read(&trainer_observe_script_path());
+    // (a) The `emit_step` helper must be defined.
+    assert!(
+        script.contains("emit_step() {"),
+        "STW-045 observability wrapper must define an `emit_step()` helper that \
+         writes one JSONL line; the per-line append is the contract a CI dashboard \
+         scrapes"
+    );
+    // (b) The encoder must use `jq` (the JSON-escape path
+    // is the only way a `line` field with embedded
+    // double-quotes / backslashes / control chars survives
+    // a `jq -c .` round-trip byte-stable).
+    assert!(
+        script.contains("jq -cn --arg ts"),
+        "STW-045 observability wrapper must use `jq -cn --arg ts ...` to build the \
+         JSONL line; a hand-rolled `sed` / `awk` encoder would mishandle embedded \
+         `\"` / `\\` / control chars the trainer's log stream may carry"
+    );
+    assert!(
+        script.contains("--arg line"),
+        "STW-045 observability wrapper's `jq` encoder must pass the line content \
+         via `--arg line` (the `--arg` form handles JSON-string escaping for us); \
+         a `--argjson` / `--raw-input` substitution would change the `line` field \
+         shape and break the CI dashboard's `jq` round-trip"
+    );
+    // (c) The three-field object shape must be present
+    // in the script source. We assert by *string
+    // presence* of the field names (a regression that
+    // renames a field name must update this pin in the
+    // same change).
+    for field in &["\"ts\":", "\"stream\":", "\"line\":"] {
+        assert!(
+            script.contains(field),
+            "STW-045 observability wrapper's `jq` encoder must produce a `{field}` \
+             field; the CI dashboard's `jq -c .` round-trip and `select(.stream == \
+             \"summary\")` grep both depend on these field names being byte-stable"
+        );
+    }
+    // (c.ii) The `ts` field must be cast to a number
+    // (`($ts|tonumber)`) so the CI dashboard can do
+    // arithmetic on it (per-step duration = current_ts -
+    // prior_ts) without an extra `tonumber` round-trip.
+    assert!(
+        script.contains("($ts|tonumber)"),
+        "STW-045 observability wrapper's `jq` encoder must cast the `ts` field to a \
+         number via `($ts|tonumber)`; a `ts` field that survives as a string forces \
+         every CI dashboard consumer to do an extra `tonumber` round-trip"
+    );
+    // (c.iii) The three stream values the wrapper
+    // publishes must appear in the source. A regression
+    // that drops `stderr` / `stdout` / `summary` (or
+    // renames them to `err` / `out` / `trailer`) silently
+    // breaks the `select(.stream == "summary")` CI
+    // dashboard path.
+    for stream in &["\"stderr\"", "\"stdout\"", "\"summary\""] {
+        assert!(
+            script.contains(stream),
+            "STW-045 observability wrapper's JSONL stream tag must include `{stream}`; \
+             a CI dashboard `select(.stream == \"summary\")` grep depends on every \
+             stream tag being present and byte-stable"
+        );
+    }
+}
+
+#[test]
+fn trainer_observe_script_summary_trailer_format_is_pinned() {
+    // The wrapper's per-run `summary` trailer line is the
+    // one-line-per-run summary a CI dashboard
+    // `jq -c 'select(.stream == "summary")' <output-jsonl>`
+    // consumes. The trailer's `line` field must be
+    // a fixed-shape
+    // `trainer observe complete: exit=<rc> cmd=<argv...>`
+    // string. A regression that renames the prefix
+    // (`trainer observe complete:` → `trainer_observe done:`)
+    // or drops the `exit=` / `cmd=` key=value pairs
+    // silently breaks the dashboard's grep / parse.
+    let script = read(&trainer_observe_script_path());
+    // (1) The prefix must be present.
+    assert!(
+        script.contains("trainer observe complete: exit="),
+        "STW-045 observability wrapper must emit a `trainer observe complete: exit=...` \
+         summary trailer line; the CI dashboard's `select(.stream == \"summary\")` grep \
+         depends on the `trainer observe complete:` prefix being byte-stable"
+    );
+    // (2) The two key=value pairs (`exit=$TRAINER_RC` +
+    // `cmd=${TRAINER_ARGV[*]}`) must appear in the
+    // summary-line template, in that order, so a dashboard
+    // scraper can `grep -oE 'exit=[0-9]+' <output-jsonl>`
+    // to extract the per-run exit code without parsing
+    // JSON.
+    let exit_idx = script
+        .find("exit=$TRAINER_RC")
+        .expect("STW-045 summary trailer must include `exit=$TRAINER_RC`");
+    let cmd_idx = script
+        .find("cmd=${TRAINER_ARGV[*]}")
+        .expect("STW-045 summary trailer must include `cmd=${TRAINER_ARGV[*]}`");
+    assert!(
+        exit_idx < cmd_idx,
+        "STW-045 summary trailer key=value pairs must appear in order exit, cmd (got \
+         `cmd=` before `exit=`, or `cmd=` not present after `exit=`) so a CI dashboard \
+         scraper can `grep -oE 'exit=[0-9]+ cmd=.*'` and receive a stable per-run \
+         summary"
     );
 }
