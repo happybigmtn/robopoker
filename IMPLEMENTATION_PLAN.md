@@ -1795,6 +1795,159 @@ have a single source of truth.
   remain green; `crates/transport/src/greenkhorn.rs` is no
   longer a single empty struct definition.
 
+- [x] `STW-025` Lib-level test coverage for
+  `crates/server/src/analysis`. The `steward/DRIFT.md`
+  "Orphan Code Surfaces" table flags
+  `crates/server/src/analysis` as ORPHAN: *"no tracked STW
+  item covers analysis API/CLI surface"*. The module is
+  1391 lines of wired-up code (13 actix-web handlers in
+  `analysis/handlers.rs`, an 11-variant `clap` `Query` enum
+  in `analysis/query.rs`, a 224-line `CLI` REPL in
+  `analysis/cli.rs`, and a 891-line `API` struct in
+  `analysis/api.rs`) but ships **zero tests**: there is no
+  `crates/server/tests/` directory, no `#[cfg(test)] mod
+  tests` in any analysis file, and the 13 HTTP routes the
+  `bin/backend` binary actually serves are entirely
+  unexercised by CI. STW-025 lands a *no-DB* test surface
+  for the parts of the module that do not require a live
+  Postgres connection, plus a wire-format pinner for the
+  request/response DTOs the 13 handlers accept and emit.
+  Three pieces of proof that the module is exercised, not
+  stub: (a) a refactor of `analysis/cli.rs` that extracts a
+  pure `render_query(&Query) -> Option<Result<String,
+  String>>` helper returning the rendered text the REPL
+  handler currently prints (5 of the 11 `Query` variants
+  are pure: `Path { value: i64 }`, `Edge { value: u8 }`,
+  `AbsFromInt { value: i16 }`, `ObsFromInt { value: i64 }`,
+  `Isomorphism { value: i64 }` — they only call local
+  `Path::from(i64)` / `Edge::from(u8)` /
+  `Abstraction::from(i16)` / `Observation::from(i64)` /
+  `Isomorphism::from(i64)` constructors and the
+  `catch_unwind` panic guard on the
+  `Observation`/`Isomorphism` integer conversions), with
+  the `CLI::handle` body becoming a small dispatcher
+  (`match render_query(&query) { Some(rendered) =>
+  r#try(writeln!(...)) ..., None => match query {
+  api_cmd => self.0.X().await... } }`); the refactor must
+  preserve the exact stdout text the existing handler
+  prints (same field order, same labels, same
+  `Path({})` / `Edge({})` / `Abstraction({})` /
+  `Observation({})` / `Isomorphism({})` headers, same
+  two-space-indent child lines); (b) a `#[cfg(test)] mod
+  tests` block in `analysis/cli.rs` with 7+ lib tests
+  pinning the pure path: `render_path_known_i64_round_trips`
+  (asserts `Path(1)` → header + a 4-line body containing
+  `Display:` / `Length:` / `Aggro:` / `Edges:` lines for a
+  well-formed input), `render_path_zero_i64_renders_empty`
+  (asserts `Path(0)` → a `Length: 0` body), `render_edge_
+  fold_byte_renders_fold` (`Edge(0)` → `Is choice: false`
+  / `Is aggro: false`), `render_edge_call_byte_renders_
+  call` (`Edge(2)` → `Is choice: true`), `render_abs_from_
+  int_zero_round_trips` (`Abstraction(0)` → `Street:` /
+  `Index: 0`), `render_obs_from_int_panics_guarded_by_
+  catch_unwind` (asserts the `catch_unwind` in the
+  existing handler body is preserved verbatim: an input
+  that decodes to a valid `Observation` produces the
+  4-line body, an input that panics inside `Observation::
+  from` produces the
+  `Error: Invalid observation encoding (assertions
+  failed)` body — both are reachable through
+  `render_query`); and (c) a `tests/dto_wire.rs`
+  integration test in `crates/server/tests/` (the new
+  directory created by STW-025) that round-trips each of
+  the 9 request DTOs in `crates/util/src/dto/request.rs`
+  through `serde_json::from_str` + `serde_json::to_string`
+  + `serde_json::from_str` and asserts the second parse
+  equals the first struct (pins the wire format for
+  `SetStreets` / `ReplaceObs` / `RowWrtObs` / `ReplaceAbs`
+  / `ReplaceRow` / `ReplaceOne` / `ReplaceAll` / `ObsHist`
+  / `AbsHist` / `GetPolicy` — 10 DTOs total, 9 are
+  requests, the 10th is `ApiSample` / `ApiStrategy` /
+  `ApiDecision` in `crates/util/src/dto/response.rs` which
+  the response side pins in `response_dto_round_trip_*`).
+  A third integration test `tests/analysis_cli.rs`
+  exercises the `render_query` helper through the public
+  `Query::try_parse_from` path with hand-rolled
+  `Query::Path { value: 1 }` / `Query::Edge { value: 2 }` /
+  `Query::AbsFromInt { value: 0 }` / `Query::Isomorphism
+  { value: 0 }` inputs and asserts the rendered text
+  matches the lib-test expectations. Owner files:
+  `crates/server/src/analysis/cli.rs` (refactor
+  `CLI::handle` to delegate to a new
+  `pub(crate) fn render_query(query: &Query) -> Option<
+  Result<String, String>>` helper, plus the new
+  `#[cfg(test)] mod tests` block),
+  `crates/server/tests/dto_wire.rs` (new no-DB
+  integration test, ~10 tests pinning the request DTO
+  wire format and 3 tests pinning the response DTO wire
+  format), `crates/server/tests/analysis_cli.rs` (new
+  no-DB integration test, 5 tests pinning
+  `render_query`'s public surface), `IMPLEMENTATION_PLAN.md`
+  (this row). Scope boundary: do NOT touch
+  `analysis/api.rs` or `analysis/handlers.rs`; the
+  DB-bound handler bodies stay as-is. Do NOT touch
+  `analysis/query.rs`; the `Query` enum shape is the
+  wire-level contract. Do NOT touch the 6 DB-bound
+  `Query` variants (`Abstraction` / `Distance` /
+  `Equity` / `Population` / `Similar` / `Nearby` /
+  `Composition`) — they require a live `API` and a
+  live Postgres and are out of STW-025's no-DB scope.
+  Do NOT touch the `API` struct, the `Strategy` /
+  `Decision` / `Partial` types the `blueprint` handler
+  threads through, the `actix-web` `App` / route wiring
+  in `crates/server/src/lib.rs`, the `bin/backend` entry
+  point, the `hosting` module, or the
+  `crates/auth` / `crates/database` / `crates/cards` /
+  `crates/gameplay` / `crates_mccfr` / `crates_nlhe`
+  crates. Do NOT add a new `tokio-postgres` mock layer
+  or a `mockall` dep — STW-025's tests are entirely
+  synchronous (`render_query` is `fn` not `async fn`,
+  DTO round-trips are sync) so they run with `cargo test
+  -p rbp-server --tests` and require no
+  `#[tokio::test]` runtime, no `actix_web::test` runtime,
+  and no `DATABASE_URL` env. Do NOT change the
+  `Analysis`-backed REPL prompt (`> `), the
+  `quit`/`exit` keywords, or the
+  `Query::try_parse_from` shape. Verification commands:
+  `cargo test -p rbp-server --tests --lib` (the new
+  tests pass), `cargo build -p rbp-server` (the refactor
+  compiles), `cargo check --workspace` (no downstream
+  breakage), `cargo test --workspace` (full workspace
+  remains green), `cargo fmt --check`. Required tests:
+  7 new lib tests in
+  `crates/server/src/analysis/cli.rs::tests` + ≥ 10 new
+  tests in `crates/server/tests/dto_wire.rs` + 5 new
+  tests in `crates/server/tests/analysis_cli.rs` —
+  total ≥ 22 new tests, all no-DB and synchronous.
+  Dependencies: STW-003 (database-backed server/gameroom
+  build; the analysis module is a consumer of the
+  `tokio_postgres::Client` the server wires in);
+  `crates/util/src/dto/{request,response}.rs` (the
+  DTOs STW-025 pins — they already ship in
+  `rbp-core` as `pub use` re-exports); the existing
+  `Query` enum in `analysis/query.rs` (STW-025 adds
+  a renderer next to it, does NOT change the enum).
+  Estimated scope: M. Completion signal:
+  `cargo test -p rbp-server --tests --lib` is green with
+  ≥ 22 new tests passing; `render_query(&Query::Path {
+  value: 1 })` returns
+  `Some(Ok("Path(1)\n  Display:  ...\n  Length:   ...\n
+  Aggro:    ...\n  Edges:    ...\n"))` with a non-empty
+  `Display:` and `Length:` line;
+  `render_query(&Query::AbsFromInt { value: 0 })`
+  returns
+  `Some(Ok("Abstraction(0)\n  Display:  0\n  Street:
+  Preflop\n  Index:    0\n"))`; the existing
+  `CLI::run` / `CLI::handle` REPL still prints the same
+  text to stdout on a fresh `cargo run -p rbp-server
+  --bin robopoker-backend` (manual smoke against the
+  CLI's `> Path 1` / `> Edge 2` / `> abs 0` /
+  `> iso 0` prompts) — the refactor is a pure
+  extraction, the visible behavior is byte-identical;
+  `cargo test --workspace` and `cargo fmt --check`
+  remain green; `crates/server/tests/` is no longer an
+  empty directory.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.

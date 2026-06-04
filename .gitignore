@@ -6,6 +6,7 @@
 /.vscode
 /.claude
 /.auto
+/.cargo-target-tmp
 
 # STW-019 runbook receipts (runtime output of `bash scripts/testnet-live-proof.sh`)
 /receipts/
