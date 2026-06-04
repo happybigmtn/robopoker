@@ -1,6 +1,7 @@
 use crate::records::Hand;
 use crate::records::Participant;
 use crate::records::Play;
+use crate::records::Transcript;
 use crate::room::Room;
 use rbp_auth::*;
 use rbp_cards::Board;
@@ -237,4 +238,41 @@ impl HistoryRepository for Arc<Client> {
         .await
         .map(|opt| opt.map(|row| Hole::from(rbp_cards::Hand::from(row.get::<_, i64>(0) as u64))))
     }
+}
+
+/// Load a [`Transcript`] (the testnet "replayable hand
+/// bundle" shape) for `hand_id` by issuing three
+/// `HistoryRepository` reads — `get_hand`, `get_players`,
+/// `get_actions` — and stitching the rows into the
+/// `Hand` / `Participant` / `Play` triple the
+/// `Transcript` constructor expects. Returns
+/// `Ok(None)` when `get_hand` reports the hand does not
+/// exist (so a downstream tool can distinguish "no such
+/// hand" from "DB error" without parsing the error).
+///
+/// The read order is fixed: header → participants → plays.
+/// `get_players` orders by `seat ASC`; `get_actions` orders
+/// by `seq ASC`; both match the `Transcript::verify`
+/// invariants (monotonic `seq`, every `Play::player`
+/// resolves to a `Participant::user`), so the returned
+/// transcript re-passes `verify` without any post-load
+/// reordering.
+///
+/// Lives in `repository.rs` rather than `records/transcript.rs`
+/// to avoid a cyclic module dep: `records::transcript` is
+/// already used by `Room::flush_hand` via `records::hand`,
+/// and pulling the `HistoryRepository` trait into
+/// `records::transcript` would invert the existing
+/// `repository → records` arrow.
+pub async fn load_transcript(
+    client: &Arc<Client>,
+    hand_id: ID<Hand>,
+) -> Result<Option<Transcript>, PgErr> {
+    let hand = match client.get_hand(hand_id).await? {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+    let participants = client.get_players(hand_id).await?;
+    let plays = client.get_actions(hand_id).await?;
+    Ok(Some(Transcript::new(hand, participants, plays)))
 }

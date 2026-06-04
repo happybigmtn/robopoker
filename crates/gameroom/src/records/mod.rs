@@ -10,15 +10,18 @@
 //! - [`Play`] — A single action within a hand
 //! - [`Participant`] — Player identity and starting stack
 //! - [`Replay`] — Iterator for stepping through recorded hands
+//! - [`Transcript`] — Replayable JSON bundle for a persisted hand
 //! - [`Room`] — Marker type for room identity
 mod hand;
 mod participant;
 mod play;
 mod replay;
 mod room;
+mod transcript;
 
 pub use hand::*;
 pub use participant::*;
 pub use play::*;
 pub use replay::*;
 pub use room::*;
+pub use transcript::*;

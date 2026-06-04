@@ -1077,4 +1077,126 @@ mod db_tests {
             );
         }
     }
+
+    /// STW-014 transcript round-trip: drive a real `Room`
+    /// end-to-end, read the persisted records back through
+    /// `HistoryRepository`, bundle them into a `Transcript`,
+    /// call `verify()`, serialise to JSON, and re-parse.
+    /// Proves the in-memory `Transcript` type is the right
+    /// shape for the on-the-wire "replayable benchmark
+    /// surface" the testnet roadmap requires: anyone with the
+    /// JSON file and the public `Transcript` constructor can
+    /// re-derive the action sequence without holding a DB
+    /// connection. Gated on `database` + `DATABASE_URL` like
+    /// the other DB tests so CI without Postgres stays green.
+    #[tokio::test]
+    async fn transcript_json_round_trips() {
+        schema_setup();
+        let Some(client) = db().await else {
+            eprintln!("DATABASE_URL not set; skipping transcript_json_round_trips");
+            return;
+        };
+        reset_tables(&client).await;
+
+        // Drive the room the same way the STW-008 round-trip does.
+        // Two `Fish` / `Lurker` seats → `Participant::user = None`
+        // and `Play::player = None` for every action. The
+        // transcript's `verify()` must accept a transcript where
+        // every `Play::player` is `None` (those actions are
+        // unattributed; the participant list is the "seat known?"
+        // oracle, and an unattributed play skips the lookup).
+        let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+        let mut room = rbp_gameroom::Room::new(coordinator_room_id, 2, client.clone());
+        rbp_gameroom::HistoryRepository::create_room(&client, &room)
+            .await
+            .expect("create_room must succeed against a clean schema");
+        room.sit(rbp_gameroom::Fish, rbp_auth::Lurker::default());
+        room.sit(rbp_gameroom::Fish, rbp_auth::Lurker::default());
+
+        let hand_id = room.play_hand_once().await;
+
+        // Read back the persisted records.
+        let hand = client
+            .get_hand(hand_id)
+            .await
+            .expect("get_hand must succeed")
+            .expect("hand row must exist after Room.play_hand_once");
+        let participants = client
+            .get_players(hand_id)
+            .await
+            .expect("get_players must succeed");
+        let plays = client
+            .get_actions(hand_id)
+            .await
+            .expect("get_actions must succeed");
+
+        // Build the transcript and assert its integrity check
+        // accepts the persisted records. A `None` `Play::player`
+        // for every play is the expected shape for two `Lurker`
+        // seats, so `verify()` must return `Ok(())` here.
+        use rbp_gameroom::records::Transcript;
+        let t = Transcript::new(hand, participants, plays);
+        assert!(
+            t.verify().is_ok(),
+            "Transcript::verify must accept a transcript built from a real Room's persisted records; got {:?}",
+            t.verify()
+        );
+
+        // Serialise to JSON, parse the document back, and assert
+        // the shape. The on-the-wire contract a downstream
+        // scraper can `jq` over: top-level `hand` / `participants`
+        // / `plays` keys, `hand.id` matches the source, the
+        // participant count equals N, the play count equals the
+        // recorded action count.
+        let json = t.to_json();
+        let v: serde_json::Value =
+            serde_json::from_str(&json).expect("Transcript::to_json must emit valid JSON");
+
+        let v_hand = v
+            .get("hand")
+            .expect("transcript JSON must include the `hand` key");
+        let v_hand_id = v_hand
+            .get("id")
+            .and_then(|s| s.as_str())
+            .expect("transcript JSON hand.id must be a string");
+        assert_eq!(
+            v_hand_id,
+            t.hand().id().inner().to_string(),
+            "transcript JSON hand.id must match the source Hand.id"
+        );
+
+        let v_participants = v
+            .get("participants")
+            .and_then(|p| p.as_array())
+            .expect("transcript JSON participants must be an array");
+        assert_eq!(
+            v_participants.len(),
+            t.participants().len(),
+            "transcript JSON participants.length must match the source participant count"
+        );
+
+        let v_plays = v
+            .get("plays")
+            .and_then(|p| p.as_array())
+            .expect("transcript JSON plays must be an array");
+        assert_eq!(
+            v_plays.len(),
+            t.plays().len(),
+            "transcript JSON plays.length must match the source play count"
+        );
+        // The persisted plays are already seq-ordered by the
+        // `get_actions` repository contract; the JSON should
+        // reflect that order so a downstream reader can re-derive
+        // the action sequence by iterating the array.
+        for (i, p) in v_plays.iter().enumerate() {
+            let seq = p
+                .get("seq")
+                .and_then(|s| s.as_u64())
+                .expect("transcript JSON plays[i].seq must be a number");
+            assert_eq!(
+                seq as usize, i,
+                "transcript JSON plays[i].seq must equal its index"
+            );
+        }
+    }
 }

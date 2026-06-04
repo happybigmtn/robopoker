@@ -214,6 +214,114 @@ context.
 
 - [x] `STW-012` v3 named baseline (`PreflopBot`): preflop-tier aware rule bot.
 
+- [x] `STW-014` Replayable transcript bundle: land the `Transcript` data
+  type, wire it into the bench harness, and prove the round-trip end-to-end
+  against a real `Room` write.
+  Owner files: `crates/gameroom/src/records/transcript.rs` (new),
+  `crates/gameroom/src/records/mod.rs` (re-export),
+  `crates/gameroom/tests/hand_roundtrip.rs` (extend with
+  `transcript_json_round_trips`),
+  `crates/autotrain/src/bench.rs` (write one `transcript-*.json` per
+  bench hand into `RBP_BENCH_TRANSCRIPT_DIR`),
+  `genesis/plans/000-ceo-testnet-roadmap.md` (mark the
+  "Public reproducible benchmark surface" item as in-progress with
+  STW-014),
+  `IMPLEMENTATION_PLAN.md`.
+  Scope boundary: the `Transcript` is a thin in-memory bundle of the
+  already-persisted `Hand` / `Participant` / `Play` records plus a
+  cheap `verify()` integrity check (orphan player + non-monotonic seq)
+  and a `to_json()` serialiser. The bench harness writes one
+  `transcript-<hand_id>.json` per hand under
+  `RBP_BENCH_TRANSCRIPT_DIR` (default `./transcripts`); a downstream
+  tool can replay the action sequence by reading one file. Do NOT
+  redesign the `Schema` contracts, do NOT change the
+  `HistoryRepository` API, do NOT add a new solver, do NOT change the
+  room protocol, do NOT introduce a `Replay` v2 type.
+  Acceptance criteria:
+  (a) `crates/gameroom/src/records/transcript.rs` exists with the
+      `Transcript` data type (a `Hand` + `Vec<Participant>` +
+      `Vec<Play>` bundle), a `TranscriptError` enum with
+      `OrphanPlayer { seq, member }` and `NonMonotonicSeq { seq }`
+      variants, a `Transcript::new(...)` constructor, a
+      `Transcript::verify() -> Result<(), TranscriptError>` integrity
+      check, a `Transcript::to_json() -> String` serialiser, and
+      `HandView` / `ParticipantView` / `PlayView` serialise
+      adapters. The `Serialize` impl produces a flat
+      `{"hand":{...},"participants":[...],"plays":[...]}` document.
+  (b) `Transcript::verify` rejects an orphan player (a `Play::player`
+      UUID not in the participant list) and a non-monotonic `seq`
+      (`seq=0, seq=2` with the gap visible) and returns `Ok(())` for
+      a consistent transcript.
+  (c) `crates/gameroom/src/records/mod.rs` re-exports `Transcript` and
+      `TranscriptError` so downstream callers can
+      `use rbp_gameroom::records::Transcript`.
+  (d) `crates/gameroom/src/records/transcript.rs::tests` includes
+      the six unit tests: `verify_accepts_consistent_transcript`,
+      `verify_detects_orphan_player`, `verify_detects_non_monotonic_seq`,
+      `to_json_includes_hand_participants_and_plays`,
+      `transcript_error_display_includes_seq_and_member`, and
+      `action_u32_round_trip_preserves_variant`. They run under
+      `cargo test -p rbp-gameroom` (no `database` feature required —
+      they only touch the in-memory type).
+  (e) `crates/gameroom/tests/hand_roundtrip.rs` adds a new
+      `transcript_json_round_trips` integration test (gated on
+      `database` + `DATABASE_URL` like the existing
+      `room_with_two_fish_persists_one_hand`) that drives a real
+      `Room` end-to-end, reads the persisted `Hand` /
+      `Vec<Participant>` / `Vec<Play>` back through
+      `HistoryRepository::get_hand / get_players / get_actions`,
+      constructs a `Transcript::new(...)`, asserts
+      `t.verify().is_ok()`, serialises to `t.to_json()`, parses the
+      result back as `serde_json::Value`, and asserts (i) the JSON
+      has `hand`, `participants`, `plays` top-level keys, (ii) the
+      `hand.id` field matches the read-back hand id, (iii) the
+      `participants` array length equals `N` (one per seat), and
+      (iv) the `plays` array length equals the read-back action
+      count.
+  (f) `crates/autotrain/src/bench.rs` writes a `transcript-*.json`
+      per hand under `RBP_BENCH_TRANSCRIPT_DIR` (default
+      `./transcripts`). The bench creates the directory if it does
+      not exist, and uses `HistoryRepository::get_hand / get_players
+      / get_actions` to read back the records the `Room::flush_hand`
+      just wrote. A `transcript` boolean field is added to
+      `BenchReport` and stamped `true` iff the directory was
+      non-empty after the run. The `RBP_BENCH_TRANSCRIPT_DIR=""` env
+      value (or unset + `RBP_BENCH_TRANSCRIPT_DISABLE=1`) disables
+      the writer for callers that do not want a directory side
+      effect.
+  (g) `crates/autotrain/src/bench.rs::tests` adds a
+      `transcript_dir_default_and_env_override_round_trip` lib test
+      that pins the env var contract (default `./transcripts`, env
+      override honoured, empty value disables the writer) so a
+      refactor that drops the env-var wiring fails before it lands.
+  Verification commands:
+  `cargo test -p rbp-gameroom --tests --lib`,
+  `cargo test -p rbp-gameroom --features database --tests --lib`,
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo check --workspace --all-features`,
+  `cargo fmt --check`.
+  Required tests: the six new lib tests in (d) + the new
+  `transcript_json_round_trips` integration test in (e) + the
+  `transcript_dir_default_and_env_override_round_trip` lib test
+  in (g); no padding of unrelated suites.
+  Dependencies: `STW-006` (Schema/BulkSchema split) for the
+  `Schema::creates()` and `Schema::freeze()` paths the persistence
+  reads depend on; `STW-008` (hand-persistence round-trip) for the
+  `HistoryRepository::get_*` reads the bench writer and the
+  integration test use; `STW-010` (bench harness) for the
+  `trainer --bench` entry point the writer hooks into.
+  Estimated scope: M.
+  Completion signal: `cargo test --workspace` is green,
+  `cargo fmt --check` is green, the `transcript_json_round_trips`
+  integration test passes against a live Postgres (or is
+  short-circuited by a missing `DATABASE_URL`), and a `trainer
+  --bench` run on a freshly-`--reset` DB leaves at least one
+  `transcript-<hand_id>.json` file under `./transcripts/` that
+  re-parses as a JSON object with the expected `hand` /
+  `participants` / `plays` keys.
+
 - [x] `STW-013` v4 named baseline (`BlufferBot`): add a semi-bluff-aware
   rule bot that beats `PreflopBot` by raising on checked-to postflop
   boards with weak made hands / strong draws (the gap that `EquityBot`

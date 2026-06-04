@@ -75,6 +75,7 @@ use rbp_gameroom::BlufferBot;
 use rbp_gameroom::DatabasePlayer;
 use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
+use rbp_gameroom::HistoryRepository;
 use rbp_gameroom::PreflopBot;
 use rbp_gameroom::Room;
 use std::sync::Arc;
@@ -212,6 +213,47 @@ pub fn bench_blind() -> Chips {
     }
 }
 
+/// Default transcript bundle directory the bench writes
+/// `transcript-<hand_id>.json` files into when
+/// `RBP_BENCH_TRANSCRIPT_DIR` is unset. The default is
+/// `./transcripts` (relative to the bench's CWD) so a `trainer
+/// --bench` run on a freshly-`--reset` DB leaves the bundle
+/// files where a downstream tool can find them without any
+/// extra configuration. Operators that want a different
+/// location set `RBP_BENCH_TRANSCRIPT_DIR=/path/to/dir`.
+pub const DEFAULT_BENCH_TRANSCRIPT_DIR: &str = "./transcripts";
+
+/// Read `RBP_BENCH_TRANSCRIPT_DIR` as a string path, falling
+/// back to [`DEFAULT_BENCH_TRANSCRIPT_DIR`]. An empty value
+/// (e.g. `RBP_BENCH_TRANSCRIPT_DIR=""`) returns `None` from
+/// the bench's writer path — that is the documented "disable
+/// transcript writes" knob, alongside the more explicit
+/// `RBP_BENCH_TRANSCRIPT_DISABLE=1` flag. The split into
+/// "empty disables" and "default value disables" lets an
+/// operator unset the env var (a one-line `.env` change)
+/// without re-typing a long path to turn the writer off.
+pub fn bench_transcript_dir() -> Option<String> {
+    match std::env::var("RBP_BENCH_TRANSCRIPT_DIR") {
+        Ok(s) if s.is_empty() => None,
+        Ok(s) => Some(s),
+        Err(_) => {
+            // Fall back to the default unless the explicit
+            // disable flag is set. The default is the
+            // constant the harness promotes; the disable
+            // flag is the operator override.
+            if std::env::var("RBP_BENCH_TRANSCRIPT_DISABLE")
+                .ok()
+                .as_deref()
+                == Some("1")
+            {
+                None
+            } else {
+                Some(DEFAULT_BENCH_TRANSCRIPT_DIR.to_string())
+            }
+        }
+    }
+}
+
 /// Head-to-head bench report. Emitted as a JSON line on stdout
 /// by [`bench::run`] on success.
 ///
@@ -262,6 +304,19 @@ pub struct BenchReport {
     /// bot vs equity-bot" curve from the same `BenchReport`
     /// stream. See [`Baseline`] for the variant list.
     pub baseline: Baseline,
+    /// `true` iff the bench wrote at least one
+    /// `transcript-<hand_id>.json` bundle into
+    /// `RBP_BENCH_TRANSCRIPT_DIR` during this run. The bench
+    /// is the producer side of the on-the-wire "replayable
+    /// benchmark surface" the testnet roadmap requires; the
+    /// `transcript` flag tells a downstream scraper whether a
+    /// given `BenchReport` is paired with a per-hand bundle
+    /// directory (the directory is the "replay from the
+    /// README" artifact). A `false` value means either
+    /// `RBP_BENCH_TRANSCRIPT_DISABLE=1` was set, the directory
+    /// was unwritable, or every per-hand read-back returned a
+    /// missing/incomplete set of rows.
+    pub transcript: bool,
 }
 
 impl BenchReport {
@@ -287,7 +342,8 @@ impl BenchReport {
                 "\"win_rate_ci95\":{win_rate_ci95:.4},",
                 "\"blind\":{blind},",
                 "\"blueprint_trained\":{blueprint_trained},",
-                "\"baseline\":\"{baseline}\"",
+                "\"baseline\":\"{baseline}\",",
+                "\"transcript\":{transcript}",
                 "}}\n"
             ),
             hands = self.hands,
@@ -301,6 +357,7 @@ impl BenchReport {
             blind = self.blind,
             blueprint_trained = self.blueprint_trained,
             baseline = self.baseline.as_str(),
+            transcript = self.transcript,
         )
     }
 }
@@ -365,12 +422,15 @@ pub fn summarize(per_hand: &[Chips], blind: Chips, baseline: Baseline) -> BenchR
         blind,
         blueprint_trained: true,
         baseline,
+        transcript: false,
     }
 }
 
 /// Drive K heads-up hands of `DatabasePlayer` (seat 0) vs a
 /// named baseline (seat 1) through a real `Room`, and return
-/// the per-hand `seat_0.won()` vector.
+/// the per-hand `seat_0.won()` vector plus a flag indicating
+/// whether at least one per-hand `transcript-<hand_id>.json`
+/// bundle was written into [`bench_transcript_dir`].
 ///
 /// The bench intentionally uses the production `Room` shell (not
 /// a hand-written engine loop) so the result reflects exactly
@@ -406,9 +466,17 @@ pub async fn run_hands(
     stakes: Chips,
     blueprint_trained: bool,
     baseline: Baseline,
-) -> Result<Vec<Chips>, String> {
+) -> Result<(Vec<Chips>, bool), String> {
     assert!(k > 0, "bench must play at least one hand");
     let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+    // The transcript writer is opt-in via env var. `Some(path)`
+    // turns on the per-hand `Transcript::write_to_path` call;
+    // `None` keeps the bench as a no-side-effect measurement
+    // (no directory is created, no files are written). The
+    // boolean the function returns is `true` iff the writer
+    // actually wrote at least one file in this run.
+    let transcript_dir = bench_transcript_dir();
+    let mut wrote_transcript = false;
     let mut room = Room::new(coordinator_room_id, stakes, client.clone());
     // The room row must exist before any `create_hand` runs
     // because `hands.room_id` FKs into `rooms(id)`. The
@@ -450,7 +518,12 @@ pub async fn run_hands(
     }
     let mut per_hand = Vec::with_capacity(k);
     for _ in 0..k {
-        room.play_hand_once().await;
+        // `Room::play_hand_once` returns the hand id of the
+        // hand it just flushed. We use it as the transcript
+        // bundle's filename suffix so a downstream tool can
+        // correlate the per-hand JSONL line with the
+        // `BenchReport` that produced it.
+        let hand_id = room.play_hand_once().await;
         let pnl = room.settlements();
         // The bench is heads-up; `pnl` always has exactly 2
         // entries (one per seat) and seat 0 is the blueprint.
@@ -461,6 +534,26 @@ pub async fn run_hands(
             "bench: heads-up room must report 2 settlements per hand, got {pnl:?}"
         );
         per_hand.push(pnl[0]);
+        // Per-hand transcript write. We read back the
+        // persisted records `Room::flush_hand` just wrote
+        // (the same path the live server uses), build a
+        // `Transcript`, and write it to the configured
+        // directory. A read-back that returns `None` for
+        // the hand row (a Room regression) or a write that
+        // fails are both downgraded to `log::warn!` lines —
+        // a transcript-write failure is a data-quality
+        // problem, not a reason to fail the bench.
+        if let Some(dir) = transcript_dir.as_deref() {
+            match write_hand_transcript(&client, hand_id, std::path::Path::new(dir)).await {
+                Ok(true) => wrote_transcript = true,
+                Ok(false) => log::warn!(
+                    "bench: hand {hand_id} produced no Transcript (read-back returned no rows); skipping bundle"
+                ),
+                Err(e) => {
+                    log::warn!("bench: Transcript::write_to_path failed for hand {hand_id}: {e}")
+                }
+            }
+        }
         // `play_hand_once` leaves the engine in `Showdown`; the
         // next iteration's `play_hand_once` would panic on
         // `engine.start()` (which requires `Seating`). `conclude`
@@ -480,7 +573,55 @@ pub async fn run_hands(
             break;
         }
     }
-    Ok(per_hand)
+    Ok((per_hand, wrote_transcript))
+}
+
+/// Read a single hand's `Hand` / `Vec<Participant>` /
+/// `Vec<Play>` back from the persistence layer (the same
+/// `HistoryRepository::get_hand / get_players / get_actions`
+/// queries the live server uses), build a `Transcript` from
+/// them, and write it to `<dir>/transcript-<hand_id>.json`.
+///
+/// Returns `Ok(true)` if the file was written, `Ok(false)` if
+/// the read-back returned no hand row (a missing or
+/// hand-rolled Room write), and `Err(String)` if the
+/// underlying I/O failed.
+async fn write_hand_transcript(
+    client: &Arc<Client>,
+    hand_id: ID<rbp_gameroom::records::Hand>,
+    dir: &std::path::Path,
+) -> Result<bool, String> {
+    // `load_transcript` factors the three-read handshake
+    // (`get_hand` + `get_players` + `get_actions`) into a
+    // single reusable entry point on the gameroom
+    // repository module — any future caller that wants a
+    // transcript from a hand id reuses the same path the
+    // bench uses, so a refactor that changes the read
+    // order or the seq-ordering invariant fails this site
+    // first. The `Option` return lets us distinguish
+    // "no such hand" from a DB error without parsing the
+    // underlying error string.
+    let t = rbp_gameroom::load_transcript(client, hand_id)
+        .await
+        .map_err(|e| format!("load_transcript({hand_id}): {e}"))?;
+    let Some(t) = t else {
+        return Ok(false);
+    };
+    // `verify` is cheap (O(N) over the plays) and catches
+    // the two classes of corruption the bundle is designed
+    // to surface: orphan `Play::player` UUIDs and
+    // non-monotonic `seq` fields. A failing verify is
+    // downgraded to a `log::warn!` so a corrupt historical
+    // record doesn't fail the bench — the file is still
+    // written, and a downstream tool can re-verify and
+    // decide what to do.
+    if let Err(e) = t.verify() {
+        log::warn!("bench: hand {hand_id} transcript verify failed: {e}");
+    }
+    let path = dir.join(format!("transcript-{}.json", hand_id.inner()));
+    t.write_to_path(&path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(true)
 }
 
 /// Top-level entry point invoked by [`Mode::Bench`]. Hydrates
@@ -507,15 +648,27 @@ pub async fn run(client: Arc<Client>) {
         "bench: hydrating blueprint (rows={rows_before}) + playing {k} hands @ blind={blind} baseline={baseline}",
         baseline = baseline.as_str(),
     );
-    let per_hand = match run_hands(client, k, blind, blueprint_trained, baseline).await {
-        Ok(v) => v,
-        Err(e) => {
-            log::error!("bench failed: {e}");
-            std::process::exit(3);
-        }
-    };
+    let (per_hand, transcript_wrote) =
+        match run_hands(client, k, blind, blueprint_trained, baseline).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("bench failed: {e}");
+                std::process::exit(3);
+            }
+        };
     let mut report = summarize(&per_hand, blind, baseline);
     report.blueprint_trained = blueprint_trained;
+    // `transcript_wrote` is the producer side of the
+    // "replayable benchmark surface" the testnet roadmap
+    // requires. A `true` value tells a downstream scraper
+    // that there is at least one
+    // `transcript-<hand_id>.json` file in the configured
+    // directory; a `false` value is a sign the writer was
+    // disabled (env var), the directory was unwritable, or
+    // every per-hand read-back returned a missing row. The
+    // `transcript` JSON field is the single bit a dashboard
+    // needs to decide whether to show the "replay" link.
+    report.transcript = transcript_wrote;
     print!("{}", report.to_json());
     log::info!(
         "bench complete: hands={k} mbb/100={:.2} ci95=±{:.2} wins={} losses={} blueprint_trained={} baseline={}",
@@ -640,6 +793,7 @@ mod tests {
             "\"blind\":2",
             "\"blueprint_trained\":true",
             "\"baseline\":\"equity\"",
+            "\"transcript\":false",
         ] {
             assert!(
                 s.contains(needle),
@@ -690,6 +844,78 @@ mod tests {
         if let Some(v) = saved {
             unsafe {
                 std::env::set_var("RBP_BENCH_HANDS", v);
+            }
+        }
+    }
+
+    /// `bench_transcript_dir` honours the three documented
+    /// knobs in the STW-014 contract:
+    ///  - unset + no disable flag → `Some(DEFAULT_BENCH_TRANSCRIPT_DIR)`
+    ///    (the writer turns on by default);
+    ///  - `RBP_BENCH_TRANSCRIPT_DIR=/some/path` →
+    ///    `Some("/some/path")` (the writer is on, with a
+    ///    custom path);
+    ///  - `RBP_BENCH_TRANSCRIPT_DIR=""` or unset +
+    ///    `RBP_BENCH_TRANSCRIPT_DISABLE=1` → `None` (the writer
+    ///    is off, no directory is created).
+    /// We save/restore all three env vars so parallel tests
+    /// stay deterministic.
+    #[test]
+    fn transcript_dir_default_and_env_override_round_trip() {
+        let saved_dir = std::env::var("RBP_BENCH_TRANSCRIPT_DIR").ok();
+        let saved_disable = std::env::var("RBP_BENCH_TRANSCRIPT_DISABLE").ok();
+        // SAFETY: same single-threaded `#[test]` discipline
+        // as `bench_hands_env_override_round_trip`.
+        unsafe {
+            std::env::remove_var("RBP_BENCH_TRANSCRIPT_DIR");
+            std::env::remove_var("RBP_BENCH_TRANSCRIPT_DISABLE");
+        }
+        // Unset + no disable flag → default.
+        assert_eq!(
+            bench_transcript_dir(),
+            Some(DEFAULT_BENCH_TRANSCRIPT_DIR.to_string()),
+            "unset env must fall back to the default directory"
+        );
+        // Explicit path → that path.
+        unsafe {
+            std::env::set_var("RBP_BENCH_TRANSCRIPT_DIR", "/tmp/custom-bench-transcripts");
+        }
+        assert_eq!(
+            bench_transcript_dir(),
+            Some("/tmp/custom-bench-transcripts".to_string()),
+            "non-empty env override must be honoured"
+        );
+        // Empty value → None (disable knob #1).
+        unsafe {
+            std::env::set_var("RBP_BENCH_TRANSCRIPT_DIR", "");
+        }
+        assert_eq!(
+            bench_transcript_dir(),
+            None,
+            "empty RBP_BENCH_TRANSCRIPT_DIR must disable the writer"
+        );
+        // Unset + explicit disable flag → None (disable knob #2).
+        unsafe {
+            std::env::remove_var("RBP_BENCH_TRANSCRIPT_DIR");
+            std::env::set_var("RBP_BENCH_TRANSCRIPT_DISABLE", "1");
+        }
+        assert_eq!(
+            bench_transcript_dir(),
+            None,
+            "RBP_BENCH_TRANSCRIPT_DISABLE=1 must disable the writer"
+        );
+        // Restore the env. (Failing here would leak test state
+        // into the next test that reads these env vars.)
+        unsafe {
+            if let Some(v) = saved_dir {
+                std::env::set_var("RBP_BENCH_TRANSCRIPT_DIR", v);
+            } else {
+                std::env::remove_var("RBP_BENCH_TRANSCRIPT_DIR");
+            }
+            if let Some(v) = saved_disable {
+                std::env::set_var("RBP_BENCH_TRANSCRIPT_DISABLE", v);
+            } else {
+                std::env::remove_var("RBP_BENCH_TRANSCRIPT_DISABLE");
             }
         }
     }
