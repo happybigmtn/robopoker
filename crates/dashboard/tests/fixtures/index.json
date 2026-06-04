@@ -65,6 +65,13 @@
         "total_bytes": 21222,
         "bundle_sha256": "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313",
         "runbook_version": "STW-033 v1"
+      },
+      "bench": {
+        "blueprint": "v1",
+        "baseline": "fish",
+        "mbb_per_100": 12.5,
+        "mbb_ci95": 4.25,
+        "win_rate": 0.5625
       }
     },
     {
@@ -115,6 +122,13 @@
         "total_bytes": 19784,
         "bundle_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "runbook_version": "STW-033 v1"
+      },
+      "bench": {
+        "blueprint": "v1",
+        "baseline": "equity",
+        "mbb_per_100": 7.8125,
+        "mbb_ci95": 3.5,
+        "win_rate": 0.5313
       }
     }
   ]

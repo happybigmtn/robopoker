@@ -139,6 +139,19 @@ pub fn render_bench_card(bench: &BenchCardFields) -> String {
 /// the end. A regression in the column order fails CI
 /// at the same step a downstream scraper would silently
 /// break.
+///
+/// STW-047: the 5/8 per-row cells
+/// `blueprint` / `baseline` / `mbb_per_100` / `ci_95`
+/// / `win_rate` now render real numbers from the
+/// inlined `IndexedEntry::bench` (the
+/// `BenchSummary` the STW-019 runbook's `--bench`
+/// step produced + the STW-034 aggregator inlined).
+/// A `bench: None` value (a publish root the
+/// operator built without the bench step, or a
+/// pre-STW-047 `INDEX.json` the dashboard has not
+/// yet re-indexed) renders `—` for those 5 cells,
+/// the same shape the table shipped before
+/// STW-047.
 pub fn render_index_table(index: &PublishIndex) -> String {
     let mut s = String::with_capacity(1024 + index.entries.len() * 384);
     s.push_str("<table class=\"index-table\">\n");
@@ -161,27 +174,56 @@ pub fn render_index_table(index: &PublishIndex) -> String {
     s.push_str("  </thead>\n");
     s.push_str("  <tbody>\n");
     for entry in &index.entries {
-        // The `INDEX.json`'s `IndexedEntry` shape doesn't
-        // carry the per-hand `mbb_per_100` / `win_rate`
-        // — those live on the `BenchReport` the next
-        // slice will inline. For now the table renders
-        // placeholder `—` cells so the column order is
-        // visible; a regression in the placeholder
-        // string fails the `placeholder_cells_present`
-        // lib test.
+        // STW-047: render the 5 bench cells
+        // from the inlined `entry.bench`. A
+        // `None` value (a pre-STW-047 INDEX.json
+        // or a publish root the operator built
+        // without the bench step) renders `—`
+        // — the same shape the table shipped
+        // before STW-047 — so the dashboard
+        // stays backwards-compatible. The
+        // `live_index_table_renders_bench_cells_with_values`
+        // lib test pins the populated shape.
         let basename = html_escape(&entry.receipt_basename);
         let basename_href = url_encode(&entry.receipt_basename);
         let uploaded_at = html_escape(&entry.remote_receipt.uploaded_at_utc);
         let total_bytes = entry.remote_receipt.total_bytes;
+        let (cell_blueprint, cell_baseline, cell_mbb, cell_ci, cell_win) =
+            match entry.bench.as_ref() {
+                Some(b) => (
+                    html_escape(&b.blueprint),
+                    html_escape(&b.baseline),
+                    format!("{:.4}", b.mbb_per_100),
+                    format!("±{:.4}", b.mbb_ci95),
+                    format!("{:.2}%", b.win_rate * 100.0),
+                ),
+                None => (
+                    "—".to_string(),
+                    "—".to_string(),
+                    "—".to_string(),
+                    "—".to_string(),
+                    "—".to_string(),
+                ),
+            };
         s.push_str("    <tr>\n");
         s.push_str(&format!(
             "      <td class=\"index-table__cell\">{basename}</td>\n"
         ));
-        s.push_str(&format!("      <td class=\"index-table__cell\">—</td>\n"));
-        s.push_str(&format!("      <td class=\"index-table__cell\">—</td>\n"));
-        s.push_str(&format!("      <td class=\"index-table__cell\">—</td>\n"));
-        s.push_str(&format!("      <td class=\"index-table__cell\">—</td>\n"));
-        s.push_str(&format!("      <td class=\"index-table__cell\">—</td>\n"));
+        s.push_str(&format!(
+            "      <td class=\"index-table__cell\">{cell_blueprint}</td>\n"
+        ));
+        s.push_str(&format!(
+            "      <td class=\"index-table__cell\">{cell_baseline}</td>\n"
+        ));
+        s.push_str(&format!(
+            "      <td class=\"index-table__cell\">{cell_mbb}</td>\n"
+        ));
+        s.push_str(&format!(
+            "      <td class=\"index-table__cell\">{cell_ci}</td>\n"
+        ));
+        s.push_str(&format!(
+            "      <td class=\"index-table__cell\">{cell_win}</td>\n"
+        ));
         s.push_str(&format!(
             "      <td class=\"index-table__cell\">{total_bytes}</td>\n"
         ));
@@ -517,7 +559,7 @@ mod tests {
     //!    a malicious basename inject script tags).
 
     use super::*;
-    use rbp_autotrain::{IndexedEntry, PublishIndex, PublishedRemoteReceipt};
+    use rbp_autotrain::{BenchSummary, IndexedEntry, PublishIndex, PublishedRemoteReceipt};
 
     fn bench_fields_fixture() -> BenchCardFields {
         BenchCardFields {
@@ -566,8 +608,27 @@ mod tests {
                     "/tmp/publish-root/testnet-live-proof-20260604T050000Z/remote/remote_receipt.json"
                         .to_string(),
                 remote_receipt: receipt,
+                bench: None,
             }],
         }
+    }
+
+    /// STW-047: a `PublishIndex` with one
+    /// `IndexedEntry` whose `bench` field is
+    /// populated with a `BenchSummary`. The
+    /// `live_index_table_renders_bench_cells_with_values`
+    /// lib test pins the per-cell render
+    /// shape (5 numeric cells, not `—`).
+    fn one_entry_publish_index_with_bench() -> PublishIndex {
+        let mut index = one_entry_publish_index();
+        index.entries[0].bench = Some(BenchSummary {
+            blueprint: "v1".to_string(),
+            baseline: "preflop".to_string(),
+            mbb_per_100: 250.0000,
+            mbb_ci95: 120.0000,
+            win_rate: 0.625,
+        });
+        index
     }
 
     #[test]
@@ -638,6 +699,97 @@ mod tests {
             table.matches("Open replay").count(),
             1,
             "table must have exactly one `Open replay` link per entry"
+        );
+    }
+
+    // STW-047: 2 new lib tests pinning the
+    // live `INDEX.json` → dashboard table
+    // bench-cell wire:
+    //
+    // 1. `live_index_table_renders_bench_cells_with_values` —
+    //    an `IndexedEntry` whose `bench`
+    //    field is `Some(BenchSummary)` must
+    //    render the 5/8 `blueprint` /
+    //    `baseline` / `mbb_per_100` / `ci_95`
+    //    / `win_rate` cells with the bench's
+    //    numbers (not the `—` placeholder),
+    //    and the 5 cells must appear in the
+    //    per-row column order the
+    //    `render_index_table_column_order`
+    //    test pins. A regression that drops
+    //    a cell, that reorders a cell, or
+    //    that leaves the `—` placeholder
+    //    shape in place fails CI.
+    // 2. `live_index_table_renders_dash_for_missing_bench` —
+    //    an `IndexedEntry` whose `bench`
+    //    field is `None` (a pre-STW-047
+    //    `INDEX.json` or a publish root the
+    //    operator built without the bench
+    //    step) must still render the 5/8
+    //    cells as `—` — the same shape the
+    //    table shipped before STW-047 — so
+    //    the dashboard stays
+    //    backwards-compatible. A regression
+    //    that hides the bench-less rows (or
+    //    that panics on the `None` path)
+    //    fails CI at the same step a
+    //    downstream scraper would silently
+    //    break.
+
+    #[test]
+    fn live_index_table_renders_bench_cells_with_values() {
+        let index = one_entry_publish_index_with_bench();
+        let table = render_index_table(&index);
+        // The 5 per-row cells must contain the
+        // bench's numbers, not the `—`
+        // placeholder. The `250.0000` /
+        // `120.0000` / `62.50%` values mirror
+        // the inlined `BenchSummary` (mbb/100 =
+        // 250, ci95 = 120, win_rate = 0.625 =
+        // 62.50%).
+        for token in ["v1", "preflop", "250.0000", "±120.0000", "62.50%"] {
+            assert!(
+                table.contains(token),
+                "the populated bench row must contain `{token}`; got:\n{table}"
+            );
+        }
+        // The 5/8 column order must hold: the
+        // `blueprint` cell (`v1`) precedes
+        // the `baseline` cell (`preflop`),
+        // which precedes the `mbb_per_100`
+        // cell (`250.0000`), which precedes
+        // the `ci_95` cell (`±120.0000`),
+        // which precedes the `win_rate` cell
+        // (`62.50%`). A regression that
+        // reorders the per-row cells fails
+        // this assertion.
+        let i_bp = table.find("v1").expect("contains v1");
+        let i_ba = table.find("preflop").expect("contains preflop");
+        let i_mbb = table.find("250.0000").expect("contains mbb");
+        let i_ci = table.find("±120.0000").expect("contains ci");
+        let i_wr = table.find("62.50%").expect("contains win_rate");
+        assert!(
+            i_bp < i_ba && i_ba < i_mbb && i_mbb < i_ci && i_ci < i_wr,
+            "the 5 bench cells must be ordered blueprint < baseline < mbb < ci < win_rate; \
+             got: bp={i_bp} ba={i_ba} mbb={i_mbb} ci={i_ci} wr={i_wr}"
+        );
+    }
+
+    #[test]
+    fn live_index_table_renders_dash_for_missing_bench() {
+        let index = one_entry_publish_index();
+        let table = render_index_table(&index);
+        // The 5 bench cells must render as `—`
+        // for the bench-less entry. The 5
+        // per-row `<td>` cells appear between
+        // the `receipt_basename` `<td>` and
+        // the `total_bytes` `<td>`; we count
+        // the `—` placeholder occurrences to
+        // pin the rendered shape.
+        let dash_count = table.matches("—").count();
+        assert!(
+            dash_count >= 5,
+            "the bench-less row must render 5 `—` placeholders for the bench cells; got {dash_count} in:\n{table}"
         );
     }
 

@@ -317,6 +317,7 @@ mod tests {
                     "/tmp/publish-root/testnet-live-proof-20260604T050000Z/remote/remote_receipt.json"
                         .to_string(),
                 remote_receipt: receipt,
+                bench: None,
             }],
         };
         let body = serde_json::to_string_pretty(&index).expect("serialise index");

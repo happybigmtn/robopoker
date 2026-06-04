@@ -86,6 +86,78 @@ use crate::publish_remote::{
     PublishRemoteError, PublishedRemoteReceipt, STW033_REMOTE_RECEIPT_FILENAME, read_remote_receipt,
 };
 
+/// STW-047: parse the per-receipt
+/// `bench/stdout.txt` file the STW-019
+/// runbook's `--bench` step produces, and
+/// project it to a [`BenchSummary`].
+///
+/// The function reads
+/// `<bundle_dir>/staging/<basename>/bench/stdout.txt`,
+/// takes the first `{...}` JSON object on the
+/// line, and pulls the 5 pinned fields the
+/// dashboard renders. Returns `None` (a) when
+/// the file is missing (the operator skipped
+/// the `--bench` step), (b) when the file's
+/// first JSON object is unparseable, (c) when
+/// the JSON does not carry all 5 pinned
+/// fields, or (d) when the JSON's `blueprint`
+/// / `baseline` fields are not strings. The
+/// `None` branch is the *expected* path for
+/// a publish root the operator built without
+/// going through the STW-019 runbook; the
+/// aggregator's `IndexedEntry` is
+/// backward-compatible — a `None` value
+/// leaves the 5 cells rendering as `—`, the
+/// same shape the table shipped before
+/// STW-047.
+///
+/// The parse is *deliberately* a thin
+/// `serde_json::Value` projection, not a
+/// `BenchReport` `Deserialize`: the bench's
+/// `to_json` emits a flat-key string shape
+/// (no `#[derive(Deserialize)]` on the bench
+/// type), and a future bench `to_json` field
+/// addition the lib tests pin in `bench.rs`
+/// must not change the aggregator's parse
+/// contract. The function reads the file with
+/// `fs::read_to_string` and re-parses the
+/// first `{`-to-`}` substring, not the whole
+/// line, so a future `--bench` step that
+/// emits a JSONL stream (one JSON object per
+/// line) does not break the aggregator.
+pub fn parse_bench_summary(bundle_dir: &Path, receipt_basename: &str) -> Option<BenchSummary> {
+    let path = bundle_dir
+        .join("staging")
+        .join(receipt_basename)
+        .join("bench")
+        .join("stdout.txt");
+    let body = fs::read_to_string(&path).ok()?;
+    // Take the first `{`-prefixed substring to
+    // the matching `}` and parse that as a
+    // JSON object. The bench's `to_json`
+    // emits a single-line `{...}\n` shape,
+    // so the substring strategy is robust
+    // to a future JSONL refactor.
+    let start = body.find('{')?;
+    let end_rel = body[start..].find('}')?;
+    let end = start + end_rel + 1;
+    let obj_str = &body[start..end];
+    let v: serde_json::Value = serde_json::from_str(obj_str).ok()?;
+    let obj = v.as_object()?;
+    let blueprint = obj.get("blueprint")?.as_str()?.to_string();
+    let baseline = obj.get("baseline")?.as_str()?.to_string();
+    let mbb_per_100 = obj.get("mbb_per_100")?.as_f64()?;
+    let mbb_ci95 = obj.get("mbb_ci95")?.as_f64()?;
+    let win_rate = obj.get("win_rate")?.as_f64()?;
+    Some(BenchSummary {
+        blueprint,
+        baseline,
+        mbb_per_100,
+        mbb_ci95,
+        win_rate,
+    })
+}
+
 // --- headline constants ------------------------------------------
 
 /// Headline prefix the `trainer --publish-index`
@@ -159,11 +231,71 @@ pub const STW034_PUBLISH_SUBDIR: &str = "publish";
 
 // --- data model --------------------------------------------------
 
+/// STW-047: per-receipt bench summary the
+/// aggregator inlines into each [`IndexedEntry`]
+/// from the per-receipt `bench/stdout.txt` file
+/// the STW-019 runbook's `--bench` step produces.
+/// The summary is a five-field projection of the
+/// `BenchReport` the trainer emits to stdout: the
+/// `blueprint` / `baseline` / `mbb_per_100` /
+/// `mbb_ci95` (the dashboard names it `ci_95`)
+/// / `win_rate` numbers. A live `INDEX.json`
+/// published after the STW-047 slice lands
+/// carries the 5 new bench cells inline so the
+/// dashboard table no longer renders the 5/8
+/// `—` placeholders the third-pass Design lens
+/// named as the public surface's single largest
+/// AI-slop risk. A `None` value means the bench
+/// step did not produce a parseable stdout
+/// (e.g. a bench step that the operator skipped,
+/// or a `--compare` arm that does not call
+/// `--bench`); the dashboard renders `—` for
+/// those rows the same way it does today. The
+/// field is `Serialize + Deserialize` so the
+/// `serde_json::to_string_pretty` output is
+/// byte-stable on a re-run. (The struct drops
+/// `Eq` because `f64` is not `Eq`; `PartialEq`
+/// is the strongest reflexivity the bench's
+/// numeric fields can offer.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BenchSummary {
+    /// The trained-config variant the bench
+    /// seated at seat 0 (e.g. `"v1"` /
+    /// `"v2"` / `"v3"` — the
+    /// `Blueprint::as_str()` shape). Mirrors
+    /// `BenchReport::blueprint`.
+    pub blueprint: String,
+    /// The named baseline the bench seated at
+    /// seat 1 (e.g. `"fish"` / `"equity"` /
+    /// `"preflop"` / `"bluffer"` — the
+    /// `Baseline::as_str()` shape). Mirrors
+    /// `BenchReport::baseline`.
+    pub baseline: String,
+    /// `mean_chips_per_hand * 100 / B_BLIND`.
+    /// The card's primary headline number;
+    /// rendered to 4 decimal places. Mirrors
+    /// `BenchReport::mbb_per_100`.
+    pub mbb_per_100: f64,
+    /// 95% CI half-width on the per-hand mean
+    /// chip delta, in mbb. The dashboard names
+    /// this field `ci_95`; the aggregator
+    /// stamps the autotrain's `mbb_ci95` name
+    /// verbatim so the per-entry bench JSON
+    /// round-trips through
+    /// `serde_json::Value` without a rename
+    /// pass.
+    pub mbb_ci95: f64,
+    /// `wins / K`. The card's secondary
+    /// headline; rendered as a percent. Mirrors
+    /// `BenchReport::win_rate`.
+    pub win_rate: f64,
+}
+
 /// One entry in the `INDEX.json`'s `entries[]`
 /// array. The aggregator inlines the
 /// `PublishedRemoteReceipt` the STW-033 runbook
-/// wrote (so a dashboard scraper can read the
-/// full upload plan + `s3_objects[]` from the
+/// wrote (so a downstream scraper can read the
+/// upload plan + `s3_objects[]` from the
 /// index without re-fetching the per-receipt
 /// `remote_receipt.json`), and adds a
 /// `receipt_basename` (the per-receipt key the
@@ -171,7 +303,7 @@ pub const STW034_PUBLISH_SUBDIR: &str = "publish";
 /// absolute path the dashboard scraper can
 /// `aws s3 cp` to fetch the original receipt)
 /// so the index is self-describing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexedEntry {
     /// The receipt dir basename (e.g.
     /// `testnet-live-proof-20260604T050000Z`).
@@ -198,6 +330,34 @@ pub struct IndexedEntry {
     /// index without re-fetching the per-receipt
     /// `remote_receipt.json`.
     pub remote_receipt: PublishedRemoteReceipt,
+    /// STW-047: per-receipt bench summary the
+    /// aggregator parses from the
+    /// `<bundle_dir>/staging/<basename>/bench/stdout.txt`
+    /// file the STW-019 runbook's `--bench`
+    /// step produces. A `None` value means the
+    /// bench step did not produce a parseable
+    /// stdout (e.g. a `--compare` arm that
+    /// skips `--bench`, or a publish root the
+    /// operator built without going through the
+    /// STW-019 runbook); the dashboard renders
+    /// `—` for those rows. The aggregator sets
+    /// the field on every entry; the absence
+    /// of the field on a pre-STW-047
+    /// `INDEX.json` is the backwards-compat
+    /// shape a future dashboard fallback can
+    /// detect. The
+    /// `#[serde(default, skip_serializing_if =
+    /// "Option::is_none")]` attributes keep a
+    /// `None` value from polluting the JSON
+    /// output (the field is omitted on the
+    /// wire; downstream scrapers that pin the
+    /// `Some` shape do not see the key at
+    /// all) and a pre-STW-047 `INDEX.json` the
+    /// dashboard reads back into an
+    /// `IndexedEntry` parses cleanly (the
+    /// `default` populates a `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench: Option<BenchSummary>,
 }
 
 /// The top-level `INDEX.json` the
@@ -214,7 +374,12 @@ pub struct IndexedEntry {
 /// the lib test + integration test are
 /// byte-stable) + `entry_count` + `total_bytes`
 /// (the sum of every entry's `total_bytes`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// STW-047: the struct drops `Eq` because the
+/// `Vec<IndexedEntry>` field carries the bench
+/// numbers (`f64`) — `f64` is not `Eq`, so
+/// `PartialEq` is the strongest reflexivity the
+/// aggregator can offer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishIndex {
     /// Absolute path to the publish root the
     /// aggregator scanned. Stored for human
@@ -458,8 +623,10 @@ impl From<PublishRemoteError> for PublishIndexError {
 /// publish_index complete: ...` headline and
 /// the integration test can assert on the typed
 /// `index_path` + `entry_count` + `total_bytes`
-/// fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// fields. STW-047: the struct drops `Eq`
+/// because the inlined `PublishIndex` carries
+/// `f64` bench numbers (not `Eq`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct PublishIndexOutput {
     /// Absolute path to the `INDEX.json` the
     /// indexer wrote.
@@ -623,11 +790,25 @@ pub fn publish_index<P: AsRef<Path>>(
         // path as the `receipt_dir` for human
         // readability.
         let receipt_dir = format!("{}/{}", child.display(), STW034_PUBLISH_SUBDIR);
+        // STW-047: parse the per-receipt
+        // `bench/stdout.txt` (the
+        // `<bundle_dir>/staging/<basename>/bench/stdout.txt`
+        // file the STW-019 runbook's `--bench`
+        // step produces) and stamp the parsed
+        // `BenchSummary` onto the entry. A
+        // missing / unparseable bench file
+        // (the operator skipped the bench step,
+        // or a `--compare` arm that does not
+        // call `--bench`) yields a `None`
+        // value; the dashboard renders `—`
+        // for those rows.
+        let bench = parse_bench_summary(&child, &receipt_basename);
         entries.push(IndexedEntry {
             receipt_basename,
             receipt_dir,
             remote_receipt_path: receipt_path.display().to_string(),
             remote_receipt,
+            bench,
         });
     }
     // Refuse to write a zero-entry index. A
@@ -1535,6 +1716,202 @@ mod tests {
         assert!(
             s.starts_with(STW034_PUBLISH_INDEX_HEADLINE_PREFIX),
             "Display must start with the pinned headline prefix; got: {s:?}"
+        );
+        let _ = fs::remove_dir_all(&publish_root);
+    }
+
+    // STW-047: 4 lib tests pinning the
+    // `parse_bench_summary` parse path the
+    // aggregator calls per entry. The tests
+    // build a synthetic
+    // `<bundle_dir>/staging/<basename>/bench/stdout.txt`
+    // tree (the layout the STW-019 + STW-032 +
+    // STW-033 chain produces) and assert the
+    // helper returns a typed `BenchSummary`
+    // (or `None` for the deliberately
+    // bad-input cases). A future regression
+    // that lets a phantom field through, that
+    // drops a field, or that breaks the
+    // first-`{`-to-first-`}` parse window fails
+    // CI at the same step a downstream
+    // dashboard scraper would silently break.
+
+    /// `parse_bench_summary_reads_first_json_object` —
+    /// the helper takes the first `{`-prefixed
+    /// substring of the bench stdout and parses
+    /// it as a JSON object. A regression that
+    /// re-parses the whole line (instead of the
+    /// first JSON object) fails on a stdout
+    /// that has a leading `INFO bench:` prefix
+    /// or any other non-JSON preamble.
+    #[test]
+    fn parse_bench_summary_reads_first_json_object() {
+        let (publish_root, basename) = setup_publish_root("bench-parse");
+        // Drop a synthetic `bench/stdout.txt`
+        // that has a `log::info!` preamble +
+        // the `BenchReport::to_json` line. The
+        // bench actually emits the JSON line
+        // first + the `log::info!` second, but
+        // the parse path must work in *both*
+        // orderings because a future bench
+        // refactor that swaps the two emissions
+        // must not break the aggregator.
+        let bench_dir = publish_root
+            .join(STW034_PUBLISH_SUBDIR)
+            .join(&basename)
+            .join("staging")
+            .join(&basename)
+            .join("bench");
+        fs::create_dir_all(&bench_dir).expect("mkdir bench dir");
+        let body = format!(
+            "INFO bench: hydrating blueprint (variant=v1 rows=12) + playing 8 hands @ blind=2 baseline=preflop\n\
+             {{\"hands\":8,\"wins\":5,\"losses\":3,\"net_chips\":40,\"mbb_per_100\":250.0000,\"mbb_ci95\":120.0000,\"win_rate\":0.6250,\"win_rate_ci95\":0.1700,\"blind\":2,\"blueprint_trained\":true,\"blueprint\":\"v1\",\"baseline\":\"preflop\",\"transcript\":true}}\n\
+             INFO bench complete: hands=8 mbb/100=250.00 ci95=±120.00 wins=5 losses=3 blueprint=v1 blueprint_trained=true baseline=preflop\n"
+        );
+        fs::write(bench_dir.join("stdout.txt"), body).expect("write bench stdout");
+        let summary = parse_bench_summary(
+            &publish_root.join(STW034_PUBLISH_SUBDIR).join(&basename),
+            &basename,
+        )
+        .expect("green bench stdout must parse to BenchSummary");
+        assert_eq!(summary.blueprint, "v1", "blueprint must round-trip");
+        assert_eq!(summary.baseline, "preflop", "baseline must round-trip");
+        assert!(
+            (summary.mbb_per_100 - 250.0).abs() < 1e-9,
+            "mbb_per_100 must round-trip; got: {}",
+            summary.mbb_per_100
+        );
+        assert!(
+            (summary.mbb_ci95 - 120.0).abs() < 1e-9,
+            "mbb_ci95 must round-trip; got: {}",
+            summary.mbb_ci95
+        );
+        assert!(
+            (summary.win_rate - 0.625).abs() < 1e-9,
+            "win_rate must round-trip; got: {}",
+            summary.win_rate
+        );
+        let _ = fs::remove_dir_all(&publish_root);
+    }
+
+    /// `parse_bench_summary_returns_none_for_missing_stdout` —
+    /// the helper returns `None` when the
+    /// bench step did not produce a stdout
+    /// (a publish root that the operator built
+    /// without going through the STW-019
+    /// runbook). The dashboard renders `—`
+    /// for those rows, the same shape the
+    /// table shipped before STW-047.
+    #[test]
+    fn parse_bench_summary_returns_none_for_missing_stdout() {
+        let (publish_root, basename) = setup_publish_root("bench-missing");
+        // No `bench/stdout.txt` is dropped.
+        let summary = parse_bench_summary(
+            &publish_root.join(STW034_PUBLISH_SUBDIR).join(&basename),
+            &basename,
+        );
+        assert!(
+            summary.is_none(),
+            "missing bench stdout must produce None; got: {summary:?}"
+        );
+        let _ = fs::remove_dir_all(&publish_root);
+    }
+
+    /// `parse_bench_summary_returns_none_for_unparseable_stdout` —
+    /// the helper returns `None` when the
+    /// bench stdout's first `{`-prefixed
+    /// substring is unparseable as a JSON
+    /// object (e.g. a `BenchReport::to_json`
+    /// output that is missing a closing
+    /// brace, a future regression that drops
+    /// a field, or a future bench refactor
+    /// that emits a different shape).
+    #[test]
+    fn parse_bench_summary_returns_none_for_unparseable_stdout() {
+        let (publish_root, basename) = setup_publish_root("bench-unparseable");
+        let bench_dir = publish_root
+            .join(STW034_PUBLISH_SUBDIR)
+            .join(&basename)
+            .join("staging")
+            .join(&basename)
+            .join("bench");
+        fs::create_dir_all(&bench_dir).expect("mkdir bench dir");
+        // A stdout that is JSON-shaped but
+        // missing the 5 pinned fields. The
+        // helper must return `None` so the
+        // dashboard renders `—` instead of a
+        // half-populated row.
+        fs::write(
+            bench_dir.join("stdout.txt"),
+            "{\"hands\":8,\"wins\":5,\"losses\":3}\n",
+        )
+        .expect("write bench stdout");
+        let summary = parse_bench_summary(
+            &publish_root.join(STW034_PUBLISH_SUBDIR).join(&basename),
+            &basename,
+        );
+        assert!(
+            summary.is_none(),
+            "unparseable bench stdout must produce None; got: {summary:?}"
+        );
+        let _ = fs::remove_dir_all(&publish_root);
+    }
+
+    /// `parse_bench_summary_published_via_index_field` —
+    /// the `publish_index` aggregator must
+    /// attach a `Some(BenchSummary)` to an
+    /// entry when the per-receipt bench
+    /// stdout is present, and `None` when it
+    /// is absent. The integration test pins
+    /// the per-entry wiring without
+    /// requiring a live `trainer --bench`
+    /// run.
+    #[test]
+    fn parse_bench_summary_published_via_index_field() {
+        let (publish_root, basename) = setup_publish_root("bench-attached");
+        // Drop a synthetic bench stdout so
+        // `parse_bench_summary` returns
+        // `Some(_)` at the `publish_index`
+        // aggregation step.
+        let bench_dir = publish_root
+            .join(STW034_PUBLISH_SUBDIR)
+            .join(&basename)
+            .join("staging")
+            .join(&basename)
+            .join("bench");
+        fs::create_dir_all(&bench_dir).expect("mkdir bench dir");
+        fs::write(
+            bench_dir.join("stdout.txt"),
+            "{\"hands\":8,\"wins\":5,\"losses\":3,\"net_chips\":40,\"mbb_per_100\":250.0000,\"mbb_ci95\":120.0000,\"win_rate\":0.6250,\"win_rate_ci95\":0.1700,\"blind\":2,\"blueprint_trained\":true,\"blueprint\":\"v1\",\"baseline\":\"preflop\",\"transcript\":true}\n",
+        )
+        .expect("write bench stdout");
+        let result = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+            .expect("green publish root must index");
+        assert_eq!(result.index.entry_count, 1);
+        let entry = &result.index.entries[0];
+        let bench = entry
+            .bench
+            .as_ref()
+            .expect("the entry's bench field must be Some when the bench stdout is present");
+        assert_eq!(bench.blueprint, "v1");
+        assert_eq!(bench.baseline, "preflop");
+        // Re-verify the bench field round-trips
+        // through `serde_json` (the on-disk
+        // INDEX.json format). The
+        // `#[serde(skip_serializing_if =
+        // "Option::is_none")]` attribute means
+        // the wire format only carries the
+        // `bench` key when it is `Some(_)`.
+        let json = serde_json::to_string(&result.index).expect("serialise index");
+        assert!(
+            json.contains("\"bench\""),
+            "the on-disk INDEX.json must carry the populated `bench` field; got: {json}"
+        );
+        let round_trip: PublishIndex = serde_json::from_str(&json).expect("parse index");
+        assert_eq!(
+            round_trip.entries[0].bench.as_ref(),
+            Some(bench),
+            "the bench field must round-trip through serde_json"
         );
         let _ = fs::remove_dir_all(&publish_root);
     }

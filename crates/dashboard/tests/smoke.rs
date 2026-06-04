@@ -257,6 +257,34 @@ async fn smoke_dashboard_routes_against_committed_fixtures() {
         parsed, fixture,
         "GET /api/index body must match the fixture on disk"
     );
+    // STW-047: every entry in the live
+    // `INDEX.json` must carry a populated
+    // `bench` field (a fresh `cargo run -p
+    // rbp-dashboard` pointing at the committed
+    // fixture shows the 5/8 bench cells with
+    // real numbers, not `—` placeholders).
+    // A regression that drops the bench field
+    // (or that lets `None` leak into the
+    // fixture) fails the test at the same CI
+    // step a downstream dashboard scraper
+    // would silently break.
+    for entry in &parsed.entries {
+        let bench = entry.bench.as_ref().unwrap_or_else(|| {
+            panic!(
+                "entry {} must have a populated `bench` field",
+                entry.receipt_basename
+            )
+        });
+        assert!(
+            !bench.blueprint.is_empty()
+                && !bench.baseline.is_empty()
+                && bench.mbb_per_100.is_finite()
+                && bench.mbb_ci95.is_finite()
+                && bench.win_rate.is_finite(),
+            "entry {} bench must be a real, non-zero shape; got: {bench:?}",
+            entry.receipt_basename
+        );
+    }
     let ct = content_type.unwrap_or_default();
     assert!(
         ct.starts_with("application/json"),

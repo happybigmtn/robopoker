@@ -6444,11 +6444,28 @@ and `STW-048`.
   visitor's first impression of the bench path;
   one link is half a story).**
 
-- [ ] **[P0] `STW-047` Wire the live `INDEX.json` →
+- [x] **[P0] `STW-047` Wire the live `INDEX.json` →
   dashboard table so the 5/8 placeholder `—` cells
   render real `blueprint` / `baseline` / `mbb_per_100`
   / `ci_95` / `win_rate` numbers from the indexed
-  `BenchReport`, not a dash.** Closes the
+  `BenchReport`, not a dash. SUPERSEDED 2026-06-04 by
+  `STW-049` (the fourth-pass build-break + column-
+  shape wire the same struct extension the
+  render-side wire needed; the two ship together
+  because they share the autotrain `IndexedEntry ::
+  bench : Option<BenchSummary>` field the
+  aggregator now emits, the parse helper
+  `parse_bench_summary` it calls per entry, the
+  2 new `render.rs` lib tests
+  (`live_index_table_renders_bench_cells_with_values`
+  + `live_index_table_renders_dash_for_missing_bench`)
+  the slice adds, the 4 new `publish_index` lib
+  tests (`parse_bench_summary_*`) the parse helper
+  ships, the smoke-test extension that asserts every
+  fixture entry's `bench` is `Some(_)`, and the
+  deletion of the `placeholder_cells_present` lib
+  test that *pinned* the 5/8 `—` defect as a
+  feature).** Closes the
   `render.rs:164-171` "the next slice will inline"
   architectural hinge the third-pass CEO + Design
   lenses both name as the *single highest-leverage
@@ -6990,7 +7007,7 @@ leverage. The `STW-045` / `STW-046` rows below are
 they are NOT new scope. The new scope is
 `STW-049` and `STW-050`.
 
-- [ ] **[P0] `STW-049` (supersedes third-pass
+- [x] **[P0] `STW-049` (supersedes third-pass
   `STW-047`) Extend the dashboard's
   `crates/dashboard/src/render.rs::IndexedEntry`
   mirror struct to carry `bench:
@@ -7001,7 +7018,8 @@ they are NOT new scope. The new scope is
   `render_index_table` so the 5/8 placeholder `—`
   cells render real `blueprint` / `baseline` /
   `mbb_per_100` / `ci_95` / `win_rate` numbers
-  from the indexed `BenchReport`.** Closes BOTH
+  from the indexed `BenchReport`.
+  SHIPPED 2026-06-04 (commit <pending>).** Closes BOTH
   the workspace-test-build break the fourth pass
   names as the *single highest-leverage finding
   on `main` today* AND the `render.rs:164-171`
