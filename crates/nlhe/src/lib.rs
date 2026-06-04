@@ -45,6 +45,8 @@ mod memory;
 mod profile;
 #[cfg(feature = "database")]
 mod profile_v2;
+#[cfg(feature = "database")]
+mod profile_v3;
 mod public;
 mod record;
 mod secret;
@@ -64,6 +66,8 @@ pub use memory::*;
 pub use profile::*;
 #[cfg(feature = "database")]
 pub use profile_v2::*;
+#[cfg(feature = "database")]
+pub use profile_v3::*;
 pub use public::*;
 pub use record::*;
 pub use secret::*;
@@ -119,5 +123,43 @@ pub type Flagship = NlheSolver<
 pub type Flagship2 = NlheSolver<
     rbp_mccfr::DiscountedRegret, //
     rbp_mccfr::QuadraticWeight,  //
+    rbp_mccfr::PluribusSampling, //
+>;
+
+/// STW-029: third trained config (`v6 third
+/// DCFR-with-LinearWeight variant`).
+///
+/// This is the v3 of the `Flagship` trio with the
+/// missing cross-product cell of the v1 / v2 regret /
+/// policy combination:
+///
+/// - v1 `Flagship`  = `PluribusRegret` + `LinearWeight`
+///   + `PluribusSampling` (STW-009 / STW-010 default).
+/// - v2 `Flagship2` = `DiscountedRegret` +
+///   `QuadraticWeight` + `PluribusSampling` (STW-017).
+/// - v3 `Flagship3` = `DiscountedRegret` +
+///   `LinearWeight` + `PluribusSampling` (STW-029;
+///
+/// The CEO testnet roadmap explicitly names "a third
+/// DCFR-with-LinearWeight variant, or a 'named bot vs
+/// second trained config' comparison" as the v6 next
+/// slice after STW-017's `Flagship2` trained config;
+/// STW-029 lands the third-trained-config half (the
+/// comparison half shipped earlier in STW-018).
+///
+/// `Flagship3` is trained to the v3 tables
+/// ([`rbp_database::BLUEPRINT3`],
+/// [`rbp_database::EPOCH3`]) via the `trainer --fast3`
+/// mode and hydrated by `DatabasePlayer3` for the bench
+/// seat-0 (so a single `trainer --bench` run can seat
+/// `blueprint` vs `fish`, `blueprint2` vs `preflop`, or
+/// `blueprint3` vs `bluffer` without re-training). The
+/// v3 regret schedule is DCFR (matches v2) but the
+/// policy weight is linear (matches v1) — the v3 is
+/// the missing cell in the regret × policy matrix.
+#[cfg(feature = "database")]
+pub type Flagship3 = NlheSolver<
+    rbp_mccfr::DiscountedRegret, //
+    rbp_mccfr::LinearWeight,     //
     rbp_mccfr::PluribusSampling, //
 >;

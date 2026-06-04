@@ -26,15 +26,19 @@
 //! metrics, hands, sessions, and more.
 mod check;
 mod check2;
+mod check3;
 mod schema;
 mod stage;
 mod stage2;
+mod stage3;
 mod traits;
 
 pub use check::*;
 pub use check2::*;
+pub use check3::*;
 pub use stage::*;
 pub use stage2::*;
+pub use stage3::*;
 // schema module provides trait impls, no items to re-export
 pub use traits::*;
 
@@ -88,6 +92,22 @@ pub const BLUEPRINT:   &str = "blueprint";
 /// coexist in the same database without overwriting each other.
 #[rustfmt::skip]
 pub const BLUEPRINT2:  &str = "blueprint_v2";
+/// STW-029: third trained config's blueprint table. Mirrors
+/// [`BLUEPRINT`] and [`BLUEPRINT2`] shape-for-shape; the v3
+/// trained config (`Flagship3` = `DiscountedRegret` +
+/// `LinearWeight` + `PluribusSampling` — the documented
+/// "third DCFR-with-LinearWeight variant" the CEO testnet
+/// roadmap names as the v6 next slice after STW-017's
+/// `Flagship2`) writes to and reads from this table so v1 +
+/// v2 + v3 trained-config snapshots can coexist in the same
+/// database without overwriting each other. The v3 regret
+/// schedule is DCFR (matches v2) but the policy weight is
+/// linear (matches v1) — the v3 is the missing
+/// cross-product cell in the v1 × v2 regret/policy matrix
+/// (PluribusRegret+LinearWeight, DCFR+QuadraticWeight,
+/// DCFR+LinearWeight).
+#[rustfmt::skip]
+pub const BLUEPRINT3:  &str = "blueprint_v3";
 /// Table for training epoch metadata and progress.
 #[rustfmt::skip]
 pub const EPOCH:       &str = "epoch";
@@ -105,6 +125,21 @@ pub const EPOCH2:      &str = "epoch_v2";
 /// v2 row.
 #[rustfmt::skip]
 pub const EPOCH2_KEY:  &str = "current_v2";
+/// STW-029: third trained config's epoch table. Mirrors
+/// [`EPOCH`] and [`EPOCH2`] shape-for-shape; the
+/// `'current_v3'` key (see [`EPOCH3_KEY`]) tracks the v3
+/// training epoch so a `--reset` of the v1 / v2 epoch does
+/// not zero the v3 epoch and vice versa.
+#[rustfmt::skip]
+pub const EPOCH3:      &str = "epoch_v3";
+/// STW-029: the single-row key for the v3 epoch table
+/// ([`EPOCH3`]). Mirrors the v1 `'current'` and v2
+/// `'current_v2'` conventions so the v1 / v2 / v3
+/// `EPOCH` rows are all present after a fresh
+/// `PreTraining::run` and a v1 or v2 `Mode::reset` does
+/// not stomp the v3 row.
+#[rustfmt::skip]
+pub const EPOCH3_KEY:  &str = "current_v3";
 /// Table for completed poker hands.
 #[rustfmt::skip]
 pub const HANDS:       &str = "hands";
@@ -135,6 +170,16 @@ pub const STAGING:     &str = "staging";
 /// touches v2 data and vice versa.
 #[rustfmt::skip]
 pub const STAGING2:    &str = "staging_v2";
+/// STW-029: third trained config's staging table. Mirrors
+/// [`STAGING`] and [`STAGING2`] shape-for-shape (a
+/// `UNLOGGED` clone of [`BLUEPRINT3`]); the v3
+/// `Fast3Session::sync` writes rows here first and then
+/// upserts them into [`BLUEPRINT3`]. The v1 / v2 / v3
+/// staging tables are independent, so a v1 / v2 / v3
+/// `FastSession::sync` in flight never touches another
+/// version's data.
+#[rustfmt::skip]
+pub const STAGING3:    &str = "staging_v3";
 /// Table for street-specific metadata.
 #[rustfmt::skip]
 pub const STREET:      &str = "street";

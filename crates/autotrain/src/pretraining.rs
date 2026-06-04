@@ -10,8 +10,10 @@ use rbp_clustering::*;
 use rbp_database::*;
 use rbp_gameplay::*;
 use rbp_nlhe::EpochMetaV2;
+use rbp_nlhe::EpochMetaV3;
 use rbp_nlhe::NlheProfile;
 use rbp_nlhe::NlheProfileV2;
+use rbp_nlhe::NlheProfileV3;
 use std::sync::Arc;
 use tokio_postgres::Client;
 
@@ -70,6 +72,24 @@ impl PreTraining {
         // the v2 row intact.
         Self::ensure::<NlheProfileV2>(client).await;
         Self::ensure::<EpochMetaV2>(client).await;
+        // STW-029: bootstrap the v3 trained-config tables
+        // (`blueprint_v3` / `epoch_v3`) the same way the
+        // v1 / v2 tables are bootstrapped. A fresh DB
+        // that has never seen a `--fast3` / `--reset`
+        // run needs the v3 tables present before the
+        // first `Fast3Session::sync` (which would
+        // otherwise crash on `CREATE UNLOGGED TABLE
+        // staging_v3 (LIKE blueprint_v3)` against a
+        // missing `blueprint_v3`) and before the first
+        // `Mode::Reset` v3 arm (which would otherwise
+        // crash on `truncate blueprint_v3`). The
+        // `EpochMetaV3::creates()` DDL also seeds the
+        // `'current_v3'` row to 0 in an `ON CONFLICT
+        // DO NOTHING` block, so a v1 / v2 reset that
+        // doesn't touch the v3 row leaves the v3 row
+        // intact.
+        Self::ensure::<NlheProfileV3>(client).await;
+        Self::ensure::<EpochMetaV3>(client).await;
         log::info!("{:<32}{:<32}", "vacuum analyze", "all tables");
         client
             .batch_execute("VACUUM ANALYZE;")

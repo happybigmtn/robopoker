@@ -17,6 +17,7 @@ mod blufferbot;
 #[cfg(feature = "database")]
 mod database;
 mod database_v2;
+mod database_v3;
 mod equitybot;
 mod fish;
 #[cfg(feature = "cli")]
@@ -29,6 +30,7 @@ pub use blufferbot::*;
 #[cfg(feature = "database")]
 pub use database::*;
 pub use database_v2::*;
+pub use database_v3::*;
 pub use equitybot::*;
 pub use fish::*;
 #[cfg(feature = "cli")]

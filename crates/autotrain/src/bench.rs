@@ -72,9 +72,11 @@ use rbp_core::ID;
 use rbp_core::S_BLIND;
 use rbp_database::Check;
 use rbp_database::Check2;
+use rbp_database::Check3;
 use rbp_gameroom::BlufferBot;
 use rbp_gameroom::DatabasePlayer;
 use rbp_gameroom::DatabasePlayer2;
+use rbp_gameroom::DatabasePlayer3;
 use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
 use rbp_gameroom::PreflopBot;
@@ -210,6 +212,20 @@ pub enum Blueprint {
     /// run can compare the v1 + v2 trained
     /// configs head-to-head.
     V2,
+    /// STW-029: v3 trained config: `DiscountedRegret` +
+    /// `LinearWeight` + `PluribusSampling`
+    /// ([`rbp_nlhe::Flagship3`]). New variant
+    /// introduced in STW-029 so a single bench
+    /// run can compare the v1 / v2 / v3 trained
+    /// configs head-to-head. The v3 is the
+    /// "third DCFR-with-LinearWeight variant" the
+    /// CEO testnet roadmap names as the v6 next
+    /// slice after STW-017's `Flagship2` trained
+    /// config — the missing cross-product cell of
+    /// the v1 / v2 regret / policy combination
+    /// (PluribusRegret+LinearWeight,
+    /// DCFR+QuadraticWeight, DCFR+LinearWeight).
+    V3,
 }
 
 impl Blueprint {
@@ -225,6 +241,7 @@ impl Blueprint {
         match self {
             Self::V1 => "v1",
             Self::V2 => "v2",
+            Self::V3 => "v3",
         }
     }
     /// Parse a blueprint name from the
@@ -239,6 +256,7 @@ impl Blueprint {
         match std::env::var("RBP_BENCH_BLUEPRINT").ok().as_deref() {
             Some("v1") => Self::V1,
             Some("v2") => Self::V2,
+            Some("v3") => Self::V3,
             _ => DEFAULT_BENCH_BLUEPRINT,
         }
     }
@@ -633,6 +651,33 @@ pub async fn run_hands(
                 room.sit(DatabasePlayer2::new(blueprint), rbp_auth::Lurker::default());
             }
         }
+        // STW-029: v3 trained config (third
+        // DCFR-with-LinearWeight variant) seat-0
+        // dispatch. The v3 path parallels the v1 /
+        // v2 `match` arms verbatim: a v3
+        // `DatabasePlayer3` on a non-empty v3
+        // blueprint, a default-constructed
+        // `Flagship3` `Box::leak` on an empty
+        // v3 blueprint (the documented
+        // post-`--reset` state). The v3 empty
+        // fallback uses `Flagship3::new(...,
+        // NlheEncoder::default())` so a
+        // freshly-`--reset` DB doesn't crash on
+        // the empty `NlheProfileV3::hydrate`
+        // path.
+        Blueprint::V3 => {
+            if blueprint_trained {
+                let blueprint = DatabasePlayer3::from_database(client.clone()).await;
+                room.sit(blueprint, rbp_auth::Lurker::default());
+            } else {
+                let blueprint: &'static rbp_nlhe::Flagship3 =
+                    Box::leak(Box::new(rbp_nlhe::Flagship3::new(
+                        rbp_nlhe::NlheProfile::default(),
+                        rbp_nlhe::NlheEncoder::default(),
+                    )));
+                room.sit(DatabasePlayer3::new(blueprint), rbp_auth::Lurker::default());
+            }
+        }
     }
     // Seat-1 baseline dispatch. All four branches are
     // synchronous `Player` constructors (no DB round-trip),
@@ -785,6 +830,14 @@ pub async fn run(client: Arc<Client>) {
     let rows_before = match blueprint {
         Blueprint::V1 => client.blueprint().await,
         Blueprint::V2 => client.blueprint_v2().await,
+        // STW-029: v3 row count comes from
+        // `BLUEPRINT3`. The v3 row count is
+        // gated on `Check3` (not `Check` /
+        // `Check2`); the `Status` table is
+        // printed with the v1 + v2 + v3
+        // side-by-side `Mode::Status` arm in
+        // `mode.rs`.
+        Blueprint::V3 => client.blueprint_v3().await,
     };
     let blueprint_trained = rows_before > 0;
     log::info!(
@@ -1722,17 +1775,21 @@ mod tests {
     /// `RBP_BENCH_BLUEPRINT` env var. Pinning it here means a
     /// refactor that renames a variant has to update the env-var
     /// parser, the JSON field, and this test together, instead
-    /// of silently letting a stale `RBP_BENCH_BLUEPRINT=v1`
-    /// pick a renamed variant.
+    /// of silently letting a stale `RBP_BENCH_BLUEPRINT=v1` pick
+    /// a renamed variant.
     #[test]
     fn blueprint_as_str_matches_published_strings() {
         assert_eq!(Blueprint::V1.as_str(), "v1");
         assert_eq!(Blueprint::V2.as_str(), "v2");
+        // STW-029: v3 (third DCFR-with-LinearWeight variant)
+        // contract — the env-var parser, the JSON field,
+        // and the as_str match arm must stay in sync.
+        assert_eq!(Blueprint::V3.as_str(), "v3");
     }
 
     /// `Blueprint::from_env` honours `RBP_BENCH_BLUEPRINT` for
-    /// the two known values (`v1`, `v2`) and falls back to
-    /// `DEFAULT_BENCH_BLUEPRINT` for missing/unset/unknown
+    /// the three known values (`v1`, `v2`, `v3`) and falls back
+    /// to `DEFAULT_BENCH_BLUEPRINT` for missing/unset/unknown
     /// values. Same save/restore discipline as
     /// `baseline_from_env_round_trip`.
     #[test]
@@ -1750,6 +1807,12 @@ mod tests {
             std::env::set_var("RBP_BENCH_BLUEPRINT", "v2");
         }
         assert_eq!(Blueprint::from_env(), Blueprint::V2);
+        // STW-029: v3 (third DCFR-with-LinearWeight variant)
+        // env-var parser pinner.
+        unsafe {
+            std::env::set_var("RBP_BENCH_BLUEPRINT", "v3");
+        }
+        assert_eq!(Blueprint::from_env(), Blueprint::V3);
         unsafe {
             std::env::set_var("RBP_BENCH_BLUEPRINT", "not-a-blueprint");
         }
@@ -1779,10 +1842,11 @@ mod tests {
 
     /// `summarize` must stamp the caller-supplied `Blueprint`
     /// straight into the `BenchReport` so a downstream scraper
-    /// can group reports by `blueprint` (v1 vs v2) without
-    /// re-parsing the raw `per_hand` vector. This test pins
-    /// both the v1 default and the v2 (`v2` second trained
-    /// config) paths in one go.
+    /// can group reports by `blueprint` (v1 vs v2 vs v3)
+    /// without re-parsing the raw `per_hand` vector. This
+    /// test pins the v1 default, the v2 (`v2` second
+    /// trained config), and the v3 (`v3` third
+    /// DCFR-with-LinearWeight variant) paths in one go.
     #[test]
     fn summarize_stamps_blueprint_into_report() {
         let per_hand = vec![0_i16; 4];
@@ -1792,6 +1856,12 @@ mod tests {
         let r_v2 = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V2);
         assert_eq!(r_v2.blueprint, Blueprint::V2);
         assert!(r_v2.to_json().contains("\"blueprint\":\"v2\""));
+        // STW-029: v3 (third DCFR-with-LinearWeight variant)
+        // JSON stamping pinner — a refactor that drops the v3
+        // `match` arm fails this test before it lands.
+        let r_v3 = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V3);
+        assert_eq!(r_v3.blueprint, Blueprint::V3);
+        assert!(r_v3.to_json().contains("\"blueprint\":\"v3\""));
     }
 
     // -----------------------------------------------------------------

@@ -2,10 +2,13 @@
 use crate::*;
 use rbp_database::Check;
 use rbp_database::Check2;
+use rbp_database::Check3;
 use rbp_database::Schema;
 use rbp_nlhe::EpochMetaV2;
+use rbp_nlhe::EpochMetaV3;
 use rbp_nlhe::NlheProfile;
 use rbp_nlhe::NlheProfileV2;
+use rbp_nlhe::NlheProfileV3;
 use std::path::PathBuf;
 
 /// Training mode parsed from command line arguments
@@ -31,6 +34,23 @@ pub enum Mode {
     /// uses the same env-gated budget so a small
     /// smoke run completes in seconds).
     Fast2,
+    /// STW-029: train the v3 trained config
+    /// ([`crate::Fast3Session`]) against the v3 tables
+    /// ([`rbp_database::BLUEPRINT3`] /
+    /// [`rbp_database::EPOCH3`]). Parallels `Self::Fast`
+    /// and `Self::Fast2` for the v1 / v2 trained configs;
+    /// the three can be run sequentially (or interleaved
+    /// across the same database) without colliding
+    /// because the v1 / v2 / v3 staging tables, blueprint
+    /// tables, and epoch rows are all separate physical
+    /// objects. Honors the same `RBP_FAST_EPOCHS` /
+    /// `RBP_FAST_BATCH` env knobs as `Self::Fast` (a
+    /// `--fast3` worker uses the same env-gated budget so
+    /// a small smoke run completes in seconds). Lands the
+    /// "third DCFR-with-LinearWeight variant" the CEO
+    /// testnet roadmap names as the v6 next slice after
+    /// STW-017's `Flagship2` trained config.
+    Fast3,
     /// STW-016: read a `transcript-<hand_id>.json` file the
     /// bench harness wrote and re-derive the `(Position,
     /// Action)` sequence + a renderable text summary,
@@ -100,6 +120,7 @@ impl Mode {
                 "--status" => return Self::Status,
                 "--fast" => return Self::Fast,
                 "--fast2" => return Self::Fast2,
+                "--fast3" => return Self::Fast3,
                 "--slow" => return Self::Slow,
                 "--reset" => return Self::Reset,
                 "--smoke" => return Self::Smoke,
@@ -175,7 +196,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --compare | --replay <path> | --verify-receipt <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --replay <path> | --verify-receipt <path>"
         );
         std::process::exit(1);
     }
@@ -241,6 +262,12 @@ impl Mode {
             // table names the v2 `sync` writes
             // (BLUEPRINT2 / STAGING2 / EPOCH2).
             Self::Fast2 => Fast2Session::new(client).await.train().await,
+            // STW-029: v3 trained config. The
+            // `Fast3Session` shape is the v1 / v2
+            // shape verbatim; the only divergence is
+            // the table names the v3 `sync` writes
+            // (BLUEPRINT3 / STAGING3 / EPOCH3).
+            Self::Fast3 => Fast3Session::new(client).await.train().await,
             Self::Slow => SlowSession::new(client).await.train().await,
             Self::Reset => Self::reset(&client).await,
             Self::Status => {
@@ -250,6 +277,11 @@ impl Mode {
                 // run reports both the v1 + v2
                 // trained-config state.
                 client.status_v2().await;
+                // STW-029: also print the v3 epoch +
+                // blueprint row counts so a `--status`
+                // run reports the v1 / v2 / v3
+                // trained-config state.
+                client.status_v3().await;
             }
             Self::Cluster => PreTraining::run(&client).await,
             Self::Smoke => Self::smoke(client).await,
@@ -318,6 +350,26 @@ impl Mode {
             .execute(<EpochMetaV2 as Schema>::truncates(), &[])
             .await
             .expect("reset epoch_v2");
+        // STW-029: also reset the v3 trained config.
+        // The v3 `'current_v3'` row is independent
+        // of the v1 `'current'` row and the v2
+        // `'current_v2'` row, so a v1 / v2 reset
+        // (the `Mode::Reset` arms above) does not
+        // affect the v3 counter. A v3 reset zeroes
+        // the v3 row only — it does not touch the
+        // v1 / v2 rows, so a v1 `--fast` and a v2
+        // `--fast2` continuation both survive a v3
+        // reset.
+        log::info!("Truncating blueprint (v3) table...");
+        client
+            .execute(<NlheProfileV3 as Schema>::truncates(), &[])
+            .await
+            .expect("truncate blueprint_v3");
+        log::info!("Resetting epoch (v3) counter...");
+        client
+            .execute(<EpochMetaV3 as Schema>::truncates(), &[])
+            .await
+            .expect("reset epoch_v3");
         log::info!("Reset complete.");
     }
     /// One-shot smoke pipeline: pretraining + N training epochs

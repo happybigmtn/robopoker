@@ -18,6 +18,209 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+- [x] `STW-029` Third trained config (`Flagship3` =
+  `DiscountedRegret` + `LinearWeight` +
+  `PluribusSampling`): the "third
+  DCFR-with-LinearWeight variant" the CEO testnet
+  roadmap explicitly names as the v6 next
+  slice after STW-017's `Flagship2` trained
+  config (the comparison half shipped earlier in
+  STW-018). A new `Blueprint::V3` variant lets
+  a single `trainer --bench` invocation compare
+  the v1 / v2 / v3 trained configs
+  head-to-head against the same named baseline
+  (so a dashboard can group reports by
+  `blueprint` to produce a "v1 vs fish", "v2
+  vs fish", and "v3 vs fish" curve from the
+  same `BenchReport` stream). The v3 has its
+  own persistence triple (`BLUEPRINT3` /
+  `EPOCH3` / `'current_v3'` / `STAGING3`),
+  its own trainer (`trainer --fast3` running
+  `Fast3Session`), its own bench seat
+  (`RBP_BENCH_BLUEPRINT=v3` seats a
+  `DatabasePlayer3` at seat 0 and reports
+  `"blueprint":"v3"` in the JSON), and its
+  own status read (`trainer --status` now
+  prints the v1 + v2 + v3 epoch + blueprint
+  row counts side-by-side). A v1 / v2
+  `Mode::reset` does not zero the v3
+  `'current_v3'` row and a v3 `Mode::reset`
+  does not zero the v1 / v2 rows. The v3 is
+  the missing cross-product cell of the v1 /
+  v2 regret / policy combination
+  (`PluribusRegret`+`LinearWeight`,
+  `DiscountedRegret`+`QuadraticWeight`,
+  `DiscountedRegret`+`LinearWeight`) so a v1
+  / v2 / v3 trained-config triplet lets a
+  downstream scraper disentangle the regret
+  and policy axes of the trained blueprint
+  without re-training. Owner files:
+  `crates/database/src/lib.rs` (v3
+  constants `BLUEPRINT3` / `EPOCH3` /
+  `EPOCH3_KEY` / `STAGING3`),
+  `crates/database/src/check3.rs` (new
+  `Check3` trait + `Client` / `Arc<Client>`
+  impls reading v3 epoch / blueprint
+  counts), `crates/database/src/stage3.rs`
+  (new `Stage3` trait + `Client` /
+  `Arc<Client>` impls for v3 `stage3` /
+  `merge3` / `stamp3(epochs)` with
+  `'current_v3'` row scoping),
+  `crates/nlhe/src/lib.rs` (v3 `Flagship3`
+  type alias + `mod profile_v3`),
+  `crates/nlhe/src/profile_v3.rs` (new
+  `NlheProfileV3(NlheProfile)` newtype +
+  `Schema` / `BulkSchema` / `Hydrate` impls
+  targeting `BLUEPRINT3`, `EpochMetaV3` +
+  `Schema` / `BulkSchema` impls targeting
+  `EPOCH3` with the `'current_v3'` row
+  seeded in `creates()`, plus
+  `hydrate_flagship3(client) -> Flagship3`
+  free function that wraps the v1
+  `NlheProfile` in-memory shape verbatim +
+  7 lib tests pinning the v3 schema
+  contracts),
+  `crates/gameroom/src/players/database_v3.rs`
+  (new `DatabasePlayer3` player + `new` /
+  `from_database` constructors, the v1 /
+  v2 / v3 `decide` paths share the same
+  `abstraction` → `NlheInfo` →
+  `averaged_distribution` → weighted-sample
+  recipe + 2 lib tests pinning the
+  static-`new` and `database`-feature
+  `from_database` signature shape),
+  `crates/gameroom/src/players/mod.rs`
+  (re-export `DatabasePlayer3`),
+  `crates/autotrain/src/pretraining.rs`
+  (bootstrap the v3 `BLUEPRINT3` / `EPOCH3`
+  tables in `PreTraining::run` so a fresh
+  DB doesn't crash on the first
+  `Fast3Session::sync`),
+  `crates/autotrain/src/lib.rs` (re-export
+  `Fast3Session`),
+  `crates/autotrain/src/fast3.rs` (new
+  `Fast3Session` parallel of v1
+  `FastSession` and v2 `Fast2Session` —
+  same `step` / `epoch` / `checkpoint` /
+  `summary` delegation, same shape, but the
+  v3 `sync` writes `staging_v3` /
+  `BLUEPRINT3` / `'current_v3'` instead of
+  the v1 / v2 trios),
+  `crates/autotrain/src/mode.rs` (new
+  `--fast3` mode + v3 epoch / blueprint
+  status read in `Mode::Status` + v3 arm in
+  `Mode::reset` that zeros the
+  `'current_v3'` row only + `--fast3`
+  listed in the `Usage:` eprintln! line),
+  `crates/autotrain/src/bench.rs` (new
+  `Blueprint::V3` enum variant + v3 arms
+  in `as_str` / `from_env` + v3 seat-0
+  dispatch in `run_hands` that mirrors the
+  v1 / v2 trained-or-empty-blueprint
+  fallback shape + v3 row-count read in
+  `run` via `client.blueprint_v3()` + three
+  updated lib tests
+  `blueprint_as_str_matches_published_strings`
+  / `blueprint_from_env_round_trip` /
+  `summarize_stamps_blueprint_into_report`
+  adding a v3 assertion),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v6 third
+  DCFR-with-LinearWeight variant as
+  shipped with a one-line note). Scope
+  boundary: do NOT touch the existing v1 /
+  v2 `NlheProfile` / `NlheProfileV2` /
+  `EpochMetaV2` schema contracts; do NOT
+  change the v1 / v2 / v3 train loop
+  (`step` / `epoch` / `checkpoint` /
+  `summary` delegate to the wrapped
+  solver); do NOT change the v1 / v2
+  `Mode::Bench` / `BenchReport` / `--bench`
+  code path beyond extending the
+  `Blueprint` enum and the seat-0
+  `match` arm; do NOT change the v1 / v2
+  `Mode::Compare` v1-vs-v2 compare
+  harness (the v3 is a third trained
+  config, not a new compare dimension —
+  a v1-vs-v2-vs-v3 compare is the next
+  slice if a v3 trained config proves
+  meaningfully different from the v1 / v2
+  pair); do NOT change the room protocol,
+  the `Schema` contracts, the autotrain
+  pipeline, the K-means cluster counts,
+  the `CFR_TREE_COUNT_NLHE` baseline, the
+  v1 / v2 / v3 / v4 named baselines, the
+  `trainer --replay` CLI, the
+  `trainer --verify-receipt` CLI, or the
+  `trainer --smoke` / `trainer --bench` /
+  `trainer --compare` JSON contracts. The
+  v3 is *structurally parallel* to the v1
+  / v2 trained configs (same
+  `NlheProfile` in-memory shape, same
+  trainer `step` / `epoch` / `checkpoint`
+  / `summary` shape, same `DatabasePlayer`
+  weighted-sample `decide` shape, same
+  `Mode::Bench` Blueprint enum extension)
+  so a v1 `trainer --fast`, a v2
+  `trainer --fast2`, and a v3
+  `trainer --fast3` run can coexist in
+  the same database without colliding on
+  the staging tables, the blueprint
+  tables, or the epoch rows. Verification
+  commands:
+  `cargo test -p rbp-database --lib` (the
+  2 new v3 lib tests pass),
+  `cargo test -p rbp-nlhe --features
+  database --lib` (the 6 new v3 lib
+  tests pass), `cargo test -p
+  rbp-gameroom --features database --lib`
+  (the 2 new v3 lib tests pass),
+  `cargo test -p rbp-autotrain --lib` (the
+  3 updated v2 lib tests still pass with
+  the new v3 assertions), `cargo test
+  --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Required tests: 2 new lib
+  tests in `crates/database/src/check3.rs`
+  + 1 new lib test in
+  `crates/database/src/stage3.rs` + 6
+  new lib tests in
+  `crates/nlhe/src/profile_v3.rs::hydrate_tests`
+  + 2 new lib tests in
+  `crates/gameroom/src/players/database_v3.rs::tests`
+  + 3 updated lib tests in
+  `crates/autotrain/src/bench.rs::tests`
+  adding the v3 `Blueprint` assertions —
+  total 14 new lib tests and 3 updated
+  lib tests, all no-DB. Dependencies:
+  `STW-017` (the v2 `Flagship2` /
+  `NlheProfileV2` / `DatabasePlayer2` /
+  `Fast2Session` / `Check2` / `Stage2` /
+  `Blueprint::V2` shape the v3 mirrors
+  one-for-one) and `STW-010` (the bench
+  harness + `Room` shell the v3 seat-0
+  dispatch reuses). Estimated scope: M.
+  Completion signal: `cargo test
+  --workspace` is green with 14 new + 3
+  updated v3 lib tests passing;
+  `cargo fmt --check` is clean; the
+  `Mode::Fast3` arm is wired into the
+  exhaustive `match` (a `trainer`
+  invocation with no args prints
+  `--fast3` as one of the listed modes);
+  a v3 `trainer --status` run prints the
+  v3 epoch + blueprint row counts
+  alongside the v1 / v2 counts; a v3
+  `trainer --reset` run truncates the v3
+  `BLUEPRINT3` table and zeros the v3
+  `'current_v3'` row without touching the
+  v1 / v2 tables; the new
+  `Blueprint::V3` variant is wired into
+  the `as_str` / `from_env` /
+  `summarize_stamps_blueprint_into_report`
+  trio of tests.
+
 - [x] `STW-018` `trainer --compare` head-to-head v1-vs-v2
   trained-config bench: the CEO testnet roadmap explicitly
   names "a third DCFR-with-LinearWeight variant, or a 'named
