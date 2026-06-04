@@ -173,26 +173,60 @@
         tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(total != null ? total : '—')]));
         var uploaded = (entry && entry.remote_receipt && entry.remote_receipt.uploaded_at_utc) || '—';
         tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(uploaded)]));
-        var actions = el('td', { class: 'index-table__cell' });
-        var a1 = el('a', { class: 'index-table__link', href: '/transcript/' + basename }, [document.createTextNode('Download transcript')]);
-        var a2 = el('a', { class: 'index-table__link', href: '/bench/' + basename }, [document.createTextNode('Open replay')]);
-        actions.appendChild(a1);
-        actions.appendChild(a2);
-        tr.appendChild(actions);
+        // STW-050: split the single
+        // per-row actions `<td>` into two
+        // per-action cells (`transcript` +
+        // `replay`). The previous single
+        // cell held both the
+        // `Download transcript` +
+        // `Open replay` `<a>` links; the
+        // split moves one link per cell so
+        // the per-row column shape lines
+        // up with the per-header column
+        // shape (`transcript` + `replay`
+        // below). The
+        // `index-table__link` CSS class
+        // is unchanged.
+        var transcriptTd = el('td', { class: 'index-table__cell' });
+        transcriptTd.appendChild(el('a', { class: 'index-table__link', href: '/transcript/' + basename }, [document.createTextNode('Download transcript')]));
+        tr.appendChild(transcriptTd);
+        var replayTd = el('td', { class: 'index-table__cell' });
+        replayTd.appendChild(el('a', { class: 'index-table__link', href: '/bench/' + basename }, [document.createTextNode('Open replay')]));
+        tr.appendChild(replayTd);
         return tr;
       }
       function renderTable(index) {
         var table = el('table', { class: 'index-table' });
         var thead = el('thead');
         var tr = el('tr');
-        ['receipt_basename', 'blueprint', 'baseline', 'mbb_per_100', 'ci_95', 'win_rate', 'total_bytes', 'uploaded_at_utc', 'actions']
+        // STW-050: split the single `actions`
+        // header into two per-action column
+        // headers (`transcript` / `replay`).
+        // The previous `actions` literal
+        // was engineering jargon in a
+        // public-facing table; a visitor
+        // who inspects the page source /
+        // a future i18n pass / a screen
+        // reader saw the literal string
+        // "actions". The split is
+        // mechanical — the column count
+        // goes from 9 to 10, the empty-state
+        // `colspan` below stays in sync via
+        // the literal 10.
+        ['receipt_basename', 'blueprint', 'baseline', 'mbb_per_100', 'ci_95', 'win_rate', 'total_bytes', 'uploaded_at_utc', 'transcript', 'replay']
           .forEach(function (h) { tr.appendChild(el('th', { scope: 'col' }, [document.createTextNode(h)])); });
         thead.appendChild(tr);
         table.appendChild(thead);
         var tbody = el('tbody');
         var entries = (index && index.entries) || [];
         if (entries.length === 0) {
-          var emptyTd = el('td', { colspan: '9', class: 'empty' }, [document.createTextNode('No receipts in this index yet.')]);
+          // STW-050: the empty-state
+          // `colspan` was 9 (one per the
+          // 8 spec columns + 1 per the
+          // merged `actions` column);
+          // the per-action split moves
+          // the `colspan` to 10.
+          var emptyTd = el('td', { colspan: '10', class: 'empty' }, [document.createTextNode('No receipts in this index yet.')]);
           var emptyTr = el('tr');
           emptyTr.appendChild(emptyTd);
           tbody.appendChild(emptyTr);
@@ -208,6 +242,14 @@
           return r.json();
         })
         .then(function (index) {
+          // STW-050: the meta line renders the
+          // top-level `created_at_utc` verbatim.
+          // The previous fallback (`'<unknown>'`)
+          // is gone — the committed fixture
+          // (`tests/fixtures/index.json`)
+          // carries a real ISO-8601 timestamp
+          // now — so the meta line shows a real
+          // timestamp a public visitor sees.
           meta.textContent = 'index: ' + (index.publish_root || '<unknown>') + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + (index.created_at_utc || '<unknown>');
           tableHost.appendChild(renderTable(index));
         })

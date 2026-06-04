@@ -1,7 +1,7 @@
 {
   "publish_root": "/tmp/publish-root-fixture",
   "runbook_version": "STW-034 v1",
-  "created_at_utc": "<unknown>",
+  "created_at_utc": "2026-06-04T05:00:00Z",
   "entry_count": 2,
   "total_bytes": 41006,
   "entries": [
@@ -38,10 +38,10 @@
           "bundle_bytes": 20503,
           "receipt_basename": "testnet-live-proof-20260604T050000Z",
           "runbook_version": "STW-033 v1",
-          "created_at_utc": "<unknown>",
+          "created_at_utc": "2026-06-04T05:00:00Z",
           "dry_run": true
         },
-        "uploaded_at_utc": "<unknown>",
+        "uploaded_at_utc": "2026-06-04T05:00:01Z",
         "s3_objects": [
           {
             "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/bundle.tar.gz",
@@ -101,10 +101,10 @@
           "bundle_bytes": 19260,
           "receipt_basename": "testnet-live-proof-20260604T140107Z",
           "runbook_version": "STW-033 v1",
-          "created_at_utc": "<unknown>",
+          "created_at_utc": "2026-06-04T14:01:07Z",
           "dry_run": true
         },
-        "uploaded_at_utc": "<unknown>",
+        "uploaded_at_utc": "2026-06-04T14:01:08Z",
         "s3_objects": [
           {
             "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/bundle.tar.gz",

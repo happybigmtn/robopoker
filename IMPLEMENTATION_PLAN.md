@@ -6589,7 +6589,8 @@ and `STW-048`.
   `placeholder_cells_present` lib test
   *pins* the defect as a feature).**
 
-- [ ] **[P1] `STW-048` Replace the `actions` column
+- [ ] **[P1] ~~`STW-048`~~ `SUPERSEDED 2026-06-04
+  by STW-050` Replace the `actions` column
   header (render.rs:159) with two per-action column
   headers (`transcript` / `replay`) AND replace the
   literal `<unknown>` strings in the committed
@@ -7194,7 +7195,7 @@ they are NOT new scope. The new scope is
   surface; deleting it is the acknowledgement
   the slice ships).**
 
-- [ ] **[P0] `STW-050` (supersedes third-pass
+- [x] **[P0] `STW-050` (supersedes third-pass
   `STW-048`) Replace the `actions` column
   header (render.rs:172) with two per-action
   column headers (`transcript` / `replay`) AND

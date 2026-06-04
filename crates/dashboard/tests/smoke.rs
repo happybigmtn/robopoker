@@ -201,6 +201,18 @@ async fn smoke_dashboard_routes_against_committed_fixtures() {
         "win_rate",
         "total_bytes",
         "uploaded_at_utc",
+        // STW-050: the 2 per-action column
+        // headers (`transcript` / `replay`)
+        // follow the 8 spec columns. The
+        // `actions` literal the previous
+        // shape used is gone; a regression
+        // that re-introduces the single
+        // `actions` column header fails
+        // this assertion at the same step
+        // a visitor's page-source inspection
+        // would surface the literal.
+        "transcript",
+        "replay",
         "Download transcript",
         "Open replay",
         // The CSS variable scaffold the

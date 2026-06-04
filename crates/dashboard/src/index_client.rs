@@ -293,10 +293,31 @@ mod tests {
                 bundle_bytes: 20503,
                 receipt_basename: "testnet-live-proof-20260604T050000Z".to_string(),
                 runbook_version: "STW-033 v1".to_string(),
-                created_at_utc: "<unknown>".to_string(),
+                // STW-050: a realistic
+                // fixed-ISO-8601 timestamp the
+                // dashboard's `meta` line
+                // (index.html:211) renders
+                // verbatim. The previous
+                // `<unknown>` literal was a
+                // "this is a test fixture" tell
+                // a public visitor saw. The
+                // fixture pins the dash-suffixed
+                // publish-time shape the
+                // committed
+                // `tests/fixtures/index.json`
+                // entries use. The existing
+                // `*_with_*_fixture` lib tests
+                // pin *shape* (a
+                // `serde_json` round-trip +
+                // byte-stable INDEX.json on
+                // disk), not the specific
+                // timestamp string, so the
+                // timestamp change is
+                // transparent to them.
+                created_at_utc: "2026-06-04T05:00:00Z".to_string(),
                 dry_run: true,
             },
-            uploaded_at_utc: "<unknown>".to_string(),
+            uploaded_at_utc: "2026-06-04T05:00:01Z".to_string(),
             s3_objects: vec![],
             total_bytes: 20503,
             bundle_sha256: "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313"
@@ -306,7 +327,7 @@ mod tests {
         let index = PublishIndex {
             publish_root: "/tmp/publish-root".to_string(),
             runbook_version: "STW-034 v1".to_string(),
-            created_at_utc: "<unknown>".to_string(),
+            created_at_utc: "2026-06-04T05:00:00Z".to_string(),
             entry_count: 1,
             total_bytes: 20503,
             entries: vec![IndexedEntry {
@@ -372,7 +393,21 @@ mod tests {
         let index = PublishIndex {
             publish_root: "/tmp/empty".to_string(),
             runbook_version: "STW-034 v1".to_string(),
-            created_at_utc: "<unknown>".to_string(),
+            // STW-050: a realistic
+            // fixed-ISO-8601 timestamp the
+            // dashboard's `meta` line
+            // (index.html:211) renders
+            // verbatim. The previous
+            // `<unknown>` literal was a
+            // "this is a test fixture" tell
+            // a public visitor saw. The
+            // empty-entries test pins the
+            // round-trip *shape* (an
+            // empty `entries` array), not
+            // the specific timestamp
+            // string, so the timestamp
+            // change is transparent to it.
+            created_at_utc: "2026-06-04T05:00:00Z".to_string(),
             entry_count: 0,
             total_bytes: 0,
             entries: Vec::new(),

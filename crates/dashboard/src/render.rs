@@ -169,7 +169,21 @@ pub fn render_index_table(index: &PublishIndex) -> String {
     ] {
         s.push_str(&format!("      <th scope=\"col\">{col}</th>\n"));
     }
-    s.push_str("      <th scope=\"col\">actions</th>\n");
+    // STW-050: split the single `actions`
+    // column header into two per-action
+    // column headers (`transcript` /
+    // `replay`). The previous `actions`
+    // literal was engineering jargon in a
+    // public-facing table; a visitor who
+    // inspects the page source / a future
+    // i18n pass / a screen reader saw the
+    // literal string "actions". The split
+    // is mechanical — the CSS class names
+    // are unchanged; the existing
+    // `index-table__link` class still
+    // applies.
+    s.push_str("      <th scope=\"col\">transcript</th>\n");
+    s.push_str("      <th scope=\"col\">replay</th>\n");
     s.push_str("    </tr>\n");
     s.push_str("  </thead>\n");
     s.push_str("  <tbody>\n");
@@ -230,10 +244,25 @@ pub fn render_index_table(index: &PublishIndex) -> String {
         s.push_str(&format!(
             "      <td class=\"index-table__cell\">{uploaded_at}</td>\n"
         ));
+        // STW-050: split the single
+        // `<td>` link pair into two
+        // per-action cells (`transcript` /
+        // `replay`). The previous single
+        // cell carried both the
+        // `Download transcript` +
+        // `Open replay` `<a>` links; the
+        // split moves one link per cell so
+        // the per-row column shape lines
+        // up with the per-header column
+        // shape (`transcript` + `replay`
+        // above). The `index-table__link`
+        // CSS class is unchanged.
         s.push_str("      <td class=\"index-table__cell\">\n");
         s.push_str(&format!(
             "        <a class=\"index-table__link\" href=\"/transcript/{basename_href}\">Download transcript</a>\n"
         ));
+        s.push_str("      </td>\n");
+        s.push_str("      <td class=\"index-table__cell\">\n");
         s.push_str(&format!(
             "        <a class=\"index-table__link\" href=\"/bench/{basename_href}\">Open replay</a>\n"
         ));
@@ -584,10 +613,23 @@ mod tests {
                 bundle_bytes: 20503,
                 receipt_basename: "testnet-live-proof-20260604T050000Z".to_string(),
                 runbook_version: "STW-033 v1".to_string(),
-                created_at_utc: "<unknown>".to_string(),
+                // STW-050: a realistic
+                // fixed-ISO-8601 timestamp the
+                // dashboard's `meta` line
+                // (index.html:211) renders
+                // verbatim. The previous
+                // `<unknown>` literal was a
+                // "this is a test fixture" tell
+                // a public visitor saw. The
+                // fixture pins the dash-suffixed
+                // publish-time shape the
+                // committed
+                // `tests/fixtures/index.json`
+                // entries use.
+                created_at_utc: "2026-06-04T05:00:00Z".to_string(),
                 dry_run: true,
             },
-            uploaded_at_utc: "<unknown>".to_string(),
+            uploaded_at_utc: "2026-06-04T05:00:01Z".to_string(),
             s3_objects: vec![],
             total_bytes: 20503,
             bundle_sha256: "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313"
@@ -597,7 +639,7 @@ mod tests {
         PublishIndex {
             publish_root: "/tmp/publish-root".to_string(),
             runbook_version: "STW-034 v1".to_string(),
-            created_at_utc: "<unknown>".to_string(),
+            created_at_utc: "2026-06-04T05:00:00Z".to_string(),
             entry_count: 1,
             total_bytes: 20503,
             entries: vec![IndexedEntry {
@@ -676,6 +718,17 @@ mod tests {
             "win_rate",
             "total_bytes",
             "uploaded_at_utc",
+            // STW-050: the 2 per-action column
+            // headers (`transcript` / `replay`)
+            // follow the 8 spec columns. The
+            // `actions` literal the previous
+            // shape used is gone; a regression
+            // that re-introduces it (or that
+            // re-merges the per-action cells
+            // back into one cell) fails this
+            // assertion.
+            "transcript",
+            "replay",
         ];
         let mut last = 0usize;
         for col in expected {
@@ -699,6 +752,69 @@ mod tests {
             table.matches("Open replay").count(),
             1,
             "table must have exactly one `Open replay` link per entry"
+        );
+        // The `actions` literal the previous
+        // shape used is gone. A regression
+        // that re-introduces the single
+        // `actions` column header fails this
+        // assertion at the same step a
+        // visitor's page-source inspection
+        // would surface the literal.
+        assert!(
+            !table.contains(">actions<"),
+            "table must not contain the `actions` column header literal; got:\n{table}"
+        );
+    }
+
+    /// STW-050: pin the per-row column shape
+    /// after the `actions` → `transcript` +
+    /// `replay` split. The single
+    /// `<td class="index-table__cell">`
+    /// cell that previously held the
+    /// `Download transcript` + `Open replay`
+    /// `<a>` link pair must now be two
+    /// per-action cells, one per link.
+    /// A regression that re-merges the two
+    /// cells back into one (or that drops a
+    /// link) fails this assertion at the
+    /// same CI step a downstream scraper
+    /// would silently break.
+    #[test]
+    fn render_index_table_split_per_action_columns() {
+        let table = render_index_table(&one_entry_publish_index());
+        // The `transcript` `<a>` link must
+        // carry the right `href` and live
+        // inside a `<td class="index-table__cell">`
+        // cell. A regression that escapes
+        // the `<a>` (e.g. wraps the link in
+        // a `<div>` or strips the
+        // `class="index-table__link"`) fails
+        // this assertion.
+        let transcript_link_marker = "<a class=\"index-table__link\" href=\"/transcript/testnet-live-proof-20260604T050000Z\">Download transcript</a>";
+        let replay_link_marker = "<a class=\"index-table__link\" href=\"/bench/testnet-live-proof-20260604T050000Z\">Open replay</a>";
+        assert!(
+            table.contains(transcript_link_marker),
+            "the per-row transcript cell must contain the exact `Download transcript` `<a>` marker; got:\n{table}"
+        );
+        assert!(
+            table.contains(replay_link_marker),
+            "the per-row replay cell must contain the exact `Open replay` `<a>` marker; got:\n{table}"
+        );
+        // The per-row transcript cell must
+        // come before the per-row replay
+        // cell. A regression that reorders
+        // the two cells fails this
+        // assertion.
+        let i_t = table
+            .find(transcript_link_marker)
+            .expect("contains transcript marker");
+        let i_r = table
+            .find(replay_link_marker)
+            .expect("contains replay marker");
+        assert!(
+            i_t < i_r,
+            "the per-row transcript cell must come before the per-row replay cell; \
+             got: transcript={i_t} replay={i_r}"
         );
     }
 
