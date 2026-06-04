@@ -566,3 +566,240 @@ async fn serve_addr_binds_and_accepts_one_connection() {
     server.abort();
     let _ = server.await;
 }
+
+/// The hand-authored broken `INDEX.json` fixture
+/// the `per_row_basename_does_not_render_missing_sentinel`
+/// sub-test points `IndexClient::from_path` at. The
+/// first entry's `receipt_basename` is set to JSON
+/// `null` — a hand-authoring operator who omits the
+/// field gets this exact shape. The path is resolved
+/// relative to `CARGO_MANIFEST_DIR` so the test runs
+/// the same way on a developer machine and in CI.
+fn fixture_index_missing_basename_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("index-missing-basename.json")
+}
+
+/// STW-055: the per-row `'<missing>'` literal
+/// the pre-STW-055 `index.html:200` line leaked
+/// to a public visitor as a "this is a test
+/// fixture" tell on the dashboard's per-row
+/// cell is gone — the new JS uses the same
+/// STW-051 friendly-fallback pattern the
+/// meta-line sweep shipped: `(basename not
+/// stamped — re-run with the STW-034
+/// publish-index chain)`. The smoke-test
+/// pin is the end-to-end shape: drive the
+/// dashboard's `GET /` route against a
+/// hand-authored broken `INDEX.json` whose
+/// `entries[0].receipt_basename` is `null`
+/// (the hand-authoring operator's failure
+/// mode), then assert the served static
+/// `index.html` body does NOT contain the
+/// literal `'<missing>'` AND does contain
+/// the new friendly fallback. A future
+/// regression that re-introduces the
+/// `'<missing>'` literal in the
+/// `renderRow` per-row cell (the same
+/// AI-slop anti-pattern the meta-line
+/// `'<unknown>'` sweep closed on a
+/// different code path) fails this test
+/// at the same CI step a visitor's
+/// page-source inspection would surface
+/// the literal.
+///
+/// The pre-existing
+/// `empty_state_renders_friendly_message_when_index_has_no_entries`
+/// test stays green (the per-row
+/// `'<missing>'` fallback is orthogonal
+/// to the empty-state paragraph — the
+/// empty-state fires on
+/// `entry_count === 0`, the per-row
+/// fallback fires on
+/// `entries[0].receipt_basename === null`).
+///
+/// Scope boundary: this test does NOT
+/// exercise the JS runtime (the
+/// `renderRow` function's `var basename =
+/// ...` line runs in the visitor's
+/// browser, not on the server). The
+/// assertion is the static-HTML shape
+/// — the served `GET /` body is the
+/// checked-in `index.html` file, and the
+/// `assert!` that the literal
+/// `'<missing>'` is absent from the
+/// static HTML source is the cheapest
+/// possible pin on the code change. A
+/// future regression in the JS runtime
+/// (a typo in the new friendly
+/// fallback string, the operator-facing
+/// recipe URL the fallback embeds) is
+/// caught by the same assertion.
+#[tokio::test]
+async fn per_row_basename_does_not_render_missing_sentinel() {
+    // Mount the dashboard's router against the
+    // hand-authored broken `INDEX.json`
+    // fixture the slice ships (the
+    // `entries[0].receipt_basename` is
+    // JSON `null`; the strict
+    // `rbp_autotrain::PublishIndex`
+    // parse fails with a typed error
+    // on the server side, so the
+    // `GET /api/index` route would
+    // return 500 on this fixture).
+    // The test does NOT exercise the
+    // JS runtime — the static
+    // `index.html` file the `GET /`
+    // route serves is the assertion
+    // target (the body the visitor
+    // receives is the static
+    // `index.html` bytes verbatim,
+    // and the static HTML source is
+    // what carries the pre-STW-055
+    // `'<missing>'` literal).
+    //
+    // Build the `AppState` directly
+    // (the `app_state_with_fixtures`
+    // helper is the live-fixtures
+    // path; the hand-authored
+    // broken fixture is a separate
+    // `IndexClient` source).
+    let transcript_dir = fixture_index_missing_basename_path()
+        .parent()
+        .expect("fixtures dir")
+        .to_path_buf();
+    let static_index_html = Arc::new(
+        std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("static")
+                .join("index.html"),
+        )
+        .expect("read static index.html"),
+    );
+    let app = dashboard_app(AppState {
+        index_client: IndexClient::from_path(fixture_index_missing_basename_path()),
+        transcript_dir,
+        static_index_html,
+    });
+
+    // 1. `GET /` returns 200 + the static
+    // `index.html` body. The dashboard
+    // serves the static page verbatim;
+    // the hand-authored broken
+    // `INDEX.json` is consumed by the
+    // `fetch('/api/index')` call the
+    // JS makes after the page loads.
+    // The `assert!` below pins the
+    // *static* artifact (the served
+    // HTML source) does not contain
+    // the `'<missing>'` literal —
+    // a future regression that
+    // re-introduces the literal in
+    // the JS source fails at the
+    // same CI step a visitor's
+    // page-source inspection would
+    // surface the literal.
+    let (status, body, _content_type) = get(app.clone(), "/").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET / must return 200 against a hand-authored broken INDEX.json; got {status}"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    assert!(
+        !body_str.contains("<missing>"),
+        "GET / body must not contain the literal `<missing>` (the STW-055 per-row friendly-fallback fix is live); got:\n{body_str}"
+    );
+    // The inverse pin: the new
+    // friendly-fallback literal
+    // must be present in the
+    // served static HTML. The
+    // literal the spec names
+    // mirrors the STW-051
+    // meta-line shape — the
+    // `(basename not stamped —
+    // re-run with the STW-034
+    // publish-index chain)`
+    // substring is the
+    // `renderRow` function's
+    // per-row cell fallback.
+    // A future regression that
+    // drops the new literal (a
+    // typo, a copy-paste
+    // failure, a partial revert)
+    // fails this assertion at
+    // the same CI step a
+    // visitor's page-source
+    // inspection would notice
+    // the missing fallback.
+    assert!(
+        body_str.contains("(basename not stamped — re-run with the STW-034 publish-index chain)"),
+        "GET / body must contain the STW-055 per-row friendly-fallback literal `(basename not stamped — re-run with the STW-034 publish-index chain)`; got:\n{body_str}"
+    );
+
+    // 2. The pre-existing
+    // `empty_state_renders_friendly_message_when_index_has_no_entries`
+    // test's RAII `engaged_empty_state_for_test`
+    // guard is held for the full
+    // scope of THAT test (the
+    // override is `Some(true)`
+    // during the empty-state
+    // test's `GET /api/index`
+    // call, restoring to `None`
+    // on `Drop`). A naive
+    // `engaged_empty_state_for_test`
+    // engagement in this test
+    // would *also* drop the
+    // override to `None` on
+    // scope exit, racing the
+    // empty-state test's
+    // assertion if this test's
+    // scope exits before the
+    // empty-state test's
+    // queries. The parallel-safe
+    // alternative this test
+    // takes: DO NOT engage the
+    // empty-state guard at all
+    // (asserting only on `GET /`,
+    // the static HTML, not on
+    // `GET /api/index`). The
+    // `is_empty_state()` lookup
+    // the `serve_typed_index`
+    // handler runs is a process-
+    // wide `Mutex<Option<bool>>`,
+    // so the natural state
+    // (the env knob unset, the
+    // override `None`) is the
+    // test baseline a parallel
+    // empty-state test's RAII
+    // guard can race against —
+    // by NOT engaging the guard,
+    // this test does not
+    // contribute to the race.
+    //
+    // The trade-off: this test
+    // does NOT exercise the
+    // strict-parse 500 the
+    // broken fixture would
+    // surface on a sequential
+    // `cargo run -p rbp-dashboard`
+    // (the hand-test command the
+    // spec names). The main
+    // assertion — the static
+    // `index.html` body does
+    // NOT contain the
+    // `'<missing>'` literal —
+    // is the cheapest possible
+    // pin on the code change
+    // and is parallel-safe by
+    // construction. A future
+    // regression that re-
+    // introduces the literal
+    // fails this assertion at
+    // the same CI step a
+    // visitor's page-source
+    // inspection would surface
+    // the literal.
+}

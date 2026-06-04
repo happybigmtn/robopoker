@@ -197,7 +197,40 @@
       }
       function renderRow(entry) {
         var tr = el('tr');
-        var basename = (entry && entry.receipt_basename) || '<missing>';
+        // STW-055: the per-row `receipt_basename`
+        // cell renders a *friendly* `(basename
+        // not stamped — re-run with the
+        // STW-034 publish-index chain)`
+        // placeholder when the entry is
+        // missing the basename (a
+        // hand-authoring operator who
+        // omits the field gets this
+        // exact shape; the strict
+        // `rbp_autotrain::PublishIndex`
+        // parse fails with a typed
+        // error on the server side,
+        // so the JS-side fallback is
+        // the only place the message
+        // is shown). The pre-STW-055
+        // literal here was the same
+        // AI-slop anti-pattern the
+        // meta-line sweep the prior
+        // STW-051 pass closed (a "this
+        // is a test fixture" tell on
+        // a public visitor's page);
+        // the new literal is a single
+        // source of truth the smoke
+        // test pins via `assert!` on
+        // the served `GET /` body, and
+        // a future regression that
+        // re-introduces a per-row
+        // bracket-sentinel literal in
+        // the `renderRow` per-row cell
+        // fails at the same CI step a
+        // visitor's page-source
+        // inspection would surface
+        // the literal.
+        var basename = (entry && entry.receipt_basename) || '(basename not stamped — re-run with the STW-034 publish-index chain)';
         tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(basename)]));
         // The dashboard pins the column order the
         // `render_index_table` Rust emitter uses

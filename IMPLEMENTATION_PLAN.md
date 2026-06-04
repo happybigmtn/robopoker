@@ -6389,12 +6389,24 @@ The `STW-043` / `STW-045` / `STW-046` rows below are
 they are NOT new scope. The new scope is `STW-047`
 and `STW-048`.
 
-- [ ] **[P0] `STW-043` (carry-over from afternoon wave
+- [x] **[P0] `STW-043` (carry-over from afternoon wave
   `t_35186537`) `crates/autotrain/tests/fixtures/bench-report-fixture.json`
   + `scripts/commit-bench-fixture.sh` operator shim
   that produces a byte-stable `BenchReport` from
   `trainer --bench` against a no-DB deterministic
-  small-config run.** The third pass's three lenses
+  small-config run.** Shipped on commit `d95047a`
+  (2026-06-04) — the `BenchReport` fixture +
+  `scripts/commit-bench-fixture.sh` shim. The
+  on-disk code + the committed fixture + the
+  integration test that diffs the shim's output
+  against the committed fixture all exist and are
+  green. The `[ ]` was a planning-pin drift the
+  STW-055 sweep caught; the re-affirmation row
+  stayed open in the planning surface even after
+  the underlying slice shipped. STW-055 closed
+  the pin (this row) and the per-row `'<missing>'`
+  literal in `index.html:200` in one commit. The
+  third pass's three lenses
   re-confirm this as P0: the afternoon CEO lens
   named it the only open P0; the third-pass CEO lens
   re-confirms the testnet north star's "publicly-
@@ -9153,10 +9165,11 @@ scope. The new scope is `STW-054` + `STW-055`
   first-time-visitor answer the testnet
   north star names).**
 
-- [ ] **[P0] `STW-055` Close the plan's
+- [x] **[P0] `STW-055` Close the plan's
   STW-052 false-`[ ]` row + sweep the
   per-row `'<missing>'` literal the STW-051
-  pass missed.** Three changes in one
+  pass missed.** Shipped on the same commit
+  as the planning-pin correction above. Three changes in one
   shippable slice: (1) the planning-pinning
   mark-`[x]` of the fifth-pass `STW-052`
   row (the on-disk code at
