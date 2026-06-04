@@ -3725,6 +3725,607 @@ N manifests.
   `testnet_live_publish_index_script_*`
   shape pins pass.
 
+## Promoted from v8 follow-on (this slice)
+
+The v8 chain (STW-034) is closed: the
+`testnet-live-publish-index.sh` runbook + the
+`trainer --publish-index <publish-root>` aggregator + the
+`trainer --verify-index <index-path>` re-verifier are
+shipped. The STW-034 doc's scope-boundary section names
+the next claimable slice explicitly: "does NOT push to
+S3 / GCS / git-tag (a CI worker can `aws s3 cp` the
+local `publish/<root-basename>/index/` directory in a
+follow-on slice)". The v9 follow-on a testnet dashboard
+naturally wants is a *plan-first* remote-upload of the
+`INDEX.json` aggregator the STW-034 chain produced — a
+deterministic `index_remote_plan.json` +
+`index_remote_receipt.json` pair a CI worker can
+`aws s3 cp` to push the aggregator to a dashboard
+bucket, AND a no-DB no-rebuild re-verify path that
+re-hashes the local `INDEX.json` + the per-entry
+`remote_receipt.json` files the STW-034 chain produced.
+
+- [ ] `STW-035` `trainer --publish-index-remote
+  <publish-root> --bucket
+  <s3://...> [--prefix
+  <prefix/>] [--no-dry-run]`
+  + no-DB `trainer
+  --verify-index-remote
+  <remote-dir>` remote-upload
+  plan + re-verifier surface
+  for the STW-034 `INDEX.json`
+  aggregator. The v9
+  follow-on the STW-034
+  scope-boundary defers to:
+  a CI worker that has run
+  `trainer --publish-index
+  <publish-root>` can
+  `trainer
+  --publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...> --prefix
+  <prefix/>` to write a
+  deterministic upload
+  plan
+  (`<publish-root>/index_remote/remote_plan.json`)
+  + a post-upload
+  `remote_receipt.json`
+  the same worker (or a
+  downstream auditor)
+  re-verifies with
+  `trainer
+  --verify-index-remote
+  <publish-root>/index_remote/`.
+  The publish-index-remote
+  step re-verifies the
+  STW-034 `INDEX.json` with
+  `PublishIndex::verify` AS
+  THE FIRST GATE (so a red
+  index short-circuits
+  the upload with
+  `PublishIndexRemoteError::IndexRed(...)`
+  before any `BucketUri`
+  gate can fire), then
+  re-validates the
+  per-entry
+  `remote_receipt.json`
+  files in the inlined
+  index entries (the
+  STW-034 chain's per-entry
+  `PublishedRemoteReceipt`
+  is the source of truth
+  for the per-file upload
+  plan), then writes
+  the per-file upload
+  plan. The plan's
+  `s3_objects[]` array
+  is sorted by `s3_uri`
+  for determinism; the
+  `created_at_utc` /
+  `uploaded_at_utc` fall
+  back to the `<unknown>`
+  sentinel when the
+  `RBP_PUBLISH_INDEX_REMOTE_UTC`
+  env knob is unset so
+  the integration test
+  is byte-stable. The
+  new
+  `Mode::PublishIndexRemote`
+  arm is a no-DB
+  early-dispatch
+  (mirrors
+  `Self::PublishRemote`):
+  reads the `INDEX.json`,
+  runs the pre-upload
+  gate, walks the
+  inlined
+  `PublishIndex::entries[]`
+  to build the
+  per-file `s3_objects[]`
+  mapping
+  (`<index_filename> -> s3://<bucket>/<prefix>/<index_filename>`),
+  and prints a one-line
+  `live_proof publish_index_remote complete: bucket=... prefix=... files=... bytes=... index_path=... runbook_version=... dry_run=...`
+  headline (the same
+  `live_proof ... complete:`
+  family the STW-019 /
+  STW-031 / STW-032 /
+  STW-033 / STW-034
+  trainers already print
+  so one `grep ^live_proof`
+  scraper can read the
+  whole chain). The
+  new
+  `Mode::VerifyIndexRemote`
+  arm is the
+  post-upload
+  re-verifier: reads
+  the on-disk
+  `remote_receipt.json`,
+  re-hashes the local
+  `INDEX.json` the
+  receipt claims to
+  have uploaded (the
+  re-hash compares to
+  the receipt's
+  `index_sha256` field),
+  asserts every digest
+  matches, asserts every
+  `s3_uri` in the receipt
+  appears in the inlined
+  plan (a phantom
+  `s3_uri` is a hard
+  `PublishIndexRemoteError::MissingObject`
+  error), and prints
+  a one-line
+  `live_proof index_remote verification passed: ...` /
+  `live_proof index_remote verification failed: ...`
+  headline a dashboard
+  scraper can
+  `grep ^live_proof index_remote verification`
+  the log. The arm
+  defaults to
+  `--dry-run` (the
+  `RBP_PUBLISH_INDEX_REMOTE_DRY_RUN=1`
+  knob); the
+  `--no-dry-run` argv
+  flips the arm into
+  live mode (which
+  shells out to
+  `aws s3 cp` per file
+  in the plan — the
+  `aws` CLI must be on
+  `$PATH` and the shell
+  must have the
+  `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY`
+  env knobs set; a
+  missing `aws` returns
+  `PublishIndexRemoteError::AwsCli`
+  and the arm exits 2).
+  The companion
+  `scripts/testnet-live-publish-index-s3.sh`
+  runbook is pure bash,
+  mirrors the
+  STW-019 +
+  STW-032 + STW-033 +
+  STW-034 shape (script
+  exists + is executable
+  + parses with
+  `bash -n` + refuses
+  to run on a missing
+  publish root / missing
+  bucket / missing
+  `INDEX.json` with
+  exit 3), and chains
+  `trainer --verify-index
+  <index-dir>` (pre-upload
+  refuse-to-upload-red-index
+  gate) →
+  `trainer
+  --publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...>` (the
+  plan + post-upload-receipt
+  writer) →
+  `trainer
+  --verify-index-remote
+  <remote-dir>`
+  (post-upload
+  re-verify) as a
+  sequence of
+  subprocesses, and
+  writes a `SUMMARY.txt`
+  headline a CI worker
+  can `cat` to confirm
+  the chain landed
+  end-to-end. The new
+  `crates/autotrain/tests/publish_index_remote.rs`
+  integration test
+  drives
+  `trainer --publish-index`
+  +
+  `trainer --publish-index-remote`
+  +
+  `trainer --verify-index-remote`
+  end-to-end through a
+  real subprocess (3
+  sub-tests: round-trip,
+  red-index gate,
+  missing-bucket gate)
+  so a regression in the
+  CLI surface (renamed
+  flag, missing exit
+  code, dropped error
+  kind) fails CI before
+  it reaches an
+  operator's machine.
+  The new
+  `crates/autotrain/tests/script_shape.rs`
+  shape pins (4 STW-035
+  pins) assert the
+  `testnet-live-publish-index-s3.sh`
+  script is on disk +
+  executable + parses
+  with `bash -n` + calls
+  `--verify-index` BEFORE
+  `--publish-index-remote`
+  + references the
+  `trainer
+  --publish-index-remote`
+  / `--bucket` CLI
+  subcommand + the
+  `testnet-live-publish-index.md`
+  doc references the
+  `trainer
+  --verify-index-remote`
+  re-verify subcommand.
+  The publish-index-remote
+  step is **read-only**
+  with respect to the
+  publish root + the
+  `INDEX.json`: it reads
+  + re-verifies the
+  `INDEX.json` in place,
+  then writes its own
+  `index_remote/` dir
+  under the publish root
+  directory, so a
+  `trainer
+  --publish-index-remote`
+  invocation cannot
+  mutate the underlying
+  `INDEX.json` or the
+  per-entry
+  `remote_receipt.json`
+  files even on
+  partial-failure paths.
+  Scope boundary: does
+  NOT push via a
+  vendored AWS / GCS SDK
+  (the live `aws s3 cp`
+  shell-out is the bash
+  runbook's job —
+  adding a 50-MB SDK to
+  a no-system-deps
+  trainer binary is the
+  inverse of the
+  "pure bash + cargo +
+  trainer" shape the
+  rest of the autotrain
+  pipeline already
+  follows); does NOT
+  shell out to `aws` in
+  the default
+  `trainer
+  --publish-index-remote`
+  path (the
+  `cargo test --workspace`
+  integration test runs
+  in dry-run so a
+  regression in the CLI
+  surface fails CI
+  without an `aws`
+  credential or a live
+  bucket); does NOT
+  touch the STW-019
+  `testnet-live-proof.sh`
+  or the STW-032
+  `testnet-live-publish.sh`
+  or the STW-033
+  `testnet-live-publish-s3.sh`
+  or the STW-034
+  `testnet-live-publish-index.sh`
+  runbook (the
+  publish-index-remote
+  is a follow-on
+  *consumer* of the
+  `INDEX.json` the
+  STW-034 runbook
+  produces, not a
+  refactor); does NOT
+  change the STW-034
+  `PublishIndex` /
+  `IndexedEntry` /
+  `PublishIndexError`
+  JSON shape (a
+  manifest drift fails
+  the publish-index-remote
+  step's pre-upload
+  `trainer --verify-index`
+  call); does NOT
+  change the STW-033
+  `PublishedRemoteReceipt`
+  / `S3Object` JSON
+  shape (a
+  `remote_receipt.json`
+  drift fails the
+  publish-index-remote
+  step's per-entry
+  `PublishedRemoteReceipt::verify`
+  call). **Closes the
+  v9 follow-on the
+  STW-034
+  `testnet-live-publish-index.md`
+  scope-boundary defers
+  to** (a CI worker that
+  produced an `INDEX.json`
+  wants to push it to a
+  dashboard bucket
+  without hand-rolling
+  the per-file
+  `aws s3 cp`
+  shell-out).
+  Owner files:
+  `crates/autotrain/src/publish_index_remote.rs`
+  (new `PublishIndexRemotePlan`
+  struct + `PublishedIndexRemoteReceipt`
+  struct +
+  `PublishIndexRemoteError`
+  enum + `Display` +
+  `From<PublishIndexError>`
+  + `From<PublishRemoteError>`
+  impls +
+  `publish_index_remote_receipt`
+  top-level entry point
+  + `PublishedIndexRemoteReceipt::verify`
+  + `read_index_remote_receipt`
+  + new
+  `bucket_uri_as_str_matches_published_strings_v3`
+  / `bucket_uri_rejects_non_s3_prefix_v2`
+  / `bucket_uri_rejects_empty_bucket_v2`
+  / `publish_index_remote_dry_run_writes_plan_and_receipt`
+  / `publish_index_remote_s3_uris_are_sorted_for_determinism`
+  / `publish_index_remote_refuses_red_index`
+  / `publish_index_remote_round_trips_through_verifier`
+  / `publish_index_remote_verifier_rejects_tampered_index`
+  / `publish_index_remote_to_json_contains_every_field`
+  / `publish_index_remote_bare_bucket_name_normalises_to_s3_uri`
+  / `publish_index_remote_created_at_utc_falls_back_to_unknown`
+  / `publish_index_remote_io_error_propagates_for_missing_root`
+  / `publish_index_remote_io_error_propagates_for_missing_index`
+  lib tests),
+  `crates/autotrain/src/mode.rs`
+  (new
+  `Mode::PublishIndexRemote`
+  arm + `--publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...>
+  [--prefix
+  <prefix/>]
+  [--no-dry-run]`
+  argv handling + the
+  `publish_index_remote::publish_index_remote_receipt`
+  call + new
+  `Mode::VerifyIndexRemote`
+  arm + `--verify-index-remote
+  <path>` argv
+  handling + the
+  `publish_index_remote::read_index_remote_receipt`
+  +
+  `PublishedIndexRemoteReceipt::verify`
+  call + both new modes
+  listed in the `Usage:`
+  eprintln! line +
+  matching
+  `unreachable!()`
+  catch-alls in the
+  post-DB-open match
+  arm),
+  `crates/autotrain/src/lib.rs`
+  (re-export the new
+  `PublishIndexRemotePlan`
+  /
+  `PublishedIndexRemoteReceipt`
+  /
+  `PublishIndexRemoteError`
+  types + register the
+  new `publish_index_remote`
+  module),
+  `crates/autotrain/tests/publish_index_remote.rs`
+  (new no-DB
+  integration test
+  `publish_index_remote_round_trips_through_real_trainer_binary`
+  that drives
+  `trainer --publish-index
+  <publish-root>` +
+  `trainer
+  --publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...>` +
+  `trainer
+  --verify-index-remote
+  <remote-dir>`
+  end-to-end against a
+  synthetic index +
+  asserts the headline
+  starts with the
+  pinned
+  `live_proof publish_index_remote complete: `
+  prefix + the
+  `bucket=... prefix=... files=... bytes=... index_path=... runbook_version=... dry_run=...`
+  tokens are present +
+  the
+  `index_remote_plan.json`
+  +
+  `index_remote_receipt.json`
+  files are on disk +
+  the verifier's
+  headline starts with
+  the pinned
+  `live_proof index_remote verification passed: `
+  prefix + a second
+  test
+  `publish_index_remote_run_exits_two_with_red_index`
+  that drops a red
+  index (rewrites an
+  inlined
+  `s3_objects[].sha256`
+  to a bogus value) +
+  drives
+  `trainer
+  --publish-index-remote`
+  + asserts exit 2 +
+  the stderr starts
+  with
+  `live_proof publish_index_remote error: index is red: `
+  + a third test
+  `publish_index_remote_run_exits_two_with_missing_bucket`
+  that drives
+  `trainer
+  --publish-index-remote
+  <publish-root>`
+  with no `--bucket`
+  flag + asserts
+  exit 2 + the stderr
+  carries the
+  `--bucket` usage
+  line),
+  `crates/autotrain/tests/script_shape.rs`
+  (add the new
+  `testnet_live_publish_index_s3_script_exists_and_parses`
+  shape pin: s3
+  script exists + is
+  executable + parses
+  with `bash -n` + the
+  `testnet_live_publish_index_s3_script_has_verify_index_pre_upload_gate`
+  pre-upload-gate pin:
+  the s3 script must
+  shell out to
+  `trainer --verify-index
+  <index-dir>` BEFORE
+  the
+  `trainer
+  --publish-index-remote`
+  call + the
+  `testnet_live_publish_index_s3_script_references_publish_index_remote_cli`
+  CLI-reference pin:
+  the s3 script
+  references the
+  `trainer
+  --publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...>` CLI
+  subcommand + the
+  `testnet-live-publish-index.md`
+  doc references the
+  `trainer
+  --verify-index-remote`
+  re-verify subcommand),
+  `scripts/testnet-live-publish-index-s3.sh`
+  (new pure-bash
+  runbook that drives
+  `trainer
+  --publish-index-remote`
+  + `trainer
+  --verify-index-remote`
+  end-to-end as
+  subprocesses,
+  mirrors the
+  STW-019 +
+  STW-032 +
+  STW-033 +
+  STW-034 runbook
+  shape:
+  `set -euo pipefail` +
+  script exists +
+  executable + parses
+  with `bash -n` +
+  refuses to run on
+  a missing publish
+  root / missing
+  bucket / missing
+  `INDEX.json` with
+  exit 3 + writes a
+  `SUMMARY.txt`
+  headline a CI worker
+  can `cat`),
+  `scripts/testnet-live-publish-index-s3.md`
+  (new runbook doc
+  that explains the
+  v9 follow-on
+  index-remote step +
+  the
+  `index_remote/`
+  layout +
+  references the
+  `--publish-index-remote`
+  +
+  `--verify-index-remote`
+  CLI subcommands +
+  names the
+  `RBP_PUBLISH_INDEX_REMOTE_DRY_RUN`
+  /
+  `RBP_PUBLISH_INDEX_REMOTE_UTC`
+  env knobs),
+  `IMPLEMENTATION_PLAN.md`
+  (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v9
+  index-remote slice
+  as shipped with a
+  one-line note in the
+  "Immediate P0"
+  shipped list),
+  `scripts/testnet-live-publish-index.md`
+  (replace the "next
+  slice" parenthetical
+  with a one-line
+  "shipped as STW-035"
+  note + a link to
+  `scripts/testnet-live-publish-index-s3.md`),
+  `README.md` (add a
+  `## Testnet publish
+  index remote` section
+  under `## Testnet
+  publish index` that
+  links the new
+  runbook + shows the
+  `bash
+  scripts/testnet-live-publish-index-s3.sh
+  <publish-root>
+  <s3://bucket>`
+  usage + the
+  `trainer
+  --verify-index-remote
+  <remote-dir>`
+  re-verify line).
+  Verification commands:
+  `cargo fmt --check`;
+  `cargo check --workspace`;
+  `cargo test --workspace`;
+  `bash -n
+  scripts/testnet-live-publish-index-s3.sh`;
+  `trainer
+  --publish-index-remote
+  <publish-root>
+  --bucket
+  <s3://...>`
+  exits 0 + prints
+  the pinned
+  `live_proof publish_index_remote complete: ...`
+  line + writes a
+  green
+  `index_remote_plan.json`
+  +
+  `index_remote_receipt.json`;
+  `trainer
+  --verify-index-remote
+  <remote-dir>` exits
+  0 + prints the
+  pinned
+  `live_proof index_remote verification passed: ...`
+  line; the new
+  integration tests
+  pass; the
+  `testnet_live_publish_index_s3_script_*`
+  shape pins pass.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
@@ -3752,3 +4353,872 @@ The rows above were promoted from
 `/tmp/robopoker-steward-9283/PROMOTIONS.md` on 2026-06-03 as part of kanban
 task `t_9283ea83`. The first promotion to land is `STW-003` (highest-priority
 hinge, mainnet-blocking, user-facing).
+
+## Next wave - review 2026-06-04
+
+The 2026-06-03 three-lens review (CEO / Eng / Design, kanban
+task `t_c86ebbbf`) finds the v6→v9 receipt-pipeline chain (STW-029 →
+STW-035) is *complete as a hermetic CI gate* but is **not** the
+testnet north star the 2026-06-03 CEO sign-off names. The north star
+is "a public, reproducible NLHE benchmark with replayable
+transcripts"; the chain has built the supply, but no human can see
+it. The next wave pivots from *more rungs of the chain* to *a
+visible consumer of the chain*: a static dashboard (the v10
+follow-on) plus the operator-UX + observability + docs surfaces
+that make the chain legible to a first-time visitor and a CI
+auditor. The v9 STW-035 row that already sits in
+`## Promoted from v8 follow-on (this slice)` is the *prerequisite*
+for the v10 dashboard slice; STW-035 itself is in flight (working
+tree: `crates/autotrain/src/publish_index_remote.rs` 1710 LOC +
+mode.rs/lib.rs wiring uncommitted) and is not duplicated here.
+
+Each row below names a single shippable slice with named files,
+verification command(s), and a `lens` tag tracing the finding it
+closes. Rows are P0/P1 ordered; the top row is the highest
+single-shipment leverage.
+
+- [ ] **[P0] `STW-036` `crates/dashboard/` static dashboard crate
+  consuming the STW-034 `INDEX.json` + STW-014
+  `transcript-<id>.json` bundles a CI worker syncs to a
+  public S3 / Cloudflare Pages bucket.** The visible
+  consumer of the v6→v9 receipt chain. A new
+  `crates/dashboard/` workspace member with three
+  layers: (a) an `IndexClient` (re-uses
+  `publish_index::PublishedIndexReceipt` from
+  `crates/autotrain/src/publish_index.rs` — the
+  same Rust type the STW-034 chain writes, so a
+  shape drift in `INDEX.json` fails both the
+  dashboard's typed read AND the
+  `trainer --verify-index` re-verify at the same
+  CI step) that reads the bucket-hosted `INDEX.json`
+  via a `RBP_DASHBOARD_INDEX_URL` env knob
+  (default `http://localhost:8080/api/index` in
+  tests, a CloudFront URL in production — no AWS
+  SDK vendored, the same "pure bash + cargo +
+  trainer" shape the rest of the autotrain pipeline
+  follows); (b) a thin `axum` router at `GET /`
+  (serves a static `index.html` with embedded
+  per-receipt summary) + `GET /api/index` (returns
+  the typed `INDEX.json`) + `GET /transcript/:id`
+  (proxies the STW-014 `transcript-<id>.json`
+  bundle) + `GET /bench/:id` (renders a
+  `BenchReport` as a card using the same
+  `crates/autotrain/src/bench.rs::BenchReport`
+  Rust type the bench writes — a bench-shape drift
+  fails both the dashboard render and the
+  `trainer --replay` consumer at the same CI
+  step); (c) a static vanilla-JS `index.html`
+  (no framework; no build step; no `npm`) that
+  fetches `/api/index` and renders a sortable
+  table of receipts with columns for
+  `receipt_basename` / `blueprint` / `baseline` /
+  `mbb_per_100` / `ci_95` / `win_rate` / `total_bytes`
+  / `uploaded_at_utc`, a per-row `Download
+  transcript` link to `/transcript/:id`, and a
+  per-row `Open replay` link to `/bench/:id`. The
+  static `index.html` is a checked-in file (no
+  templating engine, no JSX, no `cargo build` of
+  the frontend); the dashboard's CI runs
+  `cargo test -p rbp-dashboard` against a fixture
+  `INDEX.json` on disk (committed under
+  `crates/dashboard/tests/fixtures/index.json`)
+  and asserts the typed read returns N rows + the
+  per-row link shape matches the pinned contract.
+  Owner files:
+  `crates/dashboard/Cargo.toml` (new workspace
+  member; deps: `axum`, `tower`, `serde`,
+  `serde_json`, `ureq` for the prod index fetch,
+  `tokio` for the axum server; no `reqwest`, no
+  `aws-sdk-*`, no `wasm-*`),
+  `crates/dashboard/src/lib.rs` (re-export
+  `IndexClient` + the axum router + the
+  `dashboard_app` builder a test harness calls),
+  `crates/dashboard/src/index_client.rs` (new
+  `IndexClient::from_url` + `fetch_index` returning
+  the typed `publish_index::PublishedIndexReceipt`
+  via the same `ureq` GET + serde_json::from_str
+  the autotrain pipeline already uses; 4 lib tests
+  pinning the typed-read contract: round-trip,
+  missing-URL, malformed-JSON, empty-entries),
+  `crates/dashboard/src/router.rs` (new axum
+  router + the four route handlers + the
+  `serve(addr)` entry point + 3 lib tests pinning
+  the per-route shape: `GET /api/index` returns
+  the in-memory `INDEX.json`,
+  `GET /transcript/:id` returns the
+  `transcript-<id>.json` bytes,
+  `GET /bench/:id` returns the rendered HTML
+  card with the `blueprint` / `baseline` /
+  `mbb_per_100` fields),
+  `crates/dashboard/src/render.rs` (new
+  `render_bench_card(bench: &BenchReport) -> String`
+  HTML emitter + `render_index_table(entries: &[IndexEntry]) -> String`
+  HTML emitter — vanilla `<table>` + `<th>` +
+  `<tr>` + `<td>`, no CSS framework, no
+  Tailwind, no inline `style=`; the table is
+  styled by a single `<style>` block in
+  `index.html`; 3 lib tests pinning the per-row
+  column order and the `Download transcript` /
+  `Open replay` link shape),
+  `crates/dashboard/static/index.html` (new
+  checked-in vanilla-JS + CSS file; the JS
+  fetches `/api/index` and injects the table
+  rows from the typed `entries[]`; the CSS is a
+  single 80-line block — dark theme, monospace
+  numbers, restrained palette, no animation, no
+  emoji, no icon font, no gradient; designed
+  for a `1280×800` viewport and `prefers-color-scheme:
+  dark` default with a `prefers-color-scheme:
+  light` override),
+  `crates/dashboard/tests/smoke.rs` (new
+  integration test: spins up the axum router
+  on a random localhost port, drives
+  `GET /` (200 + contains the table scaffold
+  HTML), `GET /api/index` (200 + the JSON
+  matches the fixture), `GET /transcript/foo`
+  (200 + the bytes match the fixture), and
+  asserts no console error in the rendered
+  HTML — the no-console-error assertion is
+  the cheap in-CI proof the dashboard
+  actually renders),
+  `Cargo.toml` (add `crates/dashboard` to
+  `members`),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v10 follow-on as promoted with a
+  one-line note in the Goals section),
+  `README.md` (add a `## Public dashboard` link
+  to the deployed Cloudflare Pages URL once
+  the v10 ships — placeholder text until
+  then; the placeholder is a checklist item
+  the v10 ships with, not a `TODO`),
+  `scripts/testnet-live-publish-dashboard.sh`
+  (new pure-bash runbook that follows
+  `testnet-live-publish-index.sh` with
+  `aws s3 sync <publish-root>/index/ s3://<bucket>/index/ --delete
+  --cache-control max-age=60` so a
+  `trainer --publish-index` + a publish-index-remote
+  chain + a single `aws s3 sync` deploys the
+  dashboard data feed in one step; mirrors the
+  STW-019 + STW-032 + STW-033 + STW-034 + STW-035
+  runbook shape: script exists + is executable
+  + parses with `bash -n` + refuses to run
+  on a missing index with exit 3). Scope
+  boundary: does NOT introduce a React / Vue
+  / Svelte / Solid frontend (vanilla JS is the
+  minimum surface for a sortable table — a
+  framework is the inverse of the
+  no-system-deps trainer shape the rest of the
+  autotrain pipeline follows); does NOT
+  vendor a Tailwind / Bootstrap / Bulma CSS
+  framework (a single 80-line CSS block is
+  the right size for a sortable table);
+  does NOT add an `aws-sdk-s3` dep
+  (the dashboard reads the index from a URL
+  via `ureq`, the `aws s3 sync` is the runbook's
+  job); does NOT change the
+  `crates/autotrain/src/publish_index.rs`
+  `PublishedIndexReceipt` / `IndexEntry` JSON
+  shape (a shape drift fails the dashboard's
+  typed read at the same CI step that fails
+  the `trainer --verify-index` re-verify);
+  does NOT change the `crates/gameroom`'s
+  `Transcript` JSON shape (a transcript-shape
+  drift fails the dashboard's transcript
+  proxy at the same CI step that fails
+  `trainer --replay`); does NOT change the
+  `crates/autotrain/src/bench.rs::BenchReport`
+  JSON shape (a bench-shape drift fails the
+  dashboard's `GET /bench/:id` render at the
+  same CI step that fails the
+  `trainer --replay` consumer); does NOT
+  change the room protocol, the `Schema`
+  contracts, the autotrain pipeline, the
+  K-means cluster counts, the
+  `CFR_TREE_COUNT_NLHE` baseline, the v1 / v2
+  / v3 / v4 named baselines, or any
+  `trainer --*` CLI. Verification commands:
+  `cargo test -p rbp-dashboard` (the 4 + 3 + 3
+  new lib tests + the new smoke integration
+  test pass), `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`, `bash -n
+  scripts/testnet-live-publish-dashboard.sh`.
+  Required tests: the new lib tests in
+  `index_client.rs` + `router.rs` + `render.rs`
+  + the new `crates/dashboard/tests/smoke.rs`
+  integration test; no padding of unrelated
+  suites. Dependencies: `STW-035` (the v9
+  publish-index-remote step the dashboard's
+  data feed assumes), `STW-034` (the v8
+  `INDEX.json` aggregator the dashboard's
+  `IndexClient` reads), `STW-014` (the
+  per-hand `transcript-<id>.json` bundle the
+  dashboard's `GET /transcript/:id` proxies).
+  Estimated scope: L (the new crate is the
+  largest non-engine surface in the repo
+  since `rbp-server`; the dashboard's
+  static-HTML is a small fraction of the
+  slice). Completion signal: `cargo test -p
+  rbp-dashboard` is green with the new
+  smoke integration test passing;
+  `cargo test --workspace` is green;
+  `bash -n scripts/testnet-live-publish-dashboard.sh`
+  passes; the dashboard renders a fixture
+  `INDEX.json` to a non-empty sortable table
+  in the smoke test's `GET /` HTML; the
+  `README.md` `## Public dashboard` link
+  points at a deployed Cloudflare Pages URL
+  (a `RBP_DASHBOARD_DEPLOYED_URL` env knob
+  the test harness sets; the placeholder
+  text the v10 ships with is greppable so a
+  dashboard-readiness check can `grep -q
+  '## Public dashboard' README.md`); a testnet
+  dashboard can `curl
+  https://<deployed>/api/index` and receive
+  the same `INDEX.json` shape the
+  `trainer --verify-index` re-verifier
+  accepts. **`lens:` CEO (the visible
+  consumer that turns the hermetic receipt
+  chain into the public reproducible
+  benchmark the testnet north star names) +
+  Design (the first-class `## Public
+  dashboard` discoverability surface the
+  README has been missing).**
+
+- [ ] **[P0] `STW-037` `scripts/workspace-parallel-proof-three.sh`
+  operator-runnable 3-consecutive full-workspace proof
+  + `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET` env-knob
+  port to the shell runbook.** Closes the last
+  un-closed mainnet-block hinge. STW-030 added a
+  cheap in-CI 2-second 3-consecutive *gameplay-only*
+  proof, but the *operator-runnable full-workspace*
+  proof the stewardship report cites
+  (`steward/HINGES.md` rank #2) is still
+  `scripts/workspace-parallel-proof.sh` (3 runs of
+  `cargo test --workspace -- --test-threads=4`),
+  which an operator has to hand-orchestrate with a
+  no-output knob. A new pure-bash runbook
+  `scripts/workspace-parallel-proof-three.sh`
+  invokes the in-CI
+  `run_three_consecutive_clean_gameplay_lib_test_runs`
+  integration test STW-030 shipped 3 times
+  back-to-back (in 3 separate `cargo test -p
+  rbp-autotrain --test workspace_parallel_proof_three
+  -- --test-threads=1` invocations) AND invokes
+  the existing 3-consecutive *full-workspace* runbook
+  once, captures each invocation's stdout + stderr +
+  exit code into a per-invocation
+  `logs/workspace-parallel-proof-three/<UTC-ISO>/invocation-{1,2,3}/{stdout,stderr,exit}.txt`
+  layout, and emits a one-line
+  `workspace parallel proof three complete:
+  gameplay_runs=3/3 full_workspace_run_exit=0`
+  headline a CI worker can `grep ^workspace`.
+  Knobs: `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET=1`
+  mutes the per-invocation stdout echo without
+  changing the exit-code contract. Companion script
+  exits 3 on any failed invocation, exit 1 on
+  script-internal error. Owner files:
+  `scripts/workspace-parallel-proof-three.sh`
+  (new pure-bash runbook — mirrors the
+  `scripts/workspace-parallel-proof.sh` +
+  `scripts/testnet-live-proof.sh` shape; script
+  exists + is executable + parses with `bash -n` +
+  refuses to run on a missing workspace with
+  exit 3),
+  `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+  (extend the existing STW-030 file with a 3rd
+  sub-test `operator_runnable_three_script_exists_and_parses`
+  that greps the new runbook for the pinned
+  `workspace parallel proof three complete:`
+  headline + asserts the script parses with
+  `bash -n` + asserts the script lists
+  `run_three_consecutive_clean_gameplay_lib_test_runs`
+  as a sub-invocation),
+  `crates/autotrain/tests/script_shape.rs` (add
+  one new pin
+  `workspace_parallel_proof_three_script_exists_and_parses`
+  that mirrors the existing
+  `workspace_parallel_proof_script_*` pins),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the `verification:workspace-parallel`
+  P0-row as fully closed with a one-line note
+  in the P0 retirement list). Scope boundary:
+  does NOT change the
+  `scripts/workspace-parallel-proof.sh`
+  shape (the new runbook is a *consumer* of
+  the existing one, not a refactor);
+  does NOT change the
+  `run_three_consecutive_clean_gameplay_lib_test_runs`
+  lib-test (the new runbook invokes it
+  3 times as-is, a regression in the
+  lib-test fails the runbook in the same
+  CI step); does NOT introduce a Python /
+  `jq` dependency (the runbook is pure
+  bash + `cargo test` + `bash -n`);
+  does NOT touch the
+  `crates/autotrain/tests/workspace_parallel_proof.rs`
+  shape contract (the existing 4 sub-tests
+  stay as-is); does NOT change the
+  `--test-threads=4` /
+  `--skip=runbook_run_exits_zero_with_single_clean_workspace_run`
+  concurrency contract the script and the
+  existing integration test pin. Verification
+  commands:
+  `cargo test -p rbp-autotrain --test
+  workspace_parallel_proof_three` (the 3
+  sub-tests pass — 2 existing + 1 new),
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the 1 new shape pin passes),
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`,
+  `bash -n
+  scripts/workspace-parallel-proof-three.sh`.
+  Required tests: 1 new lib test
+  `operator_runnable_three_script_exists_and_parses`
+  in
+  `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+  + 1 new shape pin
+  `workspace_parallel_proof_three_script_exists_and_parses`
+  in `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: `STW-030` (the in-CI
+  3-consecutive gameplay-only proof the new
+  runbook invokes), `STW-020` (the
+  `bust_prevents_next_deterministic` 64-seed
+  lib test whose existence makes the
+  STW-030 3-consecutive proof defensible).
+  Estimated scope: S. Completion signal:
+  `cargo test -p rbp-autotrain --test
+  workspace_parallel_proof_three` is green
+  with 3 sub-tests passing; the new
+  `scripts/workspace-parallel-proof-three.sh`
+  is on disk + executable + parses with
+  `bash -n`; a CI dashboard can `grep
+  ^workspace parallel proof three complete:`
+  the new runbook's `SUMMARY.txt`; the
+  `verification:workspace-parallel` hinge
+  is *fully* retired from
+  `steward/HINGES.md` /
+  `steward/HAZARDS.md` /
+  `steward/DRIFT.md` by the next
+  `auto steward --report-only` pass.
+  **`lens:` Eng (closes the last
+  un-closed mainnet-block hinge) + CEO
+  (the last rung of un-cited
+  completion-signal evidence the testnet
+  north star names).**
+
+- [ ] **[P0] `STW-038` `crates/autotrain/src/mode.rs` grouped
+  `Usage:` block + `crates/autotrain/src/error.rs` typed
+  `TrainerError` enum with a `to_pinned_line(&self) -> String`
+  dashboard-greppable error surface.** Cuts operator
+  cognitive load 4x and gives every error path a
+  stable machine-readable shape. Two changes in one
+  slice: (a) the `Usage:` eprintln! line in
+  `crates/autotrain/src/mode.rs` is replaced with a
+  grouped `Usage:` block (4 groups — `TRAIN:`
+  `smoke / fast / fast2 / fast3`, `EVALUATE:`
+  `bench / compare / compare3`, `REPLAY:`
+  `replay`, `PUBLISH:` `publish / verify-receipt /
+  publish-remote / verify-remote / publish-index /
+  verify-index / publish-index-remote /
+  verify-index-remote`, `UTIL:` `status / reset` —
+  the grouping is a *non-breaking* cosmetic change
+  to the operator's first 30 seconds; every
+  existing subcommand keeps its existing flag
+  shape, exit code, and stdout/stderr contract,
+  and the existing
+  `Usage:` eprintln! 14+ subcommands in
+  alphabetical order is preserved as a comment
+  for grep-back-compat), and (b) a new
+  `crates/autotrain/src/error.rs` module
+  defines a `TrainerError` enum (variants:
+  `NoBlueprint`, `NoDatabase`, `NoBucket`,
+  `RedReceipt(String)`, `RedBundle(String)`,
+  `RedIndex(String)`, `MissingArg(&'static str)`,
+  `BadArg { kind: &'static str, detail: String }`,
+  `Io(std::io::Error)`, `AwsCli`, `Internal(String)`)
+  with a `to_pinned_line(&self) -> String` method
+  that emits a stable
+  `trainer error: kind=<kind> detail=<detail>`
+  shape (the `kind` is one of the 10 pinned
+  enum-`as_str` strings a downstream dashboard
+  scraper greps; the `detail` is the human-readable
+  cause). The existing per-arm eprintln! error
+  lines (e.g. the
+  `live_proof publish error: receipt is red: ...`
+  line STW-032 ships) are *additionally* routed
+  through `TrainerError::to_pinned_line` so a
+  regression in an error's pinned shape fails the
+  new lib test at the same CI step that fails a
+  downstream dashboard scraper. Owner files:
+  `crates/autotrain/src/error.rs` (new module
+  with the `TrainerError` enum + the
+  `to_pinned_line` method + the 10-variant
+  `as_str` pinner + 12 lib tests pinning the
+  per-variant `to_pinned_line` shape and the
+  per-variant `as_str` return value),
+  `crates/autotrain/src/lib.rs` (re-export
+  `TrainerError`),
+  `crates/autotrain/src/mode.rs` (replace the
+  single-line `Usage:` eprintln! with a grouped
+  5-section `Usage:` block; the 4 new
+  eprintln! lines are: `Usage: trainer
+  <SUBCOMMAND> [args]`, `  TRAIN:      smoke |
+  fast | fast2 | fast3`, `  EVALUATE:  bench |
+  compare | compare3`, `  REPLAY:     replay
+  <transcript>`, `  PUBLISH:    publish |
+  verify-receipt | publish-remote | verify-remote
+  | publish-index | verify-index |
+  publish-index-remote | verify-index-remote`,
+  `  UTIL:       status | reset`; the existing
+  alphabetical-order 15-subcommand list is
+  preserved as a `// back-compat:` comment block
+  above the grouped Usage eprintln! so a
+  regression in the alphabetical-order comment
+  fails `cargo doc`),
+  `crates/autotrain/src/mode.rs` (add an
+  `--error-shape-test` argv flag that prints the
+  10 pinned `TrainerError::as_str` strings to
+  stdout in a stable alphabetical order, so a
+  CI dashboard scraper can `grep ^trainer error
+  kind=` the shape without exercising every
+  error path),
+  `crates/autotrain/src/publish.rs`
+  (route the existing
+  `live_proof publish error: receipt is red: ...`
+  line through `TrainerError::RedReceipt(...).to_pinned_line()`
+  — the existing pinned error line is preserved
+  in a comment for grep-back-compat; the
+  `to_pinned_line` is *additionally* emitted
+  on the same stderr line, so a regression in
+  either shape fails the new lib test),
+  `crates/autotrain/src/publish_remote.rs`
+  (mirror: route the
+  `live_proof publish_remote error: ...` lines
+  through `TrainerError`),
+  `crates/autotrain/src/publish_index.rs`
+  (mirror: route the
+  `live_proof publish_index error: ...` lines
+  through `TrainerError`),
+  `crates/autotrain/src/publish_index_remote.rs`
+  (mirror: route the
+  `live_proof publish_index_remote error: ...`
+  lines through `TrainerError`),
+  `IMPLEMENTATION_PLAN.md` (this row). Scope
+  boundary: does NOT change the existing
+  per-arm `live_proof ...` error-line text
+  (the new `to_pinned_line` is emitted
+  *additionally* on the same stderr line, so
+  a regression in either shape fails CI);
+  does NOT change the existing exit-code
+  contract (every error variant maps to the
+  same exit code the existing per-arm
+  eprintln! returns); does NOT change the
+  per-subcommand flag shape, the per-subcommand
+  stdout shape, or the per-subcommand
+  `live_proof ...` headline prefix;
+  does NOT change the room protocol, the
+  `Schema` contracts, the autotrain
+  pipeline, the K-means cluster counts, the
+  v1 / v2 / v3 / v4 named baselines, or any
+  `trainer --*` CLI. Verification commands:
+  `cargo test -p rbp-autotrain --lib` (the 12
+  new lib tests in `error.rs` pass),
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`. Required tests: 12 new
+  lib tests in
+  `crates/autotrain/src/error.rs::tests`
+  pinning the per-variant `to_pinned_line`
+  shape + per-variant `as_str` return value;
+  the existing integration tests for
+  `--publish`, `--publish-remote`,
+  `--publish-index`, `--publish-index-remote`
+  must continue to pass (a regression in the
+  pinned error-line shape fails them).
+  Dependencies: `STW-032` (the
+  `PublishError` enum the new
+  `TrainerError::RedBundle` mirrors),
+  `STW-033` (the
+  `PublishRemoteError` enum the new
+  `TrainerError::RedReceipt` mirrors),
+  `STW-034` (the
+  `PublishIndexError` enum the new
+  `TrainerError::RedIndex` mirrors),
+  `STW-035` (the
+  `PublishIndexRemoteError` enum the new
+  `TrainerError::RedIndex` mirrors). Estimated
+  scope: M. Completion signal:
+  `cargo test -p rbp-autotrain --lib` is green
+  with 12 new lib tests passing; a CI
+  dashboard can `grep ^trainer error kind=`
+  every error path; the grouped `Usage:`
+  block is visible to a first-time operator
+  running `trainer --help`; the
+  `TrainerError` shape is greppable from a
+  single pinned prefix. **`lens:` Design
+  (operator-UX / error-surface audit).**
+
+- [ ] **[P1] `STW-039` `crates/autotrain/src/observe.rs` typed
+  `Step` enum + `StepLogger` emitting a one-line
+  `trainer step: name=<name> kind=<kind>
+  duration_ms=<ms> exit=<0|1|2>` per-step
+  machine-readable chain timeline.** Gives the
+  receipt chain a *real* machine-readable
+  timeline a CI auditor can scrape. The
+  STW-019 / STW-023 / STW-028 / STW-032 /
+  STW-033 / STW-034 / STW-035 receipt chain
+  writes a `SUMMARY.txt` headline line per
+  step, but the headline line is *human-only*
+  and a CI worker has no way to extract
+  per-step duration, exit code, or chain
+  timeline without re-parsing prose. A new
+  `crates/autotrain/src/observe.rs` module
+  defines a typed `Step` enum (variants
+  mirror the 15 subcommands: `Smoke`,
+  `Status`, `Bench`, `Compare`, `Compare3`,
+  `Replay`, `VerifyReceipt`, `Publish`,
+  `VerifyBundle`, `PublishRemote`,
+  `VerifyRemote`, `PublishIndex`,
+  `VerifyIndex`, `PublishIndexRemote`,
+  `VerifyIndexRemote`) and a `StepLogger`
+  that, on `Mode::*` dispatch, records the
+  `Instant::now()` start time, the `Step`
+  variant, the `name` (the receipt basename
+  or the bench JSON line), and on drop / on
+  explicit `finish(exit_code)` emits a single
+  stderr line in the shape
+  `trainer step: name=<name> kind=<kind>
+  duration_ms=<ms> exit=<0|1|2>` (the `kind`
+  is the `Step::as_str()` pinned string, the
+  `duration_ms` is `u128` from the elapsed
+  `Instant`, the `exit` is the caller's
+  `ExitCode`). The `StepLogger` is a
+  no-op-by-default constructor (the existing
+  per-step stdout / stderr / `SUMMARY.txt`
+  shape is preserved), and is *enabled* by
+  the `RBP_TRAINER_OBSERVE=1` env knob a CI
+  worker sets. Owner files:
+  `crates/autotrain/src/observe.rs` (new
+  module with the `Step` enum + the
+  `StepLogger` struct + the
+  `trainer_step_line` pinned shape + 8 new
+  lib tests pinning the per-variant
+  `as_str` + the per-line shape + the
+  `duration_ms` rounding + the `exit`
+  variant mapping),
+  `crates/autotrain/src/lib.rs` (re-export
+  `Step` + `StepLogger`),
+  `crates/autotrain/src/mode.rs` (wrap the
+  existing `Mode::*` dispatch in a
+  `StepLogger::new(self.kind())?` + on each
+  `Mode::*` arm's `Ok(())` / `Err(e)` branch
+  call `step.finish(exit_code)`; the
+  `RBP_TRAINER_OBSERVE=0` default is a
+  no-op, so a regression in the per-line
+  shape fails the new lib test without
+  changing the existing per-step stdout /
+  stderr / `SUMMARY.txt` shape),
+  `crates/autotrain/src/mode.rs` (add a
+  `--observe-test` argv flag that runs a
+  no-op `Smoke` step + prints the 15
+  pinned `Step::as_str` strings to stdout
+  in a stable alphabetical order, so a CI
+  dashboard scraper can `grep ^trainer step
+  kind=` the shape without exercising every
+  mode),
+  `IMPLEMENTATION_PLAN.md` (this row). Scope
+  boundary: does NOT change the existing
+  per-step `live_proof ...` headline
+  (the new `trainer step: ...` line is
+  emitted *additionally* on the same stderr
+  line, so a regression in either shape
+  fails CI); does NOT change the existing
+  per-step `SUMMARY.txt` shape (the
+  `StepLogger` is a no-op-by-default and
+  emits to stderr, not to `SUMMARY.txt`);
+  does NOT change the per-subcommand flag
+  shape, the per-subcommand stdout shape,
+  or any `trainer --*` CLI; does NOT
+  change the room protocol, the `Schema`
+  contracts, the autotrain pipeline, the
+  K-means cluster counts, the v1 / v2 / v3
+  / v4 named baselines. Verification
+  commands:
+  `cargo test -p rbp-autotrain --lib` (the 8
+  new lib tests in `observe.rs` pass),
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`. Required tests: 8 new
+  lib tests in
+  `crates/autotrain/src/observe.rs::tests`
+  pinning the per-variant `as_str` + the
+  per-line shape + the `duration_ms`
+  rounding + the `exit` variant mapping.
+  Dependencies: `STW-035` (the v9
+  `PublishIndexRemote` + `VerifyIndexRemote`
+  subcommands the `Step` enum mirrors).
+  Estimated scope: S. Completion signal:
+  `cargo test -p rbp-autotrain --lib` is
+  green with 8 new lib tests passing; a
+  CI dashboard can
+  `RBP_TRAINER_OBSERVE=1 trainer
+  --bench ... 2>&1 | grep ^trainer step`
+  and receive one line per step; the
+  `Step` shape is greppable from a single
+  pinned prefix. **`lens:` Design
+  (observability audit).**
+
+- [ ] **[P1] `STW-040` `README.md` `## Try it now` + `##
+  Public dashboard` first-class sections + a
+  one-command `scripts/replay-locally.sh` operator
+  shim that exercises the STW-016 + STW-019
+  runbook chain end-to-end with no Postgres.** The
+  first impression. A first-time visitor opening
+  `README.md` currently sees: (1) a `Visual Tour`
+  with 2 training-curve screenshots, (2) a
+  `Features` bullet list, (3) a `Quick Start` with
+  a Cargo.toml + Rust code snippet. None of those
+  answer the visitor's first question: "can I see
+  the bot play?" The new sections: (a)
+  `## Try it now` (between `Features` and
+  `Quick Start`, with 4 bullets — `1. See a
+  public benchmark: <dashboard URL placeholder>`,
+  `2. Replay a hand locally: ./scripts/replay-locally.sh
+  crates/gameroom/tests/fixtures/transcripts/transcript-001.json`,
+  `3. Run the full testnet launch proof: see
+  scripts/testnet-live-proof.md`, `4. Read the
+  robopoker testnet north star: see
+  genesis/plans/000-ceo-testnet-roadmap.md`),
+  (b) `## Public dashboard` (a `<!-- v10 placeholder
+  -->` block that the v10 ships with a real
+  Cloudflare Pages URL; the placeholder is a
+  `RBP_DASHBOARD_DEPLOYED_URL` env knob the
+  autotrain test harness sets; the README's
+  `## Public dashboard` line greps as
+  `Public dashboard: <URL>` a dashboard-readiness
+  check can `grep -q 'Public dashboard:'
+  README.md` against), and (c) a new pure-bash
+  `scripts/replay-locally.sh` operator shim that
+  takes one positional arg `<transcript-path>`,
+  validates the path is a checked-in fixture under
+  `crates/gameroom/tests/fixtures/transcripts/`
+  (refuses to run with exit 3 on a missing
+  fixture, refuses to run with exit 4 on a
+  corrupt JSON, refuses to run with exit 5 on
+  no positional arg), invokes the existing
+  STW-016 `trainer --replay <path>` (which
+  reads the transcript + prints the rendered
+  action sequence to stdout), and prints a
+  one-line `replay locally complete: <basename>
+  bytes=<bytes> hands=<N>` headline a CI
+  dashboard can `grep ^replay locally` the log.
+  Owner files: `README.md` (add the two new
+  sections; the existing `Visual Tour` +
+  `Features` + `Quick Start` + `Crate Overview`
+  + `Architecture` sections are preserved
+  verbatim),
+  `scripts/replay-locally.sh` (new pure-bash
+  shim; mirrors the
+  `scripts/testnet-live-proof.sh` shape;
+  script exists + is executable + parses with
+  `bash -n` + refuses to run on a missing /
+  corrupt / no-arg fixture),
+  `crates/gameroom/tests/fixtures/transcripts/transcript-001.json`
+  (new checked-in fixture: a 1-hand
+  `Fish-vs-Fish` heads-up transcript in the
+  STW-014 shape, byte-stable, deterministic;
+  the STW-016 `trainer --replay` already
+  re-renders a hand-written fixture in the
+  existing lib tests, so this fixture is
+  the *operator-facing* byte-stable example
+  the README points at),
+  `crates/autotrain/tests/script_shape.rs`
+  (add 3 new shape pins:
+  `replay_locally_script_exists_and_parses`
+  + `replay_locally_script_refuses_missing_arg`
+  + `replay_locally_doc_references_runbook_chain`),
+  `IMPLEMENTATION_PLAN.md` (this row). Scope
+  boundary: does NOT introduce a Python /
+  `jq` / `cargo install` dependency (the
+  shim is pure bash + `trainer --replay`,
+  the latter is a no-DB read-only mode the
+  existing autotrain binary already ships);
+  does NOT change the `Transcript` JSON
+  shape (a shape drift fails
+  `trainer --replay` at the same CI step);
+  does NOT change the
+  `crates/gameroom/tests/fixtures/transcripts/transcript-001.json`
+  byte-stable shape (a byte drift fails a
+  new lib test the slice ships with);
+  does NOT add a Node / npm dependency
+  to render the dashboard (the dashboard
+  is plain HTML + vanilla JS the v10
+  ships); does NOT change the `Visual
+  Tour` screenshot URLs (the existing
+  `https://github.com/user-attachments/assets/...`
+  URLs are preserved); does NOT change
+  the `Quick Start` Cargo.toml + Rust
+  snippet (the existing `use rbp::cards::*;
+  use rbp::gameplay::*` snippet is
+  preserved). Verification commands:
+  `cargo test -p rbp-gameroom --features
+  database --tests --lib` (the new fixture
+  load + the byte-stable lib test pass),
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the 3 new shape pins
+  pass), `cargo test --workspace --
+  --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`,
+  `bash -n scripts/replay-locally.sh`,
+  `./scripts/replay-locally.sh
+  crates/gameroom/tests/fixtures/transcripts/transcript-001.json`
+  (exits 0 + prints the rendered action
+  sequence + the pinned `replay locally
+  complete: ...` headline). Required
+  tests: 1 new lib test in
+  `crates/gameroom/tests/fixtures/transcripts/transcript-001.json`
+  (the byte-stable load +
+  `to_json` + `from_str` round-trip) + 3
+  new shape pins in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: `STW-016` (the
+  `trainer --replay <path>` mode the shim
+  invokes), `STW-014` (the `Transcript`
+  bundle shape the fixture ships in),
+  `STW-015` (the
+  `read_from_path` / `rebuild_action_sequence`
+  / `replay_to_path` public surface the
+  fixture is byte-stable against).
+  Estimated scope: S. Completion signal:
+  `cargo test --workspace -- --test-threads=4`
+  is green; the new
+  `scripts/replay-locally.sh` is on disk +
+  executable + parses with `bash -n`; a
+  CI dashboard can `grep ^replay locally
+  complete:` the shim's stdout; the
+  `README.md` `## Try it now` section is
+  visible to a first-time visitor;
+  the `Public dashboard: <URL>` line
+  in `README.md` is greppable from a
+  dashboard-readiness check. **`lens:`
+  Design (the README's first-time-visitor
+  legibility audit) + CEO (the testnet
+  north star's "publicly visible"
+  requirement).**
+
+- [ ] **[P1] `STW-041` Close the `STW-001` deferred row
+  with a single operator decision: retire the
+  "regenerate executable planning surface"
+  framing as already satisfied by the
+  `genesis/plans/000-ceo-testnet-roadmap.md` +
+  `IMPLEMENTATION_PLAN.md` pair, and add a
+  checked-in `genesis/AUTHORED-QUEUE.md`
+  operator-owned backstop queue the auto-loop
+  can fall back to if `gbrain doctor` is
+  unconfigured.** Closes the last
+  `verification:workspace-parallel`-shaped
+  decision loop the testnet north star does
+  not actually need. The CEO sign-off's testnet
+  north star is "a public, reproducible
+  benchmark with replayable transcripts"; the
+  `STW-001` row's premise ("regenerate
+  executable planning surface") is a
+  corpus-regen / gbrain-DB concern that has
+  not blocked any of the 35 shipped STW rows
+  and does not block the v10 dashboard. The
+  *new* framing: the current `genesis/` +
+  `IMPLEMENTATION_PLAN.md` surface is the
+  authoritative executable surface, and the
+  `STW-001` row should be retired as
+  satisfied by that surface. The companion
+  deliverable: a checked-in
+  `genesis/AUTHORED-QUEUE.md` (a small,
+  hand-authored 5-row queue the operator
+  owns in lieu of a `gbrain` DB) that
+  mirrors the auto-loop's claimable-row
+  contract (each row has owner files, scope
+  boundary, verification commands, completion
+  signal) and acts as the *fallback queue* if
+  `gbrain` is unconfigured. Owner files:
+  `IMPLEMENTATION_PLAN.md` (replace the
+  `## Deferred items (need operator
+  decision before promotion)` `STW-001`
+  row with a one-line "RETIRED 2026-06-04
+  by STW-041: current `genesis/` +
+  `IMPLEMENTATION_PLAN.md` surface is
+  the authoritative executable surface,
+  gbrain DB is a nice-to-have, not a
+  testnet blocker" marker),
+  `genesis/AUTHORED-QUEUE.md` (new checked-in
+  hand-authored fallback queue — 5 rows
+  max, each row scoped to a single
+  shippable slice; the rows are *not*
+  proposed plan content, they are
+  operator-owned fallbacks the auto-loop
+  can claim if `gbrain doctor` exits
+  non-zero; the file's preamble notes
+  "this is the operator-owned fallback
+  queue; `gbrain` is the primary
+  queue-authoring surface when
+  configured; this file is the queue
+  the auto-loop reads when `gbrain
+  doctor` is unconfigured"),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v10 follow-on as promoted
+  with a one-line note in the Goals
+  section; the STW-041 row is the
+  *companion* to the v10 row, not a
+  substitute). Scope boundary: does NOT
+  introduce a competing planning
+  surface (the `genesis/` +
+  `IMPLEMENTATION_PLAN.md` surface is
+  the *primary* surface, the
+  `AUTHORED-QUEUE.md` is a *fallback*
+  queue the operator owns);
+  does NOT change the `STW-007`
+  deferred row (the `.gbrain-source`
+  sign-off is a separate operator
+  decision, kept as-is in the deferred
+  section);
+  does NOT change the v1 / v2 / v3 / v4
+  named baselines, the
+  `CFR_TREE_COUNT_NLHE` baseline, the
+  K-means cluster counts, the autotrain
+  pipeline, the room protocol, the
+  `Schema` contracts, or any
+  `trainer --*` CLI. Verification
+  commands: `git diff --
+  IMPLEMENTATION_PLAN.md
+  genesis/AUTHORED-QUEUE.md` (the
+  diff is the STW-041 row + the
+  AUTHORED-QUEUE.md file content),
+  `cargo test --workspace --
+  --test-threads=4` (the v10 / v8 / v7
+  / v6 / STW-001 retirement does not
+  change the autotrain pipeline),
+  `cargo check --workspace`,
+  `cargo fmt --check`. Required tests:
+  none — STW-041 is a planning-surface
+  retirement, not a code change.
+  Dependencies: operator sign-off on
+  the `STW-001` retirement framing.
+  Estimated scope: XS. Completion
+  signal: the `STW-001` row in
+  `IMPLEMENTATION_PLAN.md` is marked
+  RETIRED with a one-line note; the
+  `genesis/AUTHORED-QUEUE.md` file is
+  on disk + the auto-loop can read it
+  as a fallback queue when `gbrain
+  doctor` is unconfigured; the
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  v10 follow-on is marked promoted.
+  **`lens:` CEO (a planning-surface
+  decision the testnet north star
+  does not need) + Eng (closes the
+  last un-closed deferred-decision
+  hinge).**
