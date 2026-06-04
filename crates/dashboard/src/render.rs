@@ -39,6 +39,13 @@ use rbp_autotrain::PublishIndex;
 /// projects it through this struct. The fields mirror
 /// the spec's `GET /bench/:id` pin
 /// (`blueprint` / `baseline` / `mbb_per_100`).
+///
+/// STW-042 extends this projection with a
+/// [`BenchCardFields::from_compare3`] constructor that
+/// builds the column set a [`Compare3SubReport`] would
+/// render — a `BenchReport` and a `Compare3SubReport`
+/// render with the same column order, so the per-card
+/// sub-report column set is reuse, not a new shape.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BenchCardFields {
     /// The receipt basename (e.g.
@@ -196,8 +203,251 @@ pub fn render_index_table(index: &PublishIndex) -> String {
     s
 }
 
-/// HTML-escape a `&str` for safe interpolation into a
-/// `<td>` / `<dt>` / `<h2>` cell. Replaces the five
+/// STW-042: dashboard-side typed parse of the
+/// `Compare3Report` JSON line the `trainer --compare3`
+/// arm emits. The autotrain's `Compare3Report` does
+/// not derive `Deserialize` (its `to_json` is a
+/// hand-rolled `format!` rather than a `serde`
+/// re-emit), so the dashboard ships its own thin
+/// typed-parse shape that mirrors the autotrain's
+/// `to_json` field order exactly. A drift between
+/// the autotrain's `to_json` and this struct's
+/// `Deserialize` fails the
+/// `compare3_fixture_renders_bench_card` integration
+/// test at the same CI step a downstream
+/// `trainer --compare3 --json` consumer would
+/// silently break.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Compare3Report {
+    /// `K`: number of hands played per pair.
+    pub hands_per_pair: usize,
+    /// Big-blind chip size the compare3 used to
+    /// compute mbb. The autotrain serialiser emits
+    /// this as a JSON number; the field is `u64`
+    /// because chips are non-negative on the bench.
+    pub blind: u64,
+    /// The v1 `DatabasePlayer` sub-report.
+    pub v1: Compare3SubReport,
+    /// The v2 `DatabasePlayer2` sub-report.
+    pub v2: Compare3SubReport,
+    /// The v3 `DatabasePlayer3` sub-report.
+    pub v3: Compare3SubReport,
+    /// `v1.mbb_per_100 - v2.mbb_per_100`. The sign
+    /// is the v1-vs-v2 winner direction.
+    pub v1_v2_delta: f64,
+    /// `v2.mbb_per_100 - v3.mbb_per_100`.
+    pub v2_v3_delta: f64,
+    /// `v3.mbb_per_100 - v1.mbb_per_100`.
+    pub v3_v1_delta: f64,
+    /// The headline: the v1 / v2 / v3 config with
+    /// the strictly highest per-config `mbb_per_100`,
+    /// or `Tie` if the top two are within
+    /// tolerance. The `serde` rename pins the
+    /// autotrain's lowercase string serialization
+    /// (`"v1"` / `"v2"` / `"v3"` / `"tie"`).
+    pub ranked_winner: Compare3Winner,
+}
+
+/// STW-042: per-config sub-report inside a
+/// [`Compare3Report`]. Mirrors the autotrain's
+/// `Compare3SubReport` `to_json` shape verbatim
+/// (`hands` / `wins` / `losses` / `net_chips` /
+/// `mbb_per_100` / `mbb_ci95` / `win_rate` /
+/// `win_rate_ci95`) so a future `Compare3SubReport`
+/// field addition in the autotrain fails the
+/// `compare3_fixture_round_trips_via_serde` lib test
+/// at the same CI step a downstream dashboard scraper
+/// would silently break.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Compare3SubReport {
+    /// `2 * K`: total hands this config played.
+    pub hands: usize,
+    /// Hands this config won outright.
+    pub wins: usize,
+    /// Hands that ended with this config's
+    /// `won()` strictly negative.
+    pub losses: usize,
+    /// Sum of this config's `won()` across the
+    /// `2 * K` hands, in chips.
+    pub net_chips: i64,
+    /// `mean_chips_per_hand * 100 / B_BLIND`.
+    pub mbb_per_100: f64,
+    /// 95% CI half-width on the per-hand mean chip
+    /// delta, in mbb.
+    pub mbb_ci95: f64,
+    /// `wins / (2 * K)`, the simple proportion of
+    /// hands won.
+    pub win_rate: f64,
+    /// 95% CI half-width on `win_rate`.
+    pub win_rate_ci95: f64,
+}
+
+/// STW-042: ranked headline a `Compare3Report`
+/// declares. The serde rename pins the autotrain's
+/// lowercase string serialization (`"v1"` / `"v2"` /
+/// `"v3"` / `"tie"`) so a `serde_json::from_str` of
+/// the autotrain's `to_json` output round-trips
+/// without error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Compare3Winner {
+    /// The v1 config had the strictly highest
+    /// per-config `mbb_per_100`.
+    V1,
+    /// The v2 config had the strictly highest
+    /// per-config `mbb_per_100`.
+    V2,
+    /// The v3 config had the strictly highest
+    /// per-config `mbb_per_100`.
+    V3,
+    /// The top two per-config `mbb_per_100`
+    /// values are within tolerance.
+    Tie,
+}
+
+impl Compare3Winner {
+    /// Stable lowercase string the
+    /// `to_json`-shaped JSON field uses. Mirrors
+    /// `rbp_autotrain::Compare3Winner::as_str` so
+    /// the two stay drop-in compatible.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+            Self::Tie => "tie",
+        }
+    }
+}
+
+impl BenchCardFields {
+    /// STW-042: build the per-card column set a
+    /// `Compare3SubReport` would render — the
+    /// `blueprint` / `baseline` / `mbb_per_100` /
+    /// `ci_95` / `win_rate` column set the existing
+    /// `render_bench_card` consumes. The constructor
+    /// exists so a `BenchReport` and a
+    /// `Compare3SubReport` render with the same
+    /// column order; the per-card difference lives
+    /// in the surrounding card (the `render_bench_card`
+    /// for a `BenchReport` vs. the
+    /// `render_compare3_card` for a `Compare3Report`),
+    /// not in the per-card column shape.
+    pub fn from_compare3(
+        receipt_basename: &str,
+        config: &str,
+        baseline: &str,
+        sub: &Compare3SubReport,
+    ) -> Self {
+        Self {
+            receipt_basename: receipt_basename.to_string(),
+            blueprint: config.to_string(),
+            baseline: baseline.to_string(),
+            mbb_per_100: sub.mbb_per_100,
+            mbb_ci95: sub.mbb_ci95,
+            win_rate: sub.win_rate,
+        }
+    }
+}
+
+/// STW-042: render a `Compare3Report`-shaped HTML
+/// card. The output is a self-contained
+/// `<article class="bench-card bench-card--compare3">…</article>`
+/// block (a `bench-card` class the existing
+/// `render_bench_card` shares + a `bench-card--compare3`
+/// modifier so a future style refactor can target
+/// compare3 cards independently) that lists each of
+/// v1 / v2 / v3 in the `blueprint` cell, then a
+/// per-pair `<dl>` with the three pairwise
+/// `delta_mbb_per_100` values, then the
+/// `ranked_winner` headline. The `render_bench_card`
+/// emitter is not extended — compare3 cards are a
+/// distinct visual element with three sub-cards
+/// + three pairwise deltas, not a single
+/// `BenchReport`-shaped card.
+///
+/// The card's HTML shape is pinned by the
+/// `compare3_card_has_pinned_sub_reports_and_deltas`
+/// lib test: the `<h2>` must carry the
+/// `receipt_basename`; the sub-report order must be
+/// v1 / v2 / v3 (in that order); the three pairwise
+/// `<dt>`s must appear in v1-vs-v2 / v2-vs-v3 /
+/// v3-vs-v1 order; the `ranked_winner` value must
+/// appear in the body. A regression in the column
+/// order or the sub-report order fails CI at the
+/// same step a downstream dashboard scraper would
+/// silently break.
+pub fn render_compare3_card(receipt_basename: &str, report: &Compare3Report) -> String {
+    let basename = html_escape(receipt_basename);
+    let basename_href = url_encode(receipt_basename);
+    let winner = report.ranked_winner.as_str();
+    let winner_html = html_escape(winner);
+    let v1 = BenchCardFields::from_compare3(receipt_basename, "v1", "preflop", &report.v1);
+    let v2 = BenchCardFields::from_compare3(receipt_basename, "v2", "preflop", &report.v2);
+    let v3 = BenchCardFields::from_compare3(receipt_basename, "v3", "preflop", &report.v3);
+    format!(
+        concat!(
+            "<article class=\"bench-card bench-card--compare3\">\n",
+            "  <h2 class=\"bench-card__title\">{basename}</h2>\n",
+            "  <p class=\"bench-card__winner\">ranked_winner: <strong>{winner}</strong></p>\n",
+            "  <div class=\"bench-card__subcards\">\n",
+            "    <div class=\"bench-card__subcard\">{v1}</div>\n",
+            "    <div class=\"bench-card__subcard\">{v2}</div>\n",
+            "    <div class=\"bench-card__subcard\">{v3}</div>\n",
+            "  </div>\n",
+            "  <h3 class=\"bench-card__deltas-title\">pairwise deltas</h3>\n",
+            "  <dl class=\"bench-card__deltas\">\n",
+            "    <dt>v1_v2_delta</dt><dd>{d12:+.4} mbb/100</dd>\n",
+            "    <dt>v2_v3_delta</dt><dd>{d23:+.4} mbb/100</dd>\n",
+            "    <dt>v3_v1_delta</dt><dd>{d31:+.4} mbb/100</dd>\n",
+            "  </dl>\n",
+            "  <p class=\"bench-card__links\">\n",
+            "    <a class=\"bench-card__link\" href=\"/bench/{basename_href}\">Open replay</a>\n",
+            "  </p>\n",
+            "</article>\n"
+        ),
+        basename = basename,
+        winner = winner_html,
+        v1 = render_bench_card(&v1),
+        v2 = render_bench_card(&v2),
+        v3 = render_bench_card(&v3),
+        d12 = report.v1_v2_delta,
+        d23 = report.v2_v3_delta,
+        d31 = report.v3_v1_delta,
+        basename_href = basename_href,
+    )
+}
+
+/// The pinned sentinel `:id` the dashboard's
+/// `GET /bench/:id` handler accepts for the
+/// committed compare3 demo-data fallback. A
+/// `GET /bench/<this-id>` against a fresh checkout
+/// (no live `INDEX.json` entry matches) returns
+/// 200 + a populated compare3 card a stranger
+/// can read. The string is intentionally a
+/// non-receipt-basename sentinel so a real
+/// `INDEX.json` entry never shadows it.
+pub const COMPARE3_FIXTURE_ID: &str = "compare3-fixture";
+
+/// Resolve the absolute path of the committed
+/// `tests/fixtures/compare3-fixture.json` fixture.
+/// Walk from `CARGO_MANIFEST_DIR` (the
+/// `crates/dashboard/` directory) into
+/// `tests/fixtures/compare3-fixture.json`. The
+/// function panics at startup if the file is
+/// missing (a `cargo build` of the dashboard
+/// crate is the authoritative pin on the file's
+/// existence).
+pub fn compare3_fixture_path() -> std::path::PathBuf {
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .join("tests")
+        .join("fixtures")
+        .join("compare3-fixture.json")
+}
+
+/// HTML-escape a `&str` for safe interpolation into
+/// a `<td>` / `<dt>` / `<h2>` cell. Replaces the five
 /// characters that change the parser state (`&` first
 /// to avoid double-escaping). Returns the input
 /// unchanged if no escape is needed.
@@ -388,6 +638,191 @@ mod tests {
             table.matches("Open replay").count(),
             1,
             "table must have exactly one `Open replay` link per entry"
+        );
+    }
+
+    // STW-042: 2 new lib tests pinning the
+    // compare3 card's per-row column order +
+    // sentinel shape:
+    //
+    // 1. `compare3_card_has_pinned_sub_reports_and_deltas`
+    //    — the `render_compare3_card` output must
+    //    contain the `compare3-fixture` basename +
+    //    the three sub-report `mbb_per_100` values
+    //    (v1 / v2 / v3 in that order) + the three
+    //    pairwise `delta_mbb_per_100` values
+    //    (v1-vs-v2 / v2-vs-v3 / v3-vs-v1 in that
+    //    order) + the `ranked_winner` value. A
+    //    regression in the sub-report order or the
+    //    delta order fails CI at the same step a
+    //    downstream dashboard scraper would silently
+    //    break.
+    // 2. `compare3_fixture_round_trips_via_serde` —
+    //    the
+    //    `crates/dashboard/tests/fixtures/compare3-fixture.json`
+    //    file `serde_json::from_str`'s into a
+    //    typed `Compare3Report` without error and
+    //    the `ranked_winner` ∈ `{V1, V2, V3, Tie}`.
+    //    A regression in the autotrain's
+    //    `Compare3Report::to_json` field shape
+    //    (a renamed field, a missing field) fails
+    //    this test at the same CI step a downstream
+    //    `trainer --compare3 --json` consumer would
+    //    silently break.
+
+    /// A byte-stable fixture matching the
+    /// autotrain's `Compare3Report::to_json` shape
+    /// (hand-authored, not produced by a
+    /// `trainer --compare3` run, so a fresh
+    /// `sha256sum` of the committed
+    /// `tests/fixtures/compare3-fixture.json`
+    /// matches the in-test fixture's digest).
+    fn compare3_fixture_report() -> Compare3Report {
+        Compare3Report {
+            hands_per_pair: 16,
+            blind: 2,
+            v1: Compare3SubReport {
+                hands: 32,
+                wins: 18,
+                losses: 14,
+                net_chips: 120,
+                mbb_per_100: 18.7500,
+                mbb_ci95: 4.1234,
+                win_rate: 0.5625,
+                win_rate_ci95: 0.0867,
+            },
+            v2: Compare3SubReport {
+                hands: 32,
+                wins: 16,
+                losses: 16,
+                net_chips: 24,
+                mbb_per_100: 3.7500,
+                mbb_ci95: 3.9876,
+                win_rate: 0.5000,
+                win_rate_ci95: 0.0884,
+            },
+            v3: Compare3SubReport {
+                hands: 32,
+                wins: 22,
+                losses: 10,
+                net_chips: 240,
+                mbb_per_100: 37.5000,
+                mbb_ci95: 5.0123,
+                win_rate: 0.6875,
+                win_rate_ci95: 0.0815,
+            },
+            v1_v2_delta: 15.0000,
+            v2_v3_delta: -33.7500,
+            v3_v1_delta: 18.7500,
+            ranked_winner: Compare3Winner::V3,
+        }
+    }
+
+    #[test]
+    fn compare3_card_has_pinned_sub_reports_and_deltas() {
+        let report = compare3_fixture_report();
+        let card = render_compare3_card(COMPARE3_FIXTURE_ID, &report);
+        // The basename must appear as the card's
+        // `<h2>`.
+        assert!(
+            card.contains(&format!(
+                "<h2 class=\"bench-card__title\">{COMPARE3_FIXTURE_ID}</h2>"
+            )),
+            "compare3 card must carry the receipt basename in the <h2>; got:\n{card}"
+        );
+        // The three sub-report `mbb_per_100`
+        // values must appear in v1 / v2 / v3 order
+        // (the `<dt>mbb_per_100</dt>` first
+        // occurrence is v1's, the second is v2's,
+        // the third is v3's).
+        let mbb_positions: Vec<usize> = card.match_indices("mbb_per_100").map(|(i, _)| i).collect();
+        assert_eq!(
+            mbb_positions.len(),
+            3,
+            "compare3 card must contain exactly 3 `mbb_per_100` cells (one per sub-report); got {mbb_positions:?} in:\n{card}"
+        );
+        // The three pinned sub-report headline
+        // values must appear in v1 / v2 / v3
+        // order.
+        let i_v1 = card.find("18.7500").expect("contains v1 mbb/100");
+        let i_v2 = card.find("3.7500").expect("contains v2 mbb/100");
+        let i_v3 = card.find("37.5000").expect("contains v3 mbb/100");
+        assert!(
+            i_v1 < i_v2 && i_v2 < i_v3,
+            "sub-report order must be v1 < v2 < v3; got: v1={i_v1} v2={i_v2} v3={i_v3}"
+        );
+        // The three pairwise `<dt>`s must appear
+        // in v1-vs-v2 / v2-vs-v3 / v3-vs-v1
+        // order.
+        let i_d12 = card.find("v1_v2_delta").expect("contains v1_v2_delta");
+        let i_d23 = card.find("v2_v3_delta").expect("contains v2_v3_delta");
+        let i_d31 = card.find("v3_v1_delta").expect("contains v3_v1_delta");
+        assert!(
+            i_d12 < i_d23 && i_d23 < i_d31,
+            "pairwise deltas must be ordered v1_v2 < v2_v3 < v3_v1; got: d12={i_d12} d23={i_d23} d31={i_d31}"
+        );
+        // The `ranked_winner` headline must
+        // appear in the body.
+        assert!(
+            card.contains("ranked_winner") && card.contains("<strong>v3</strong>"),
+            "compare3 card must show `ranked_winner: <strong>v3</strong>`; got:\n{card}"
+        );
+    }
+
+    #[test]
+    fn compare3_fixture_round_trips_via_serde() {
+        // The committed
+        // `tests/fixtures/compare3-fixture.json`
+        // must `serde_json::from_str` into a
+        // typed `Compare3Report` without error.
+        // A regression in the autotrain's
+        // `Compare3Report::to_json` field shape
+        // (a renamed field, a missing field) fails
+        // this test at the same CI step a
+        // downstream `trainer --compare3 --json`
+        // consumer would silently break.
+        let path = compare3_fixture_path();
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let parsed: Compare3Report = serde_json::from_str(&body).unwrap_or_else(|e| {
+            panic!("compare3 fixture must parse as Compare3Report: {e}; body:\n{body}")
+        });
+        // The `ranked_winner` must be one of the
+        // four pinned variants.
+        assert!(
+            matches!(
+                parsed.ranked_winner,
+                Compare3Winner::V1 | Compare3Winner::V2 | Compare3Winner::V3 | Compare3Winner::Tie
+            ),
+            "ranked_winner must be in {{V1, V2, V3, Tie}}; got: {:?}",
+            parsed.ranked_winner
+        );
+        // The fixture must have all three
+        // sub-reports populated (not a degenerate
+        // zero-hand fixture).
+        assert!(
+            parsed.v1.hands > 0 && parsed.v2.hands > 0 && parsed.v3.hands > 0,
+            "compare3 fixture sub-reports must be populated; got: v1.hands={} v2.hands={} v3.hands={}",
+            parsed.v1.hands,
+            parsed.v2.hands,
+            parsed.v3.hands
+        );
+        // The fixture's `mbb_per_100` per-sub-report
+        // must equal the
+        // `mbb_per_100` value the
+        // `render_bench_card(&BenchCardFields::from_compare3(...))`
+        // projection would carry (a
+        // regression that drops a digit fails
+        // this assertion).
+        let v1_card = render_bench_card(&BenchCardFields::from_compare3(
+            COMPARE3_FIXTURE_ID,
+            "v1",
+            "preflop",
+            &parsed.v1,
+        ));
+        assert!(
+            v1_card.contains(&format!("{:.4}", parsed.v1.mbb_per_100)),
+            "v1 sub-card must contain v1's pinned mbb/100; got:\n{v1_card}"
         );
     }
 

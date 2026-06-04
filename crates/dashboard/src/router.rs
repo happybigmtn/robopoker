@@ -267,6 +267,18 @@ async fn serve_transcript(State(state): State<AppState>, Path(id): Path<String>)
 /// projects it through the [`render::render_bench_card`]
 /// emitter.
 ///
+/// STW-042 adds a demo-data fallback: when the
+/// in-memory `INDEX.json` (the typed read the
+/// `IndexClient` owns) has no entry for `:id` AND
+/// `:id == render::COMPARE3_FIXTURE_ID`, the handler
+/// reads the committed
+/// `crates/dashboard/tests/fixtures/compare3-fixture.json`
+/// from disk and renders the
+/// [`render::render_compare3_card`] emitter instead.
+/// The fallback is *demo-only* — a real
+/// `INDEX.json` entry for a real receipt basename
+/// always wins because the live path runs first.
+///
 /// A missing bench JSON line (the receipt was not
 /// produced by the bench) surfaces as a `404 Not Found`
 /// with a one-line diagnostic; a corrupt JSON line
@@ -276,9 +288,33 @@ async fn serve_transcript(State(state): State<AppState>, Path(id): Path<String>)
 /// `scripts/testnet-live-proof.sh` runbook writes to.
 pub const DEFAULT_RECEIPT_DIR: &str = "./receipts";
 
-async fn serve_bench_card(State(_state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn serve_bench_card(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if !is_safe_id(&id) {
         return not_found("invalid bench id");
+    }
+    // STW-042: the `:id` may be the
+    // `compare3-fixture` sentinel — a committed
+    // demo-data card a fresh checkout can
+    // `GET /bench/compare3-fixture` and read
+    // without running the bench chain. The
+    // demo-data fallback is *only* engaged when
+    // the in-memory `INDEX.json` (the typed
+    // read the `IndexClient` owns) has no
+    // entry for `:id` — a real receipt
+    // basename in a real `INDEX.json` always
+    // wins. The `IndexClient::fetch_index`
+    // failure is intentionally *not* the
+    // fallback trigger (a missing `INDEX.json`
+    // file surfaces as a 500 on
+    // `GET /api/index`, and the demo-data
+    // path is *not* a "the dashboard is
+    // broken" workaround; a stranger
+    // pointed at the dashboard's `/api/index`
+    // URL knows the dashboard is healthy).
+    if id == render::COMPARE3_FIXTURE_ID {
+        if let Some(response) = serve_compare3_fixture_card_if_no_index_match(&state, &id) {
+            return response;
+        }
     }
     let bench_line = read_bench_json_line(&id);
     let bench_line = match bench_line {
@@ -296,6 +332,79 @@ async fn serve_bench_card(State(_state): State<AppState>, Path(id): Path<String>
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+/// STW-042: demo-data fallback. Returns `Some(200
+/// Response)` when (a) the in-memory `INDEX.json` has
+/// no entry for `:id` (so the fallback is not
+/// shadowing a real receipt basename) AND (b) the
+/// committed
+/// `crates/dashboard/tests/fixtures/compare3-fixture.json`
+/// loads as a typed [`render::Compare3Report`]. A
+/// fixture file that is missing or fails to parse
+/// surfaces as `Some(500)` so a future regression in
+/// the committed file fails CI at the same step a
+/// stranger who runs the dashboard would see a
+/// "demo data is broken" page.
+///
+/// A live `INDEX.json` with an entry for
+/// `compare3-fixture` (a real receipt basename
+/// shadowing the sentinel) returns `None` so the
+/// live `bench/stdout.txt` path runs as before.
+fn serve_compare3_fixture_card_if_no_index_match(state: &AppState, id: &str) -> Option<Response> {
+    // The live `INDEX.json` may legitimately
+    // list a receipt with a basename of
+    // `compare3-fixture` (a future operator
+    // runbook could produce one); if it
+    // does, the live `bench/stdout.txt`
+    // path wins and the demo-data fallback
+    // does not engage. The fetch is
+    // intentionally a non-fatal best-effort:
+    // a missing / unparseable `INDEX.json`
+    // (a fresh checkout with no live index)
+    // is the *intended* trigger for the
+    // demo-data fallback.
+    if let Ok(index) = state.index_client.fetch_index() {
+        if index.entries.iter().any(|e| e.receipt_basename == id) {
+            return None;
+        }
+    }
+    let path = render::compare3_fixture_path();
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Some(serve_internal_error(&format!(
+                "compare3 fixture missing at {}: {e}",
+                path.display()
+            )));
+        }
+    };
+    let report: render::Compare3Report = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return Some(serve_internal_error(&format!(
+                "compare3 fixture at {} failed to parse as Compare3Report: {e}",
+                path.display()
+            )));
+        }
+    };
+    let card = render::render_compare3_card(id, &report);
+    let mut response = (StatusCode::OK, Body::from(card)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    Some(response)
+}
+
+fn serve_internal_error(detail: &str) -> Response {
+    let body = format!("dashboard: {detail}\n");
+    let mut response = (StatusCode::INTERNAL_SERVER_ERROR, Body::from(body)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     response
 }

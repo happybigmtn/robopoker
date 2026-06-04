@@ -63,5 +63,8 @@ pub mod render;
 pub mod router;
 
 pub use index_client::{IndexClient, IndexClientError};
-pub use render::{BenchCardFields, render_bench_card, render_index_table};
+pub use render::{
+    BenchCardFields, COMPARE3_FIXTURE_ID, Compare3Report, Compare3SubReport, Compare3Winner,
+    compare3_fixture_path, render_bench_card, render_compare3_card, render_index_table,
+};
 pub use router::{AppState, dashboard_app, serve};

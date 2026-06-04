@@ -111,6 +111,23 @@
     <p class="subtitle">Public, reproducible NLHE benchmark. Receipts the <code>trainer --publish-index</code> aggregator writes land here.</p>
     <p class="meta" id="meta">loading <code>/api/index</code>...</p>
     <div id="index-table"></div>
+    <!--
+      STW-042: a first-time visitor with an empty
+      `INDEX.json` sees the "No receipts in this
+      index yet." `<td class="empty">` cell the
+      JS renders below. The link below is a
+      sibling anchor a fresh checkout can click
+      to read the committed compare3 demo-data
+      card (a `GET /bench/compare3-fixture` the
+      router's fixture-fallback serves when the
+      live `INDEX.json` has no matching entry).
+      The link is a vanilla `<a href>` (not a
+      JS `fetch` + dynamic injection) so it
+      works without JS and without a network
+      round-trip — a static-page-reader can
+      follow it.
+    -->
+    <p class="meta">Demo data: <a class="index-table__link" href="/bench/compare3-fixture">/bench/compare3-fixture</a></p>
   </main>
   <script>
     // Minimal vanilla-JS: fetch /api/index, render a

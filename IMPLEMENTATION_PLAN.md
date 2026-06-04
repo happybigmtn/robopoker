@@ -5267,7 +5267,7 @@ tag tracing the finding it closes. Rows are P0/P1
 ordered; the top row is the highest single-shipment
 leverage.
 
-- [ ] **[P0] `STW-042` `crates/dashboard/tests/fixtures/compare3-fixture.json`
+- [x] **[P0] `STW-042` `crates/dashboard/tests/fixtures/compare3-fixture.json`
   + `crates/dashboard/src/router.rs::GET /bench/:id`
   demo-data fallback that serves the fixture when
   no live `INDEX.json` entry matches.** Closes the
