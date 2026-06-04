@@ -18,6 +18,330 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+- [x] `STW-017` Second trained config (`Flagship2`):
+  `DiscountedRegret` + `QuadraticWeight` + `PluribusSampling`
+  vs the v1 `Flagship` (`PluribusRegret` + `LinearWeight` +
+  `PluribusSampling`). A new `Blueprint::V1` / `Blueprint::V2`
+  enum lets a single `trainer --bench` invocation compare
+  the two trained configs head-to-head against the same
+  named baseline. The v2 has its own persistence pair
+  (`BLUEPRINT2` / `EPOCH2` / `'current_v2'` / `STAGING2`),
+  its own trainer (`trainer --fast2` running
+  `Fast2Session`), its own bench seat
+  (`RBP_BENCH_BLUEPRINT=v2` seats a `DatabasePlayer2` at
+  seat 0 and reports `"blueprint":"v2"` in the JSON), and
+  its own status read (`trainer --status` prints both v1
+  and v2 epoch + blueprint row counts). A v1 `Mode::reset`
+  does not zero the v2 `'current_v2'` row and vice versa.
+  Owner files: `crates/database/src/lib.rs` (v2
+  constants `BLUEPRINT2` / `EPOCH2` / `EPOCH2_KEY` /
+  `STAGING2`),
+  `crates/database/src/check2.rs` (new `Check2` trait +
+  `Client` / `Arc<Client>` impls reading v2 epoch /
+  blueprint counts), `crates/database/src/stage2.rs` (new
+  `Stage2` trait + `Client` / `Arc<Client>` impls for
+  v2 `stage2` / `merge2` / `stamp2(epochs)` with
+  `'current_v2'` row scoping),
+  `crates/nlhe/src/lib.rs` (v2 `Flagship2` type alias
+  + `mod profile_v2`),
+  `crates/nlhe/src/profile_v2.rs` (new
+  `NlheProfileV2(NlheProfile)` newtype + `Schema` /
+  `BulkSchema` / `Hydrate` impls targeting
+  `BLUEPRINT2`, `EpochMetaV2` + `Schema` / `BulkSchema`
+  impls targeting `EPOCH2` with the `'current_v2'`
+  row seeded in `creates()`, plus
+  `hydrate_flagship2(client) -> Flagship2` free function
+  that wraps the v1 `NlheProfile` in-memory shape
+  verbatim),
+  `crates/gameroom/src/players/database_v2.rs` (new
+  `DatabasePlayer2` player + `from_database` /
+  `new` constructors, the v1 / v2 `decide` paths share
+  the same `abstraction` → `NlheInfo` → `averaged_distribution`
+  → weighted-sample recipe),
+  `crates/gameroom/src/players/mod.rs`
+  (re-export `DatabasePlayer2`),
+  `crates/autotrain/src/pretraining.rs`
+  (bootstrap the v2 `BLUEPRINT2` / `EPOCH2` tables in
+  `PreTraining::run` so a fresh DB doesn't crash on
+  the first `Fast2Session::sync`),
+  `crates/autotrain/src/lib.rs` (re-export
+  `Fast2Session`),
+  `crates/autotrain/src/fast2.rs` (new `Fast2Session`
+  parallel of v1 `FastSession` — same `step` / `epoch` /
+  `checkpoint` / `summary` delegation, same shape, but
+  the v2 `sync` writes `staging_v2` / `BLUEPRINT2` /
+  `'current_v2'` instead of the v1 trio),
+  `crates/autotrain/src/mode.rs` (new `--fast2` mode +
+  v2 epoch / blueprint status read in `Mode::Status` +
+  v2 arm in `Mode::reset` that zeros the `'current_v2'`
+  row only),
+  `crates/autotrain/src/bench.rs` (new `Blueprint::V1` /
+  `Blueprint::V2` enum + `as_str` / `from_env` /
+  `DEFAULT_BENCH_BLUEPRINT` + `Check2` import for the v2
+  row-count read + the new `BenchReport.blueprint:
+  Blueprint` field + the new `"blueprint":"{v1|v2}"`
+  JSON field + a v1 / v2 seat-0 dispatch in `run_hands`
+  that mirrors the existing
+  `blueprint_trained` / empty-blueprint fallback shape +
+  four new lib tests
+  `blueprint_as_str_matches_published_strings` /
+  `blueprint_from_env_round_trip` /
+  `default_bench_blueprint_is_v1` /
+  `summarize_stamps_blueprint_into_report` + a
+  `"blueprint":"v1"` assertion in the
+  `to_json_contains_every_field` contract test +
+  the new `"blueprint"` field in `bench complete: ...`
+  log line),
+  `crates/autotrain/tests/bench.rs` (extended
+  `parse_bench_line` to read the new `blueprint` field
+  with a v1 default fallback for pre-STW-017 binary
+  output + a v1-default assertion in the existing
+  `bench_run_emits_parseable_json_with_consistent_accounting`
+  test + a new
+  `bench_run_v2_blueprint_round_trips_through_json`
+  integration test that drives
+  `trainer --bench` with `RBP_BENCH_BLUEPRINT=v2` and
+  asserts the JSON `blueprint` field is `"v2"`),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md` (mark
+  the v5 "second trained config" line as shipped).
+  Scope boundary: do NOT touch the v1
+  `NlheProfile` / `EpochMeta` schema contracts; the v2
+  path is a new newtype + new table pair. Do NOT change
+  the v1 `FastSession` / `Mode::Fast` / `Mode::Reset` v1
+  arm / `BenchReport.baseline` / `Baseline` /
+  `FastSession::sync` shape. Do NOT touch the autotrain
+  pipeline, the K-means cluster counts, the
+  `CFR_TREE_COUNT_NLHE` baseline, or the v1 / v2 / v3 /
+  v4 named baselines (`Fish` / `EquityBot` /
+  `PreflopBot` / `BlufferBot`). Do NOT add a new
+  `Player` trait, do NOT introduce a new solver, do NOT
+  change the room protocol. The v2 path is
+  *structurally parallel* to the v1 path — separate
+  tables, separate trainer, separate bench seat — so a
+  v1 `trainer --fast` run and a v2 `trainer --fast2` run
+  can coexist in the same database without colliding
+  on the staging table or the epoch row.
+  Acceptance criteria:
+  (a) `crates/database/src/lib.rs` adds
+      `BLUEPRINT2 = "blueprint_v2"`,
+      `EPOCH2 = "epoch_v2"`,
+      `EPOCH2_KEY = "current_v2"`, and
+      `STAGING2 = "staging_v2"` constants.
+  (b) `crates/database/src/check2.rs` is a new
+      module with a `Check2` trait exposing
+      `epochs_v2() -> usize` /
+      `blueprint_v2() -> usize` /
+      `status_v2()` (the latter prints a
+      comma-formatted v2 epoch + blueprint table the
+      same way `Check::status` does for v1), plus
+      `Client` + `Arc<Client>` impls, plus a
+      `epochs_v2_sql_targets_current_v2_row` lib test
+      pinning `EPOCH2_KEY == "current_v2"`.
+  (c) `crates/database/src/stage2.rs` is a new
+      module with a `Stage2` trait exposing
+      `stage2()` (recreates the v2
+      `UNLOGGED staging_v2` table from `blueprint_v2`)
+      / `merge2()` (upserts staging_v2 → blueprint_v2
+      + drops staging_v2) / `stamp2(n)` (adds n to
+      the `'current_v2'` row of `epoch_v2`), plus
+      `Client` + `Arc<Client>` impls, plus two
+      lib tests
+      (`stage2_trait_is_object_safe_via_arc`,
+      `stage2_stamp_targets_current_v2_row`).
+  (d) `crates/nlhe/src/profile_v2.rs` is a new
+      module with a
+      `pub struct NlheProfileV2(pub NlheProfile)`
+      newtype + `Schema` impl targeting
+      `BLUEPRINT2` (creates / indices / truncates /
+      freeze) + `BulkSchema` impl targeting
+      `BLUEPRINT2` (columns + copy) + `Hydrate` impl
+      reading `BLUEPRINT2` + `EPOCH2` rows + a
+      `pub struct EpochMetaV2` with `Schema` impl
+      targeting `EPOCH2` (creates seeds the
+      `'current_v2'` row to 0 in an
+      `ON CONFLICT DO NOTHING` block; truncates
+      zeros the `'current_v2'` value; freeze pins
+      `fillfactor = 100` but keeps autovacuum
+      enabled for the UPDATE-heavy epoch table) +
+      `BulkSchema` impl on `EpochMetaV2` + a
+      `hydrate_flagship2(client) -> Flagship2`
+      free function (the v2 hydration is a
+      type-specific function, not a blanket
+      `impl Hydrate for NlheSolver`, because the
+      blanket impl would read the v1 `BLUEPRINT` /
+      `EPOCH` tables). Nine lib tests pin the
+      schema contracts
+      (`nlhe_profile_v2_name_matches_const_table_name` /
+      `nlhe_profile_v2_creates_targets_v2_table` /
+      `nlhe_profile_v2_truncates_targets_v2_table` /
+      `nlhe_profile_v2_copy_targets_v2_table_with_matching_arity` /
+      `nlhe_profile_v2_freeze_disables_autovacuum` /
+      `epoch_meta_v2_name_matches_const_table_name` /
+      `epoch_meta_v2_creates_seeds_current_v2_row` /
+      `epoch_meta_v2_truncates_zeros_current_v2_value` /
+      `epoch_meta_v2_freeze_keeps_autovacuum_enabled`).
+  (e) `crates/nlhe/src/lib.rs` adds a
+      `mod profile_v2` (gated on
+      `#[cfg(feature = "database")]`) + a
+      `pub type Flagship2 = NlheSolver<DiscountedRegret, QuadraticWeight, PluribusSampling>`
+      alias.
+  (f) `crates/gameroom/src/players/database_v2.rs`
+      is a new module with a
+      `pub struct DatabasePlayer2(&'static Flagship2)`
+      + `new(blueprint: &'static Flagship2) -> Self`
+      constructor (the bench's empty-blueprint
+      fallback path) + a
+      `from_database(client: Arc<Client>) -> Self`
+      constructor that hydrates from `BLUEPRINT2` /
+      `EPOCH2` via `hydrate_flagship2` + a
+      `Player::decide` impl that mirrors the v1
+      path (`abstraction` → `NlheInfo` →
+      `averaged_distribution` → weighted-sample
+      with uniform `game.legal()` fallback). Two
+      lib tests pin the public API
+      (`new_wraps_blueprint`,
+      `from_database_signature_is_stable`).
+  (g) `crates/autotrain/src/pretraining.rs`
+      extends `PreTraining::run` to call
+      `Self::ensure::<NlheProfileV2>(client)` and
+      `Self::ensure::<EpochMetaV2>(client)` after
+      the v1 bootstrap, so a fresh DB has the v2
+      tables before the first
+      `Fast2Session::sync` and the first
+      `Mode::Reset` v2 arm.
+  (h) `crates/autotrain/src/fast2.rs` is a new
+      module with
+      `pub struct Fast2Session { client, solver: Flagship2 }`
+      + a `Trainer` impl that mirrors the v1
+      `FastSession` (step / epoch / checkpoint /
+      summary delegate to `self.solver`; sync
+      consumes the session, drops
+      `client.stage2().await` → builds a
+      `BinaryCopyInWriter` against
+      `NlheProfileV2::copy()` and
+      `NlheProfileV2::columns()` → writes the
+      v2 in-memory rows → `client.merge2().await`
+      → `client.stamp2(epochs).await`).
+  (i) `crates/autotrain/src/mode.rs` adds a
+      `Mode::Fast2` variant (parsed from
+      `--fast2`) + extends `from_args` /
+      `Usage: trainer --status | --cluster |
+      --fast | --fast2 | --slow | --reset |
+      --smoke | --bench | --replay <path>` +
+      `Mode::run` adds the `Self::Fast2 =>
+      Fast2Session::new(client).await.train().await`
+      arm + `Mode::Status` now calls both
+      `client.status().await` and
+      `client.status_v2().await` so a
+      `--status` run reports both v1 and v2
+      epoch + blueprint row counts +
+      `Mode::reset` zeroes the v2
+      `'current_v2'` row in addition to the v1
+      `'current'` row.
+  (j) `crates/autotrain/src/bench.rs` adds a
+      `Blueprint` enum
+      (`V1` / `V2`) + `Blueprint::as_str` /
+      `Blueprint::from_env` /
+      `DEFAULT_BENCH_BLUEPRINT = Blueprint::V1` +
+      a `blueprint: Blueprint` field on
+      `BenchReport` + a
+      `"blueprint":"{blueprint}"` JSON field in
+      `to_json` (between
+      `blueprint_trained` and `baseline`) + a
+      `blueprint` parameter on `summarize` and
+      `run_hands` + a v1 / v2 seat-0 dispatch in
+      `run_hands` (v1 seats a `DatabasePlayer` /
+      v2 seats a `DatabasePlayer2`, both with
+      the same trained / empty-blueprint fallback
+      shape) + a v1 / v2 row-count read in `run`
+      (v1 uses `client.blueprint()` / v2 uses
+      `client.blueprint_v2()`) + a `blueprint`
+      field in the `bench complete: ...` log
+      line + four new lib tests
+      (`blueprint_as_str_matches_published_strings` /
+      `blueprint_from_env_round_trip` /
+      `default_bench_blueprint_is_v1` /
+      `summarize_stamps_blueprint_into_report`) +
+      a `"blueprint":"v1"` needle in
+      `to_json_contains_every_field`. The
+      `bench` `from_env` falls back to
+      `DEFAULT_BENCH_BLUEPRINT` on a missing
+      or unknown `RBP_BENCH_BLUEPRINT` so a
+      stale env var doesn't crash the bench.
+  (k) `crates/autotrain/tests/bench.rs`
+      extends `parse_bench_line` to read the
+      new `blueprint` field (with a
+      `"v1".to_string()` fallback for
+      pre-STW-017 binary output) + a
+      `parsed.blueprint == "v1"` assertion in
+      the existing
+      `bench_run_emits_parseable_json_with_consistent_accounting`
+      test + a new
+      `bench_run_v2_blueprint_round_trips_through_json`
+      integration test that runs
+      `trainer --bench` with
+      `RBP_BENCH_BLUEPRINT=v2` and asserts
+      the JSON `blueprint` field is `"v2"`,
+      the `hands` / `blind` fields round-trip
+      from the env vars, and the default
+      `baseline` is still `"fish"`. Both
+      integration tests are
+      `#[cfg(feature = "database")]`-gated
+      AND short-circuit on a missing
+      `DATABASE_URL` (same pattern as the
+      existing STW-010 / STW-012 / STW-013
+      bench tests).
+  Required tests: 9 new lib tests in
+  `crates/database/src/{check2,stage2}.rs` (2
+  total), 9 new lib tests in
+  `crates/nlhe/src/profile_v2.rs::hydrate_tests`
+  + 2 new lib tests in
+  `crates/gameroom/src/players/database_v2.rs::tests`
+  + 4 new lib tests in
+  `crates/autotrain/src/bench.rs::tests` (the
+  four `blueprint_*` / `default_bench_blueprint_*`
+  / `summarize_stamps_blueprint_*` tests) + 1
+  new integration test in
+  `crates/autotrain/tests/bench.rs`
+  (`bench_run_v2_blueprint_round_trips_through_json`).
+  Total new tests: 25 (19 unit + 1 integration
+  + 5 contract-extending). The contract-extending
+  tests are the `to_json_contains_every_field`
+  needle assertion, the v1 default assertion in
+  the existing bench integration test, and the
+  three `bench::tests::baseline_*` tests
+  threading the new `Blueprint` arg through
+  their `summarize(&per_hand, blind, Baseline,
+  Blueprint)` calls (no new test, but each
+  test now also pins the v1 `blueprint` JSON
+  field — see (j) and (k)).
+  Dependencies: STW-006 (Schema/BulkSchema
+  split) for the v1 `Schema::creates()` paths
+  the v2 tables parallel; STW-008 (hand
+  persistence round-trip) for the
+  `HistoryRepository` plumbing that the
+  `DatabasePlayer2` constructor (gated on
+  `feature = "database"`) uses; STW-010 (bench
+  harness) for the seat-0 dispatch the v2
+  `Blueprint` enum hooks into.
+  Estimated scope: L.
+  Completion signal: `cargo check --workspace
+  --all-features`, `cargo test --workspace`,
+  `cargo fmt --check` all pass; the 25 new
+  tests land green; the `trainer --status`
+  call prints both v1 and v2 epoch + blueprint
+  row counts on the same v1 + v2 row pair; a
+  `trainer --bench` call with
+  `RBP_BENCH_BLUEPRINT=v2` prints a JSON
+  `BenchReport` with `blueprint:"v2"`; a
+  `trainer --bench` call with
+  `RBP_BENCH_BLUEPRINT` unset prints a JSON
+  `BenchReport` with `blueprint:"v1"`; a
+  `trainer --reset` call zeros the v1
+  `'current'` row only (the v2 `'current_v2'`
+  row is untouched).
+
 - [x] `STW-016` `trainer --replay <path>` CLI: wire the
   STW-015 public `Transcript` surface into the `trainer`
   binary so a downstream tool (a dashboard's "replay"

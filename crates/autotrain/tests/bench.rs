@@ -129,6 +129,14 @@ struct ParsedBench {
     win_rate_ci95: f64,
     blind: i16,
     blueprint_trained: bool,
+    /// STW-017: the `blueprint` field is a *string* in the
+    /// JSON (`"v1"`, `"v2"`), not a number or bool, so the
+    /// parser keeps it as `String`. Default is `"v1"` for
+    /// the v1 trained config; a `RBP_BENCH_BLUEPRINT=v2`
+    /// run reports `"v2"` here. A pre-STW-017 report never
+    /// carries this field, so the parser falls back to
+    /// `"v1"` when the field is missing.
+    blueprint: String,
     /// The `baseline` field is a *string* in the JSON
     /// (`"fish"`, `"equity"`, or `"preflop"`), not a number or
     /// bool, so the parser keeps it as `String` and the
@@ -152,6 +160,12 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
     let mut win_rate_ci95: Option<f64> = None;
     let mut blind: Option<i16> = None;
     let mut blueprint_trained: Option<bool> = None;
+    // STW-017: the `blueprint` field is optional in the
+    // parser so a pre-STW-017 binary's output (which lacks
+    // the field) still parses. The default fallback below
+    // is `"v1"` because every pre-STW-017 run was a v1
+    // bench (the v2 trained config didn't exist).
+    let mut blueprint: Option<String> = None;
     let mut baseline: Option<String> = None;
     // Split on top-level commas. The bench JSON is a flat
     // object of `key:number` / `key:bool` / `key:string`
@@ -175,6 +189,12 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
             "blueprint_trained" => {
                 blueprint_trained = Some(matches!(raw, "true"));
             }
+            "blueprint" => {
+                // STW-017: same shape as the `baseline`
+                // field below — strip the surrounding
+                // double quotes the JSON encoder adds.
+                blueprint = Some(raw.trim_matches('"').to_string());
+            }
             "baseline" => {
                 // Strip the surrounding double quotes the JSON
                 // encoder adds around the string value.
@@ -194,6 +214,11 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
         win_rate_ci95: win_rate_ci95?,
         blind: blind?,
         blueprint_trained: blueprint_trained?,
+        // STW-017: fall back to the v1 default if the
+        // pre-STW-017 binary output lacks the `blueprint`
+        // field. A pre-STW-017 run is byte-for-byte
+        // indistinguishable from a v1 bench.
+        blueprint: blueprint.unwrap_or_else(|| "v1".to_string()),
         baseline: baseline?,
     })
 }
@@ -331,6 +356,18 @@ fn bench_run_emits_parseable_json_with_consistent_accounting() {
         "bench: default baseline must be `fish` when RBP_BENCH_BASELINE is unset; got {:?}",
         parsed.baseline
     );
+
+    // (vi) STW-017: the `blueprint` JSON field must be the v1
+    // default literal `"v1"` when `RBP_BENCH_BLUEPRINT` is
+    // unset. The v2 (`v2`) variant gets its own integration
+    // test below so a regression that breaks the v1 default
+    // contract is caught at this assertion, not lost in a
+    // multi-blueprint test.
+    assert_eq!(
+        parsed.blueprint, "v1",
+        "bench: default blueprint must be `v1` when RBP_BENCH_BLUEPRINT is unset; got {:?}",
+        parsed.blueprint
+    );
 }
 
 /// STW-012: the v3 `PreflopBot` named baseline must round-trip
@@ -456,5 +493,86 @@ fn bench_run_bluffer_baseline_round_trips_through_json() {
         parsed.blind, 2,
         "bench (bluffer): blind field must equal RBP_BENCH_BLIND; got {}",
         parsed.blind
+    );
+}
+
+/// STW-017: the v2 trained config (`RBP_BENCH_BLUEPRINT=v2`)
+/// must round-trip through the bench harness's `blueprint`
+/// JSON field. The default-blueprint test above pins the v1
+/// default (`v1`); this test pins the v2 (`v2`) override so
+/// a regression that drops the variant from
+/// `Blueprint::as_str`, `Blueprint::from_env`, or the seat-0
+/// dispatch fails the integration test, not a downstream
+/// dashboard. Mirrors the shape of
+/// `bench_run_bluffer_baseline_round_trips_through_json` (same
+/// small bench with `RBP_BENCH_HANDS=20` / `RBP_BENCH_BLIND=2`)
+/// but with `RBP_BENCH_BLUEPRINT=v2` set in the env extra.
+/// The v2 trained config is the v2 `Flagship2` (`DCFR` +
+/// `QuadraticWeight` + `PluribusSampling`); the
+/// `preflop_tier_starts_with_top_pair` and
+/// `blufferbot_classify_bluff_eligible_when_weak` lib tests
+/// exercise the gameroom bots, so the v2 player side of the
+/// bench is the new code path this test is pinning. The
+/// `blueprint_trained` assertion is intentionally omitted
+/// here (we re-use the empty v2 blueprint left by the
+/// previous test) so this test does not depend on the order
+/// of execution inside the same test process.
+#[test]
+fn bench_run_v2_blueprint_round_trips_through_json() {
+    if !database_url_set() {
+        return;
+    }
+    let (stdout, stderr, code) = run_trainer(
+        &["--bench"],
+        &[
+            ("RBP_BENCH_HANDS", "20"),
+            ("RBP_BENCH_BLIND", "2"),
+            ("RBP_BENCH_BLUEPRINT", "v2"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "trainer --bench with RBP_BENCH_BLUEPRINT=v2 must exit 0.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('{') && l.trim_end().ends_with('}'))
+        .unwrap_or_else(|| {
+            panic!(
+                "trainer --bench (v2) must print a single-line JSON report on stdout.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+            )
+        });
+    let parsed = parse_bench_line(line).unwrap_or_else(|| {
+        panic!(
+            "trainer --bench (v2) stdout must be a parseable \
+             BenchReport JSON; got: {line:?}"
+        )
+    });
+    assert_eq!(
+        parsed.blueprint, "v2",
+        "bench: blueprint field must be `v2` when RBP_BENCH_BLUEPRINT=v2; got {:?}",
+        parsed.blueprint
+    );
+    assert_eq!(
+        parsed.hands, 20,
+        "bench (v2): hands field must equal RBP_BENCH_HANDS; got {}",
+        parsed.hands
+    );
+    assert_eq!(
+        parsed.blind, 2,
+        "bench (v2): blind field must equal RBP_BENCH_BLIND; got {}",
+        parsed.blind
+    );
+    // The default baseline is still `Fish` (we did not set
+    // `RBP_BENCH_BASELINE`); the v2 trained config seats a
+    // `DatabasePlayer2` at seat 0 and a `Fish` at seat 1,
+    // mirroring the v1 default bench except for the
+    // `blueprint` JSON field. A regression that accidentally
+    // flips the default baseline when the v2 blueprint is
+    // selected is caught by this assertion.
+    assert_eq!(
+        parsed.baseline, "fish",
+        "bench (v2): default baseline must still be `fish`; got {:?}",
+        parsed.baseline
     );
 }

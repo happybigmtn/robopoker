@@ -9,7 +9,9 @@ use rbp_cards::*;
 use rbp_clustering::*;
 use rbp_database::*;
 use rbp_gameplay::*;
+use rbp_nlhe::EpochMetaV2;
 use rbp_nlhe::NlheProfile;
+use rbp_nlhe::NlheProfileV2;
 use std::sync::Arc;
 use tokio_postgres::Client;
 
@@ -50,6 +52,24 @@ impl PreTraining {
         // script before the first training run.
         Self::ensure::<NlheProfile>(client).await;
         Self::ensure::<EpochMeta>(client).await;
+        // STW-017: bootstrap the v2 trained-config tables
+        // (`blueprint_v2` / `epoch_v2`) the same way the
+        // v1 tables are bootstrapped. A fresh DB that
+        // has never seen a `--fast2` / `--reset` run
+        // needs the v2 tables present before the first
+        // `Fast2Session::sync` (which would otherwise
+        // crash on `CREATE UNLOGGED TABLE staging_v2
+        // (LIKE blueprint_v2)` against a missing
+        // `blueprint_v2`) and before the first
+        // `Mode::Reset` v2 arm (which would otherwise
+        // crash on `truncate blueprint_v2`). The
+        // `EpochMetaV2::creates()` DDL also seeds the
+        // `'current_v2'` row to 0 in an
+        // `ON CONFLICT DO NOTHING` block, so a v1
+        // reset that doesn't touch the v2 row leaves
+        // the v2 row intact.
+        Self::ensure::<NlheProfileV2>(client).await;
+        Self::ensure::<EpochMetaV2>(client).await;
         log::info!("{:<32}{:<32}", "vacuum analyze", "all tables");
         client
             .batch_execute("VACUUM ANALYZE;")

@@ -71,8 +71,10 @@ use rbp_core::Chips;
 use rbp_core::ID;
 use rbp_core::S_BLIND;
 use rbp_database::Check;
+use rbp_database::Check2;
 use rbp_gameroom::BlufferBot;
 use rbp_gameroom::DatabasePlayer;
+use rbp_gameroom::DatabasePlayer2;
 use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
 use rbp_gameroom::PreflopBot;
@@ -170,6 +172,84 @@ impl Baseline {
 /// [`Baseline::Fish`] preserves the v1 behaviour (random
 /// baseline), so existing bench reports stay comparable.
 pub const DEFAULT_BENCH_BASELINE: Baseline = Baseline::Fish;
+
+/// STW-017: trained-config variant the bench seats at
+/// seat 0 (the seat whose `won()` is the headline
+/// accounting).
+///
+/// The v1 bench always seats a v1 `DatabasePlayer` (the
+/// trained v1 `Flagship`). With STW-017's v2 trained
+/// config (`Flagship2` = `DiscountedRegret` +
+/// `QuadraticWeight` + `PluribusSampling`) a single
+/// `trainer --bench` run can compare the v1 + v2
+/// trained configs head-to-head against the same
+/// named baseline without re-training either —
+/// [`Blueprint::V1`] is the v1 default and
+/// [`Blueprint::V2`] is the new variant.
+///
+/// The `RBP_BENCH_BLUEPRINT` env var selects the variant
+/// at run time (`RBP_BENCH_BLUEPRINT=v1` /
+/// `RBP_BENCH_BLUEPRINT=v2`). The `blueprint` JSON
+/// field on `BenchReport` carries the same value so a
+/// downstream scraper can group reports by
+/// `blueprint` to produce a "v1 vs fish", "v2 vs
+/// fish", "v1 vs preflop", and "v2 vs preflop" curve
+/// from the same `BenchReport` stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blueprint {
+    /// v1 trained config: `PluribusRegret` +
+    /// `LinearWeight` + `PluribusSampling`
+    /// ([`rbp_nlhe::Flagship`]). The historical
+    /// default; the bench has always seated a v1
+    /// `DatabasePlayer` at seat 0.
+    V1,
+    /// STW-017: v2 trained config: `DiscountedRegret` +
+    /// `QuadraticWeight` + `PluribusSampling`
+    /// ([`rbp_nlhe::Flagship2`]). New variant
+    /// introduced in STW-017 so a single bench
+    /// run can compare the v1 + v2 trained
+    /// configs head-to-head.
+    V2,
+}
+
+impl Blueprint {
+    /// Stable lowercase string used in the JSON report
+    /// and in the `RBP_BENCH_BLUEPRINT` env var. Kept
+    /// as a `match` (not a derived `Display`) so a
+    /// future variant addition forces the env-var
+    /// parser and the JSON field together — a
+    /// silent mismatch between the two would let a
+    /// stale `RBP_BENCH_BLUEPRINT=v1` pick the new
+    /// variant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+        }
+    }
+    /// Parse a blueprint name from the
+    /// `RBP_BENCH_BLUEPRINT` env var, falling back to
+    /// [`DEFAULT_BENCH_BLUEPRINT`]. Unknown values fall
+    /// back to the default too — the bench should
+    /// run with sensible defaults rather than fail a
+    /// worker because a stale env var was left in
+    /// the shell (same tolerance as
+    /// [`Baseline::from_env`]).
+    pub fn from_env() -> Self {
+        match std::env::var("RBP_BENCH_BLUEPRINT").ok().as_deref() {
+            Some("v1") => Self::V1,
+            Some("v2") => Self::V2,
+            _ => DEFAULT_BENCH_BLUEPRINT,
+        }
+    }
+}
+
+/// Default seat-0 trained config when
+/// `RBP_BENCH_BLUEPRINT` is unset. [`Blueprint::V1`]
+/// preserves the v1 behaviour (v1 `DatabasePlayer` at
+/// seat 0), so existing bench reports stay
+/// comparable.
+pub const DEFAULT_BENCH_BLUEPRINT: Blueprint = Blueprint::V1;
 
 /// Number of hands to play when `RBP_BENCH_HANDS` is unset.
 ///
@@ -297,6 +377,20 @@ pub struct BenchReport {
     /// `DatabasePlayer` was playing with the default untrained
     /// policy, not a trained one.
     pub blueprint_trained: bool,
+    /// STW-017: which trained config the bench seated at
+    /// seat 0 (the seat whose `won()` is the headline
+    /// accounting). [`Blueprint::V1`] is the v1
+    /// `Flagship` (`PluribusRegret` + `LinearWeight` +
+    /// `PluribusSampling`) trained against
+    /// [`rbp_database::BLUEPRINT`]; [`Blueprint::V2`] is the
+    /// v2 [`rbp_nlhe::Flagship2`] (`DiscountedRegret` +
+    /// `QuadraticWeight` + `PluribusSampling`) trained
+    /// against [`rbp_database::BLUEPRINT2`]. A downstream
+    /// scraper groups reports by `blueprint` to produce a
+    /// "v1 vs fish", "v2 vs fish", "v1 vs preflop", and
+    /// "v2 vs preflop" curve from the same
+    /// `BenchReport` stream.
+    pub blueprint: Blueprint,
     /// Which named baseline the bench seated at seat 1. A
     /// downstream scraper can group reports by `baseline` to
     /// produce a "trained bot vs fish" curve and a "trained
@@ -341,6 +435,7 @@ impl BenchReport {
                 "\"win_rate_ci95\":{win_rate_ci95:.4},",
                 "\"blind\":{blind},",
                 "\"blueprint_trained\":{blueprint_trained},",
+                "\"blueprint\":\"{blueprint}\",",
                 "\"baseline\":\"{baseline}\",",
                 "\"transcript\":{transcript}",
                 "}}\n"
@@ -355,6 +450,7 @@ impl BenchReport {
             win_rate_ci95 = self.win_rate_ci95,
             blind = self.blind,
             blueprint_trained = self.blueprint_trained,
+            blueprint = self.blueprint.as_str(),
             baseline = self.baseline.as_str(),
             transcript = self.transcript,
         )
@@ -370,7 +466,12 @@ impl BenchReport {
 /// `baseline` is the seat-1 baseline that produced the per-hand
 /// vector; it is stamped straight into the [`BenchReport`] so
 /// the JSON output carries the same value the caller passed in.
-pub fn summarize(per_hand: &[Chips], blind: Chips, baseline: Baseline) -> BenchReport {
+pub fn summarize(
+    per_hand: &[Chips],
+    blind: Chips,
+    baseline: Baseline,
+    blueprint: Blueprint,
+) -> BenchReport {
     assert!(
         !per_hand.is_empty(),
         "per_hand must contain at least one hand"
@@ -420,16 +521,27 @@ pub fn summarize(per_hand: &[Chips], blind: Chips, baseline: Baseline) -> BenchR
         win_rate_ci95,
         blind,
         blueprint_trained: true,
+        blueprint,
         baseline,
         transcript: false,
     }
 }
 
-/// Drive K heads-up hands of `DatabasePlayer` (seat 0) vs a
-/// named baseline (seat 1) through a real `Room`, and return
-/// the per-hand `seat_0.won()` vector plus a flag indicating
-/// whether at least one per-hand `transcript-<hand_id>.json`
-/// bundle was written into [`bench_transcript_dir`].
+/// Drive K heads-up hands of a trained-config `DatabasePlayer`
+/// (seat 0) vs a named baseline (seat 1) through a real `Room`,
+/// and return the per-hand `seat_0.won()` vector plus a flag
+/// indicating whether at least one per-hand
+/// `transcript-<hand_id>.json` bundle was written into
+/// [`bench_transcript_dir`].
+///
+/// `blueprint` selects the v1 / v2 trained config the bench
+/// seats at seat 0 — [`Blueprint::V1`] is the v1 trained config
+/// ([`rbp_nlhe::Flagship`], trained against
+/// [`rbp_database::BLUEPRINT`]) and [`Blueprint::V2`] is the v2
+/// trained config ([`rbp_nlhe::Flagship2`], trained against
+/// [`rbp_database::BLUEPRINT2`]). The seat-0 dispatch is the
+/// v1 / v2 `match` block in this function's body; the seat-1
+/// baseline is selected by the `baseline` parameter.
 ///
 /// The bench intentionally uses the production `Room` shell (not
 /// a hand-written engine loop) so the result reflects exactly
@@ -465,6 +577,7 @@ pub async fn run_hands(
     stakes: Chips,
     blueprint_trained: bool,
     baseline: Baseline,
+    blueprint: Blueprint,
 ) -> Result<(Vec<Chips>, bool), String> {
     assert!(k > 0, "bench must play at least one hand");
     let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
@@ -484,25 +597,42 @@ pub async fn run_hands(
     rbp_gameroom::HistoryRepository::create_room(&client, &room)
         .await
         .map_err(|e| format!("create_room: {e}"))?;
-    if blueprint_trained {
-        // `from_database` is `feature = "database"` gated; the
-        // bench inherits the same gate through the
-        // `rbp-gameroom` `database` feature dep.
-        let blueprint = DatabasePlayer::from_database(client.clone()).await;
-        room.sit(blueprint, rbp_auth::Lurker::default());
-    } else {
-        // Empty-blueprint fallback. The default-constructed
-        // `Flagship` is the same shape the `DatabasePlayer`
-        // unit test uses for a no-DB smoke (`NlheProfile::
-        // default()` + `NlheEncoder::default()`). The resulting
-        // untrained bot plays uniform-random over legal
-        // actions, which is the documented behavior of the
-        // bench's "blueprint_trained: false" path.
-        let blueprint: &'static rbp_nlhe::Flagship = Box::leak(Box::new(rbp_nlhe::Flagship::new(
-            rbp_nlhe::NlheProfile::default(),
-            rbp_nlhe::NlheEncoder::default(),
-        )));
-        room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
+    // STW-017: seat-0 dispatch picks the v1
+    // `DatabasePlayer` (v1 trained config) or the v2
+    // `DatabasePlayer2` (v2 trained config) based on
+    // `blueprint`. The two paths share the same
+    // "trained or empty-blueprint fallback" shape
+    // (a `from_database` load on a non-empty blueprint,
+    // a default-constructed `Flagship` / `Flagship2`
+    // leak on an empty one) so the v1 / v2 benches
+    // are byte-for-byte comparable.
+    match blueprint {
+        Blueprint::V1 => {
+            if blueprint_trained {
+                let blueprint = DatabasePlayer::from_database(client.clone()).await;
+                room.sit(blueprint, rbp_auth::Lurker::default());
+            } else {
+                let blueprint: &'static rbp_nlhe::Flagship =
+                    Box::leak(Box::new(rbp_nlhe::Flagship::new(
+                        rbp_nlhe::NlheProfile::default(),
+                        rbp_nlhe::NlheEncoder::default(),
+                    )));
+                room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
+            }
+        }
+        Blueprint::V2 => {
+            if blueprint_trained {
+                let blueprint = DatabasePlayer2::from_database(client.clone()).await;
+                room.sit(blueprint, rbp_auth::Lurker::default());
+            } else {
+                let blueprint: &'static rbp_nlhe::Flagship2 =
+                    Box::leak(Box::new(rbp_nlhe::Flagship2::new(
+                        rbp_nlhe::NlheProfile::default(),
+                        rbp_nlhe::NlheEncoder::default(),
+                    )));
+                room.sit(DatabasePlayer2::new(blueprint), rbp_auth::Lurker::default());
+            }
+        }
     }
     // Seat-1 baseline dispatch. All four branches are
     // synchronous `Player` constructors (no DB round-trip),
@@ -635,27 +765,42 @@ pub async fn run(client: Arc<Client>) {
     let k = bench_hands();
     let blind = bench_blind();
     let baseline = Baseline::from_env();
+    // STW-017: read the v1 / v2 trained-config variant
+    // from `RBP_BENCH_BLUEPRINT`. The default is
+    // [`Blueprint::V1`] so existing bench reports (which
+    // never set the env var) stay byte-for-byte comparable
+    // to the new v2 reports except for the new
+    // `blueprint` JSON field.
+    let blueprint = Blueprint::from_env();
     // A `trainer --smoke` pre-run is the documented prep for the
     // bench (the CEO roadmap lists the smoke proof first, the
     // bench second). The bench does not require it — running the
     // bench against an empty blueprint is valid as long as we
     // flag it in the JSON — but we report the pre-bench row
     // count so a downstream scraper can tell the difference.
-    let rows_before = client.blueprint().await;
+    // STW-017: the row count comes from the v1 /
+    // v2 blueprint table that matches the selected
+    // `blueprint` variant. A v1 bench reads the v1
+    // row count; a v2 bench reads the v2 row count.
+    let rows_before = match blueprint {
+        Blueprint::V1 => client.blueprint().await,
+        Blueprint::V2 => client.blueprint_v2().await,
+    };
     let blueprint_trained = rows_before > 0;
     log::info!(
-        "bench: hydrating blueprint (rows={rows_before}) + playing {k} hands @ blind={blind} baseline={baseline}",
-        baseline = baseline.as_str(),
+        "bench: hydrating blueprint (variant={} rows={rows_before}) + playing {k} hands @ blind={blind} baseline={}",
+        blueprint.as_str(),
+        baseline.as_str(),
     );
     let (per_hand, transcript_wrote) =
-        match run_hands(client, k, blind, blueprint_trained, baseline).await {
+        match run_hands(client, k, blind, blueprint_trained, baseline, blueprint).await {
             Ok(v) => v,
             Err(e) => {
                 log::error!("bench failed: {e}");
                 std::process::exit(3);
             }
         };
-    let mut report = summarize(&per_hand, blind, baseline);
+    let mut report = summarize(&per_hand, blind, baseline, blueprint);
     report.blueprint_trained = blueprint_trained;
     // `transcript_wrote` is the producer side of the
     // "replayable benchmark surface" the testnet roadmap
@@ -670,11 +815,12 @@ pub async fn run(client: Arc<Client>) {
     report.transcript = transcript_wrote;
     print!("{}", report.to_json());
     log::info!(
-        "bench complete: hands={k} mbb/100={:.2} ci95=±{:.2} wins={} losses={} blueprint_trained={} baseline={}",
+        "bench complete: hands={k} mbb/100={:.2} ci95=±{:.2} wins={} losses={} blueprint={} blueprint_trained={} baseline={}",
         report.mbb_per_100,
         report.mbb_ci95,
         report.wins,
         report.losses,
+        report.blueprint.as_str(),
         report.blueprint_trained,
         report.baseline.as_str(),
     );
@@ -705,7 +851,7 @@ mod tests {
     #[test]
     fn mbb_per_100_formula_matches_mean_times_hundred_over_blind() {
         let per_hand = vec![10_i16; 200];
-        let r = summarize(&per_hand, 2, Baseline::Fish);
+        let r = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
         // 200 hands * 10 chips = 2000 net chips; mean = 10
         // chips/hand; mbb/100 = 10 * 100 / 2 = 500.0.
         assert!((r.mbb_per_100 - 500.0).abs() < 1e-9);
@@ -720,7 +866,7 @@ mod tests {
     #[test]
     fn zero_mean_vector_yields_zero_mbb_and_zero_ci() {
         let per_hand = vec![0_i16; 100];
-        let r = summarize(&per_hand, 2, Baseline::Fish);
+        let r = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
         assert_eq!(r.mbb_per_100, 0.0);
         assert_eq!(r.mbb_ci95, 0.0);
         assert_eq!(r.wins, 0);
@@ -736,7 +882,7 @@ mod tests {
     #[test]
     fn mixed_wins_and_losses_split_count() {
         let per_hand = vec![10_i16, -5, -5, 0];
-        let r = summarize(&per_hand, 2, Baseline::Fish);
+        let r = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
         assert_eq!(r.wins, 1);
         assert_eq!(r.losses, 2);
         assert_eq!(r.net_chips, 0);
@@ -758,7 +904,7 @@ mod tests {
     fn win_rate_ci95_matches_normal_approx_formula() {
         let mut per_hand = vec![1_i16; 50];
         per_hand.extend(vec![-1_i16; 50]);
-        let r = summarize(&per_hand, 2, Baseline::Fish);
+        let r = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
         assert!((r.win_rate - 0.5).abs() < 1e-9);
         let expected = 1.96 * (0.5_f64 * 0.5_f64 / 100_f64).sqrt();
         assert!(
@@ -778,7 +924,7 @@ mod tests {
     #[test]
     fn to_json_contains_every_field() {
         let per_hand = vec![3_i16; 10];
-        let r = summarize(&per_hand, 2, Baseline::Equity);
+        let r = summarize(&per_hand, 2, Baseline::Equity, Blueprint::V1);
         let s = r.to_json();
         for needle in [
             "\"hands\":10",
@@ -791,6 +937,7 @@ mod tests {
             "\"win_rate_ci95\":",
             "\"blind\":2",
             "\"blueprint_trained\":true",
+            "\"blueprint\":\"v1\"",
             "\"baseline\":\"equity\"",
             "\"transcript\":false",
         ] {
@@ -987,16 +1134,17 @@ mod tests {
     #[test]
     fn summarize_stamps_baseline_into_report() {
         let per_hand = vec![0_i16; 4];
-        let r_fish = summarize(&per_hand, 2, Baseline::Fish);
+        let r_fish = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
         assert_eq!(r_fish.baseline, Baseline::Fish);
         assert!(r_fish.to_json().contains("\"baseline\":\"fish\""));
-        let r_equity = summarize(&per_hand, 2, Baseline::Equity);
+        assert!(r_fish.to_json().contains("\"blueprint\":\"v1\""));
+        let r_equity = summarize(&per_hand, 2, Baseline::Equity, Blueprint::V1);
         assert_eq!(r_equity.baseline, Baseline::Equity);
         assert!(r_equity.to_json().contains("\"baseline\":\"equity\""));
-        let r_preflop = summarize(&per_hand, 2, Baseline::Preflop);
+        let r_preflop = summarize(&per_hand, 2, Baseline::Preflop, Blueprint::V1);
         assert_eq!(r_preflop.baseline, Baseline::Preflop);
         assert!(r_preflop.to_json().contains("\"baseline\":\"preflop\""));
-        let r_bluffer = summarize(&per_hand, 2, Baseline::Bluffer);
+        let r_bluffer = summarize(&per_hand, 2, Baseline::Bluffer, Blueprint::V1);
         assert_eq!(r_bluffer.baseline, Baseline::Bluffer);
         assert!(r_bluffer.to_json().contains("\"baseline\":\"bluffer\""));
     }
@@ -1010,6 +1158,100 @@ mod tests {
     #[test]
     fn default_bench_baseline_is_fish() {
         assert_eq!(DEFAULT_BENCH_BASELINE, Baseline::Fish);
+    }
+
+    // -----------------------------------------------------------------
+    // STW-017: v2 trained config (second trained config) tests.
+    //
+    // The bench crate ships `Blueprint::V1` and `Blueprint::V2`
+    // so a single `trainer --bench` invocation can compare the
+    // v1 + v2 trained configs head-to-head against the same
+    // named baseline. These lib tests pin the public
+    // `Blueprint` API that the bench depends on: the
+    // `as_str` literal (so the JSON field round-trips), the
+    // `from_env` env-var parser (so a stale `RBP_BENCH_BLUEPRINT`
+    // is tolerated), the `DEFAULT_BENCH_BLUEPRINT` constant (so
+    // v1 reports stay byte-for-byte comparable to pre-STW-017
+    // reports except for the new `blueprint` JSON field), and
+    // the summarize→JSON stamping (so the new `blueprint` field
+    // shows up in the contract tests).
+    // -----------------------------------------------------------------
+
+    /// `Blueprint::as_str` must produce the documented lowercase
+    /// literal used in both the JSON `blueprint` field and the
+    /// `RBP_BENCH_BLUEPRINT` env var. Pinning it here means a
+    /// refactor that renames a variant has to update the env-var
+    /// parser, the JSON field, and this test together, instead
+    /// of silently letting a stale `RBP_BENCH_BLUEPRINT=v1`
+    /// pick a renamed variant.
+    #[test]
+    fn blueprint_as_str_matches_published_strings() {
+        assert_eq!(Blueprint::V1.as_str(), "v1");
+        assert_eq!(Blueprint::V2.as_str(), "v2");
+    }
+
+    /// `Blueprint::from_env` honours `RBP_BENCH_BLUEPRINT` for
+    /// the two known values (`v1`, `v2`) and falls back to
+    /// `DEFAULT_BENCH_BLUEPRINT` for missing/unset/unknown
+    /// values. Same save/restore discipline as
+    /// `baseline_from_env_round_trip`.
+    #[test]
+    fn blueprint_from_env_round_trip() {
+        let saved = std::env::var("RBP_BENCH_BLUEPRINT").ok();
+        // SAFETY: tests in this module are the only writers of
+        // `RBP_BENCH_BLUEPRINT`; we serialise the read/write
+        // with `set_var` and the implicit single-threaded
+        // `#[test]` execution model.
+        unsafe {
+            std::env::set_var("RBP_BENCH_BLUEPRINT", "v1");
+        }
+        assert_eq!(Blueprint::from_env(), Blueprint::V1);
+        unsafe {
+            std::env::set_var("RBP_BENCH_BLUEPRINT", "v2");
+        }
+        assert_eq!(Blueprint::from_env(), Blueprint::V2);
+        unsafe {
+            std::env::set_var("RBP_BENCH_BLUEPRINT", "not-a-blueprint");
+        }
+        assert_eq!(Blueprint::from_env(), DEFAULT_BENCH_BLUEPRINT);
+        unsafe {
+            std::env::remove_var("RBP_BENCH_BLUEPRINT");
+        }
+        assert_eq!(Blueprint::from_env(), DEFAULT_BENCH_BLUEPRINT);
+        if let Some(v) = saved {
+            unsafe {
+                std::env::set_var("RBP_BENCH_BLUEPRINT", v);
+            }
+        }
+    }
+
+    /// `DEFAULT_BENCH_BLUEPRINT` must be `Blueprint::V1` to
+    /// preserve v1 bench-report comparability: every bench run
+    /// that predates the STW-017 slice seated a v1
+    /// `DatabasePlayer` at seat 0, so a downstream dashboard
+    /// that aggregates reports by `blueprint` needs the v1
+    /// default to land in the same bucket as the explicit
+    /// `RBP_BENCH_BLUEPRINT=v1` runs.
+    #[test]
+    fn default_bench_blueprint_is_v1() {
+        assert_eq!(DEFAULT_BENCH_BLUEPRINT, Blueprint::V1);
+    }
+
+    /// `summarize` must stamp the caller-supplied `Blueprint`
+    /// straight into the `BenchReport` so a downstream scraper
+    /// can group reports by `blueprint` (v1 vs v2) without
+    /// re-parsing the raw `per_hand` vector. This test pins
+    /// both the v1 default and the v2 (`v2` second trained
+    /// config) paths in one go.
+    #[test]
+    fn summarize_stamps_blueprint_into_report() {
+        let per_hand = vec![0_i16; 4];
+        let r_v1 = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V1);
+        assert_eq!(r_v1.blueprint, Blueprint::V1);
+        assert!(r_v1.to_json().contains("\"blueprint\":\"v1\""));
+        let r_v2 = summarize(&per_hand, 2, Baseline::Fish, Blueprint::V2);
+        assert_eq!(r_v2.blueprint, Blueprint::V2);
+        assert!(r_v2.to_json().contains("\"blueprint\":\"v2\""));
     }
 
     // -----------------------------------------------------------------

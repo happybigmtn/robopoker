@@ -1,8 +1,11 @@
 //! Training mode selection from command line arguments.
 use crate::*;
 use rbp_database::Check;
+use rbp_database::Check2;
 use rbp_database::Schema;
+use rbp_nlhe::EpochMetaV2;
 use rbp_nlhe::NlheProfile;
+use rbp_nlhe::NlheProfileV2;
 use std::path::PathBuf;
 
 /// Training mode parsed from command line arguments
@@ -14,6 +17,20 @@ pub enum Mode {
     Reset,
     Smoke,
     Bench,
+    /// STW-017: train the v2 trained config
+    /// ([`crate::Fast2Session`]) against the v2 tables
+    /// ([`rbp_database::BLUEPRINT2`] /
+    /// [`rbp_database::EPOCH2`]). Parallels `Self::Fast`
+    /// for the v1 trained config; the two can be run
+    /// sequentially (or interleaved across the same
+    /// database) without colliding because the v1 +
+    /// v2 staging tables, blueprint tables, and epoch
+    /// rows are all separate physical objects. Honors
+    /// the same `RBP_FAST_EPOCHS` / `RBP_FAST_BATCH`
+    /// env knobs as `Self::Fast` (a `--fast2` worker
+    /// uses the same env-gated budget so a small
+    /// smoke run completes in seconds).
+    Fast2,
     /// STW-016: read a `transcript-<hand_id>.json` file the
     /// bench harness wrote and re-derive the `(Position,
     /// Action)` sequence + a renderable text summary,
@@ -39,6 +56,7 @@ impl Mode {
                 "--cluster" => return Self::Cluster,
                 "--status" => return Self::Status,
                 "--fast" => return Self::Fast,
+                "--fast2" => return Self::Fast2,
                 "--slow" => return Self::Slow,
                 "--reset" => return Self::Reset,
                 "--smoke" => return Self::Smoke,
@@ -93,7 +111,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --slow | --reset | --smoke | --bench | --replay <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --replay <path>"
         );
         std::process::exit(1);
     }
@@ -128,9 +146,22 @@ impl Mode {
         let client = rbp_database::db().await;
         match Self::from_args() {
             Self::Fast => FastSession::new(client).await.train().await,
+            // STW-017: v2 trained config. The
+            // `Fast2Session` shape is the v1 shape
+            // verbatim; the only divergence is the
+            // table names the v2 `sync` writes
+            // (BLUEPRINT2 / STAGING2 / EPOCH2).
+            Self::Fast2 => Fast2Session::new(client).await.train().await,
             Self::Slow => SlowSession::new(client).await.train().await,
             Self::Reset => Self::reset(&client).await,
-            Self::Status => client.status().await,
+            Self::Status => {
+                client.status().await;
+                // STW-017: also print the v2 epoch +
+                // blueprint row counts so a `--status`
+                // run reports both the v1 + v2
+                // trained-config state.
+                client.status_v2().await;
+            }
             Self::Cluster => PreTraining::run(&client).await,
             Self::Smoke => Self::smoke(client).await,
             Self::Bench => crate::bench::run(client).await,
@@ -147,16 +178,34 @@ impl Mode {
         }
     }
     async fn reset(client: &tokio_postgres::Client) {
-        log::info!("Truncating blueprint table...");
+        log::info!("Truncating blueprint (v1) table...");
         client
             .execute(<NlheProfile as Schema>::truncates(), &[])
             .await
             .expect("truncate blueprint");
-        log::info!("Resetting epoch counter...");
+        log::info!("Resetting epoch (v1) counter...");
         client
             .execute(<EpochMeta as Schema>::truncates(), &[])
             .await
             .expect("reset epoch");
+        // STW-017: also reset the v2 trained config.
+        // The v2 `'current_v2'` row is independent
+        // of the v1 `'current'` row, so a v1 reset
+        // (the `Mode::Reset` arm above) does not
+        // affect the v2 counter. A v2 reset zeroes
+        // the v2 row only — it does not touch the
+        // v1 row, so a v1 `--fast` continuation
+        // survives a v2 reset.
+        log::info!("Truncating blueprint (v2) table...");
+        client
+            .execute(<NlheProfileV2 as Schema>::truncates(), &[])
+            .await
+            .expect("truncate blueprint_v2");
+        log::info!("Resetting epoch (v2) counter...");
+        client
+            .execute(<EpochMetaV2 as Schema>::truncates(), &[])
+            .await
+            .expect("reset epoch_v2");
         log::info!("Reset complete.");
     }
     /// One-shot smoke pipeline: pretraining + N training epochs

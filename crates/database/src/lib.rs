@@ -25,12 +25,16 @@
 //! Constants for all persistent entities: abstractions, blueprints,
 //! metrics, hands, sessions, and more.
 mod check;
+mod check2;
 mod schema;
 mod stage;
+mod stage2;
 mod traits;
 
 pub use check::*;
+pub use check2::*;
 pub use stage::*;
+pub use stage2::*;
 // schema module provides trait impls, no items to re-export
 pub use traits::*;
 
@@ -76,9 +80,31 @@ pub const ACTIONS:     &str = "actions";
 /// Table for MCCFR blueprint strategies (policy + regret).
 #[rustfmt::skip]
 pub const BLUEPRINT:   &str = "blueprint";
+/// STW-017: second trained config's blueprint table. Mirrors
+/// [`BLUEPRINT`] shape-for-shape; the v2 trained config
+/// (`Flagship2` = `DiscountedRegret` + `QuadraticWeight` +
+/// `PluribusSampling`) writes to and reads from this table so a
+/// v1 `Flagship` snapshot and a v2 `Flagship2` snapshot can
+/// coexist in the same database without overwriting each other.
+#[rustfmt::skip]
+pub const BLUEPRINT2:  &str = "blueprint_v2";
 /// Table for training epoch metadata and progress.
 #[rustfmt::skip]
 pub const EPOCH:       &str = "epoch";
+/// STW-017: second trained config's epoch table. Mirrors
+/// [`EPOCH`] shape-for-shape; the `'current_v2'` key
+/// (see [`EPOCH2_KEY`]) tracks the v2 training epoch so a
+/// `--reset` of the v1 epoch does not zero the v2 epoch and
+/// vice versa.
+#[rustfmt::skip]
+pub const EPOCH2:      &str = "epoch_v2";
+/// STW-017: the single-row key for the v2 epoch table
+/// ([`EPOCH2`]). Mirrors the v1 `'current'` convention so the
+/// v1 and v2 `EPOCH` rows are both present after a fresh
+/// `PreTraining::run` and a v1 `Mode::reset` does not stomp the
+/// v2 row.
+#[rustfmt::skip]
+pub const EPOCH2_KEY:  &str = "current_v2";
 /// Table for completed poker hands.
 #[rustfmt::skip]
 pub const HANDS:       &str = "hands";
@@ -100,6 +126,15 @@ pub const SESSIONS:    &str = "sessions";
 /// Table for staging data during bulk operations.
 #[rustfmt::skip]
 pub const STAGING:     &str = "staging";
+/// STW-017: second trained config's staging table. Mirrors
+/// [`STAGING`] shape-for-shape (a `UNLOGGED` clone of
+/// [`BLUEPRINT2`]); the v2 `Fast2Session::sync` writes rows
+/// here first and then upserts them into [`BLUEPRINT2`]. The
+/// v1 ([`STAGING`]) and v2 ([`STAGING2`]) tables are
+/// independent, so a v1 `FastSession::sync` in flight never
+/// touches v2 data and vice versa.
+#[rustfmt::skip]
+pub const STAGING2:    &str = "staging_v2";
 /// Table for street-specific metadata.
 #[rustfmt::skip]
 pub const STREET:      &str = "street";

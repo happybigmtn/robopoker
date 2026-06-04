@@ -21,6 +21,7 @@
 mod bench;
 mod epoch;
 mod fast;
+mod fast2;
 mod mode;
 mod pretraining;
 mod replay;
@@ -32,6 +33,7 @@ pub mod workers;
 pub use bench::*;
 pub use epoch::*;
 pub use fast::*;
+pub use fast2::*;
 pub use mode::*;
 pub use pretraining::*;
 pub use slow::*;
