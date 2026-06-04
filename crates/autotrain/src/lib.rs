@@ -20,6 +20,7 @@
 //! - [`workers`] — Distributed training workers for MCCFR
 mod bench;
 mod epoch;
+mod error;
 mod fast;
 mod fast2;
 mod fast3;
@@ -40,6 +41,7 @@ pub mod workers;
 
 pub use bench::*;
 pub use epoch::*;
+pub use error::*;
 pub use fast::*;
 pub use fast2::*;
 pub use fast3::*;

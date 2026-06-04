@@ -431,6 +431,80 @@ impl fmt::Display for PublishRemoteError {
 
 impl std::error::Error for PublishRemoteError {}
 
+/// STW-038: the dashboard-greppable pinned error
+/// line. The `Display` impl above emits the
+/// *legacy* `live_proof publish_remote error: ...`
+/// shape the existing per-arm call sites +
+/// `cargo test --workspace` integration tests
+/// pin. The new `to_pinned_line` emits the
+/// STW-038 dashboard-greppable
+/// `trainer error: kind=red_receipt detail=<detail>`
+/// shape a CI scraper can `grep ^trainer error
+/// kind=`. The two lines are *both* emitted on
+/// the same stderr write from the
+/// `Mode::PublishRemote` dispatch arm, so a
+/// regression in either shape fails CI.
+impl PublishRemoteError {
+    /// STW-038: map the per-variant
+    /// `PublishRemoteError` to a `TrainerError`
+    /// and emit the pinned `to_pinned_line`
+    /// shape. The `ReceiptRed` variant becomes
+    /// `TrainerError::RedReceipt` (the
+    /// "publish-remote refused to plan an upload
+    /// for a red receipt" failure mode the
+    /// STW-033 surface names); the 7 non-red
+    /// variants become `TrainerError::Internal`
+    /// with a human-readable detail. The
+    /// `BucketUri("")` failure mode (operator
+    /// passed `--bucket` with no value) is
+    /// mapped to `TrainerError::NoBucket` so the
+    /// dashboard scraper can distinguish a
+    /// missing-bucket-arg from a malformed
+    /// bucket-arg.
+    pub fn to_pinned_line(&self) -> String {
+        match self {
+            PublishRemoteError::ReceiptRed(s) => {
+                crate::error::TrainerError::RedReceipt(s.clone()).to_pinned_line()
+            }
+            PublishRemoteError::BucketUri(s) if s.is_empty() => {
+                crate::error::TrainerError::NoBucket.to_pinned_line()
+            }
+            PublishRemoteError::BucketUri(s) => {
+                crate::error::TrainerError::Internal(format!("publish_remote: bucket_uri: {s}"))
+                    .to_pinned_line()
+            }
+            PublishRemoteError::BundleHashMismatch {
+                path,
+                expected,
+                actual,
+            } => crate::error::TrainerError::Internal(format!(
+                "publish_remote: bundle_hash_mismatch: {path}: expected {expected}, got {actual}"
+            ))
+            .to_pinned_line(),
+            PublishRemoteError::MissingObject(s) => {
+                crate::error::TrainerError::Internal(format!("publish_remote: missing_object: {s}"))
+                    .to_pinned_line()
+            }
+            PublishRemoteError::FileUnreadable(s) => crate::error::TrainerError::Internal(format!(
+                "publish_remote: file_unreadable: {s}"
+            ))
+            .to_pinned_line(),
+            PublishRemoteError::ReceiptDir(s) => {
+                crate::error::TrainerError::Internal(format!("publish_remote: receipt_dir: {s}"))
+                    .to_pinned_line()
+            }
+            PublishRemoteError::BundleDir(s) => {
+                crate::error::TrainerError::Internal(format!("publish_remote: bundle_dir: {s}"))
+                    .to_pinned_line()
+            }
+            PublishRemoteError::AwsCli(s) => {
+                crate::error::TrainerError::Internal(format!("publish_remote: aws_cli: {s}"))
+                    .to_pinned_line()
+            }
+        }
+    }
+}
+
 // --- entry points ---------------------------------------------------
 
 /// Plan + (optionally) apply a remote upload

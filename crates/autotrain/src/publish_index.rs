@@ -352,6 +352,64 @@ impl fmt::Display for PublishIndexError {
 
 impl std::error::Error for PublishIndexError {}
 
+/// STW-038: the dashboard-greppable pinned error
+/// line. The `Display` impl above emits the
+/// *legacy* `live_proof publish_index error: ...`
+/// shape the existing per-arm call sites +
+/// `cargo test --workspace` integration tests
+/// pin. The new `to_pinned_line` emits the
+/// STW-038 dashboard-greppable
+/// `trainer error: kind=red_index detail=<detail>`
+/// shape a CI scraper can `grep ^trainer error
+/// kind=`. The two lines are *both* emitted on
+/// the same stderr write from the
+/// `Mode::PublishIndex` dispatch arm, so a
+/// regression in either shape fails CI.
+impl PublishIndexError {
+    /// STW-038: map the per-variant
+    /// `PublishIndexError` to a `TrainerError`
+    /// and emit the pinned `to_pinned_line`
+    /// shape. The `RemoteReceiptRed` variant
+    /// becomes `TrainerError::RedIndex` (the
+    /// "publish-index refused to write an
+    /// INDEX.json containing a red remote
+    /// receipt" failure mode the STW-034
+    /// surface names); the 5 non-red variants
+    /// become `TrainerError::Internal` with a
+    /// human-readable detail.
+    pub fn to_pinned_line(&self) -> String {
+        match self {
+            PublishIndexError::RemoteReceiptRed(s) => {
+                crate::error::TrainerError::RedIndex(s.clone()).to_pinned_line()
+            }
+            PublishIndexError::BundleHashMismatch {
+                path,
+                expected,
+                actual,
+            } => crate::error::TrainerError::Internal(format!(
+                "publish_index: bundle_hash_mismatch: {path}: expected {expected}, got {actual}"
+            ))
+            .to_pinned_line(),
+            PublishIndexError::MissingObject(s) => {
+                crate::error::TrainerError::Internal(format!("publish_index: missing_object: {s}"))
+                    .to_pinned_line()
+            }
+            PublishIndexError::FileUnreadable(s) => {
+                crate::error::TrainerError::Internal(format!("publish_index: file_unreadable: {s}"))
+                    .to_pinned_line()
+            }
+            PublishIndexError::PublishRoot(s) => {
+                crate::error::TrainerError::Internal(format!("publish_index: publish_root: {s}"))
+                    .to_pinned_line()
+            }
+            PublishIndexError::NoEntries(s) => {
+                crate::error::TrainerError::Internal(format!("publish_index: no_entries: {s}"))
+                    .to_pinned_line()
+            }
+        }
+    }
+}
+
 impl From<PublishRemoteError> for PublishIndexError {
     fn from(e: PublishRemoteError) -> Self {
         match e {

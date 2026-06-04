@@ -4714,7 +4714,7 @@ single-shipment leverage.
   completion-signal evidence the testnet
   north star names).**
 
-- [ ] **[P0] `STW-038` `crates/autotrain/src/mode.rs` grouped
+- [x] **[P0] `STW-038` `crates/autotrain/src/mode.rs` grouped
   `Usage:` block + `crates/autotrain/src/error.rs` typed
   `TrainerError` enum with a `to_pinned_line(&self) -> String`
   dashboard-greppable error surface.** Cuts operator

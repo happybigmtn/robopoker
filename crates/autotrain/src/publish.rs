@@ -307,6 +307,67 @@ impl fmt::Display for PublishError {
 
 impl std::error::Error for PublishError {}
 
+/// STW-038: the dashboard-greppable pinned error
+/// line. The `Display` impl above emits the
+/// *legacy* `live_proof publish error: ...`
+/// shape the existing per-arm call sites +
+/// `cargo test --workspace` integration tests
+/// pin. The new `to_pinned_line` emits the
+/// STW-038 dashboard-greppable
+/// `trainer error: kind=red_bundle detail=<detail>`
+/// shape a CI scraper can `grep ^trainer error
+/// kind=`. The two lines are *both* emitted on
+/// the same stderr write from the `Mode::Publish`
+/// dispatch arm, so a regression in either
+/// shape fails CI.
+impl PublishError {
+    /// STW-038: map the per-variant `PublishError`
+    /// to a `TrainerError` and emit the pinned
+    /// `to_pinned_line` shape. The `ReceiptRed`
+    /// variant becomes `TrainerError::RedBundle`
+    /// (the "publish refused to bundle a red
+    /// receipt" failure mode the STW-032 surface
+    /// names); the 5 non-red variants become
+    /// `TrainerError::Internal` with a
+    /// human-readable detail (a future STW-039+
+    /// slice can add more granular `kind` tokens
+    /// for the non-red variants; the STW-038
+    /// contract is "every error path has a
+    /// pinned shape", not "every error path has
+    /// a unique kind").
+    pub fn to_pinned_line(&self) -> String {
+        match self {
+            PublishError::ReceiptRed(s) => {
+                crate::error::TrainerError::RedBundle(s.clone()).to_pinned_line()
+            }
+            PublishError::ManifestShape(s) => {
+                crate::error::TrainerError::Internal(format!("publish: manifest shape: {s}"))
+                    .to_pinned_line()
+            }
+            PublishError::BundleHashMismatch {
+                path,
+                expected,
+                actual,
+            } => crate::error::TrainerError::Internal(format!(
+                "publish: bundle_hash_mismatch: {path}: expected {expected}, got {actual}"
+            ))
+            .to_pinned_line(),
+            PublishError::MissingFile(s) => {
+                crate::error::TrainerError::Internal(format!("publish: missing_file: {s}"))
+                    .to_pinned_line()
+            }
+            PublishError::FileUnreadable(s) => {
+                crate::error::TrainerError::Internal(format!("publish: file_unreadable: {s}"))
+                    .to_pinned_line()
+            }
+            PublishError::ReceiptDir(s) => {
+                crate::error::TrainerError::Internal(format!("publish: receipt_dir: {s}"))
+                    .to_pinned_line()
+            }
+        }
+    }
+}
+
 /// `PublishOutput` — the typed return value of
 /// [`publish_receipt`]. The handler returns this
 /// so the `Mode::Publish` CLI can print a one-line

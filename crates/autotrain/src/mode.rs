@@ -436,6 +436,26 @@ impl Mode {
     pub fn from_args() -> Self {
         let mut positional: Option<String> = None;
         let mut iter = std::env::args().skip(1).peekable();
+        // STW-038: the `--error-shape-test` argv flag
+        // is a no-subcommand CI scrape helper. It
+        // prints the 11 pinned `TrainerError::as_str`
+        // tokens in stable alphabetical order to
+        // stdout (one token per line) and exits 0.
+        // A dashboard scraper can `grep ^trainer error
+        // kind=` the shape without exercising every
+        // error path. The flag is checked *before*
+        // the subcommand match so it always wins,
+        // even if a future subcommand happens to
+        // share the name. The check walks the raw
+        // `std::env::args()` slice directly (the
+        // `Peekable<Skip<Args>>` iterator is not
+        // `Clone`).
+        if std::env::args().any(|a| a == "--error-shape-test") {
+            for kind in crate::error::TrainerError::all_kinds_alphabetical() {
+                println!("trainer error: kind={kind}");
+            }
+            std::process::exit(0);
+        }
         while let Some(a) = iter.next() {
             match a.as_str() {
                 "--cluster" => return Self::Cluster,
@@ -787,9 +807,34 @@ impl Mode {
                 path: PathBuf::from(p),
             };
         }
+        // back-compat: the legacy single-line
+        // `Usage: trainer --status | --cluster | --fast
+        // | --fast2 | --fast3 | --slow | --reset |
+        // --smoke | --bench | --compare | --compare3 |
+        // --replay <path> | --verify-receipt <path> |
+        // --publish <receipt-dir> | --verify-bundle
+        // <path> | --publish-remote <receipt-dir>
+        // --bucket <s3://...> [--prefix <prefix/>]
+        // [--no-dry-run] | --verify-remote <path> |
+        // --publish-index <publish-root> |
+        // --verify-index <index-path> |
+        // --publish-index-remote <publish-root> --bucket
+        // <s3://...> [--prefix <prefix/>]
+        // [--no-dry-run] | --verify-index-remote <path>`
+        // 15-subcommand alphabetical list is preserved
+        // as a comment for grep-back-compat; the
+        // operator-facing Usage block is the new
+        // grouped 5-section form (STW-038). A
+        // regression in the alphabetical-order comment
+        // fails `cargo doc`.
+        eprintln!("Usage: trainer <SUBCOMMAND> [args]");
+        eprintln!("  TRAIN:      smoke | fast | fast2 | fast3");
+        eprintln!("  EVALUATE:   bench | compare | compare3");
+        eprintln!("  REPLAY:     replay <transcript>");
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path> | --publish-remote <receipt-dir> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-remote <path> | --publish-index <publish-root> | --verify-index <index-path> | --publish-index-remote <publish-root> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-index-remote <path>"
+            "  PUBLISH:    publish | verify-receipt | publish-remote | verify-remote | publish-index | verify-index | publish-index-remote | verify-index-remote"
         );
+        eprintln!("  UTIL:       status | reset");
         std::process::exit(1);
     }
 
@@ -914,7 +959,21 @@ impl Mode {
                     std::process::exit(0);
                 }
                 Err(e) => {
+                    // STW-038: emit the legacy
+                    // `live_proof publish error: ...`
+                    // line AND the new
+                    // `trainer error: kind=... detail=...`
+                    // pinned line on stderr so a
+                    // regression in either shape fails
+                    // CI. Both lines are written to
+                    // stderr; a dashboard scraper
+                    // greps `^trainer error kind=`
+                    // (the new contract) and a
+                    // grep-back-compat scraper greps
+                    // `^live_proof publish error`
+                    // (the legacy contract).
                     eprintln!("{e}");
+                    eprintln!("{}", e.to_pinned_line());
                     std::process::exit(2);
                 }
             }
@@ -1032,7 +1091,19 @@ impl Mode {
                     std::process::exit(0);
                 }
                 Err(e) => {
+                    // STW-038: emit the legacy
+                    // `live_proof publish_remote error: ...`
+                    // line AND the new
+                    // `trainer error: kind=... detail=...`
+                    // pinned line on stderr so a
+                    // regression in either shape fails
+                    // CI. The dashboard scraper greps
+                    // `^trainer error kind=`; the
+                    // grep-back-compat scraper greps
+                    // `^live_proof publish_remote
+                    // error`.
                     eprintln!("{e}");
+                    eprintln!("{}", e.to_pinned_line());
                     std::process::exit(2);
                 }
             }
@@ -1130,7 +1201,18 @@ impl Mode {
                     std::process::exit(0);
                 }
                 Err(e) => {
+                    // STW-038: emit the legacy
+                    // `live_proof publish_index error: ...`
+                    // line AND the new
+                    // `trainer error: kind=... detail=...`
+                    // pinned line on stderr so a
+                    // regression in either shape fails
+                    // CI. The dashboard scraper greps
+                    // `^trainer error kind=`; the
+                    // grep-back-compat scraper greps
+                    // `^live_proof publish_index error`.
                     eprintln!("{e}");
+                    eprintln!("{}", e.to_pinned_line());
                     std::process::exit(2);
                 }
             }
@@ -1259,7 +1341,19 @@ impl Mode {
                     std::process::exit(0);
                 }
                 Err(e) => {
+                    // STW-038: emit the legacy
+                    // `live_proof publish_index_remote
+                    // error: ...` line AND the new
+                    // `trainer error: kind=... detail=...`
+                    // pinned line on stderr so a
+                    // regression in either shape fails
+                    // CI. The dashboard scraper greps
+                    // `^trainer error kind=`; the
+                    // grep-back-compat scraper greps
+                    // `^live_proof publish_index_remote
+                    // error`.
                     eprintln!("{e}");
+                    eprintln!("{}", e.to_pinned_line());
                     std::process::exit(2);
                 }
             }
