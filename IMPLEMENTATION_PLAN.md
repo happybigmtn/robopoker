@@ -18,6 +18,139 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+- [x] `STW-031` `trainer --compare3` v1-vs-v2-vs-v3
+  three-way trained-config compare: the "next-next
+  slice" the CEO testnet roadmap names immediately
+  after the STW-029 v3 trained config ("a
+  v1-vs-v2-vs-v3 compare is the next-next slice if
+  a v3 trained config proves meaningfully different
+  from the v1 / v2 pair" — `genesis/plans/000-ceo-testnet-roadmap.md`
+  line 34). A single `trainer --compare3`
+  invocation rotates the v1 / v2 / v3 trained
+  configs through three pairwise heads-up `Room`
+  shells (v1 vs v2, v2 vs v3, v3 vs v1) for K
+  hands each, aggregates the per-config net chips
+  across both seat assignments (so a config that
+  plays both seat 0 and seat 1 across the three
+  rotations gets a symmetric per-config mbb/100
+  that is unbiased by seat-position), and prints a
+  single-line JSON `Compare3Report` declaring the
+  ranked winner (the v1 / v2 / v3 config with the
+  strictly highest per-config `mbb_per_100`, or
+  `Tie` if the top two are within
+  [`COMPARE3_TIE_TOLERANCE`] mbb/100) plus the
+  per-config mbb/100 / CI / win-rate numbers and
+  the three pairwise `delta_mbb_per_100` values
+  (v1-vs-v2, v2-vs-v3, v3-vs-v1). The
+  `ranked_winner` field is the headline a testnet
+  dashboard reads; the per-config sub-reports let
+  a downstream scraper plot the per-config
+  learning curve over a series of `--compare3`
+  runs. The compare3 reuses the same `Room` shell
+  + per-hand settlement shape the existing
+  `--compare` (v1-vs-v2 STW-018) uses, so a
+  regression in the per-hand PnL math fails the
+  bench / compare / compare3 integration tests in
+  the same CI run. Owner files:
+  `crates/autotrain/src/bench.rs` (new
+  `Compare3Winner` enum + `Compare3SubReport`
+  struct + `Compare3Report` struct + `to_json` +
+  `summarize_compare3` + new
+  `compare3_winner_as_str_matches_published_strings`
+  / `compare3_summarize_declares_v1_winner_when_v1_top`
+  / `compare3_summarize_declares_v2_winner_when_v2_top`
+  / `compare3_summarize_declares_v3_winner_when_v3_top`
+  / `compare3_summarize_declares_tie_on_close_top_two`
+  / `compare3_summarize_v1_v2_v3_deltas_each_pair_nets_to_zero`
+  / `compare3_summarize_aggregates_per_config_across_both_seats`
+  / `compare3_to_json_contains_every_field` lib
+  tests + new `run_compare3_hands` /
+  `run_compare3` top-level entry points + new
+  `DEFAULT_COMPARE3_HANDS` /
+  `DEFAULT_COMPARE3_BLIND` /
+  `COMPARE3_TIE_TOLERANCE` constants + new
+  `compare3_hands` / `compare3_blind` env helpers),
+  `crates/autotrain/src/mode.rs` (new
+  `Mode::Compare3` arm + `--compare3` argv
+  handling + the v1 / v2 / v3 rotation call into
+  `bench::run_compare3` + `--compare3` listed in
+  the `Usage:` eprintln! line),
+  `crates/autotrain/tests/compare3.rs` (new
+  `compare3_run_emits_parseable_json_with_consistent_accounting`
+  integration test gated on `database` +
+  `DATABASE_URL` like the existing `compare.rs`
+  integration test — drives `trainer --reset`
+  then `trainer --compare3` end-to-end and
+  asserts the JSON line parses, the headline
+  accounting is internally consistent (the three
+  pairwise per-hand PnL vectors each net to zero
+  because the heads-up `Room` is two-seat;
+  per-config mbb/100 is the sum of that config's
+  seat-0 and seat-1 PnL across its two
+  appearances, the `ranked_winner` field ∈
+  `{"v1", "v2", "v3", "tie"}`, the v1 / v2 / v3
+  sub-reports each have non-zero `hands` and the
+  same `hands` count = 2*K), and the post-reset
+  `blueprint_trained_v1` / `blueprint_trained_v2`
+  / `blueprint_trained_v3` flags are all `false`),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v6 next-next slice as shipped with
+  a one-line note). Scope boundary: do NOT touch
+  the existing `Mode::Compare` / `CompareReport`
+  / `--compare` code path (the compare3 is a
+  three-way compare, not a refactor of the
+  two-way compare — a future dashboard that
+  scrapes `--compare` reports is unchanged by
+  this slice); do NOT introduce a fourth
+  `Blueprint` variant; do NOT change the seat-0
+  / seat-1 dispatch in `bench::run_hands`; do
+  NOT introduce a new trained config; the
+  compare3 reuses the v1 + v2 + v3 trained
+  configs the v1 + v2 + v3 `trainer --bench`
+  paths already hydrate; do NOT change the room
+  protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means cluster
+  counts, the `CFR_TREE_COUNT_NLHE` baseline,
+  the v1 / v2 / v3 / v4 named baselines, the
+  `trainer --replay` CLI, the
+  `trainer --verify-receipt` CLI, or the
+  `trainer --smoke` / `trainer --bench` /
+  `trainer --compare` JSON contracts. The
+  compare3 is *structurally parallel* to the
+  compare (one `Room` shell per pair, three
+  rotations to give each config a symmetric
+  seat-position exposure, one JSON report) so a
+  `trainer --compare` run and a `trainer
+  --compare3` run can coexist in the same
+  database without colliding on the v1 / v2 / v3
+  staging tables, the v1 / v2 / v3 blueprint
+  tables, or the v1 / v2 / v3 epoch rows.
+  Verification commands: `cargo test -p
+  rbp-autotrain --features database --tests
+  --lib`, `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`. Required tests: the new
+  lib tests in `bench.rs::tests` + the new
+  `crates/autotrain/tests/compare3.rs`
+  integration test; no padding of unrelated
+  suites. Dependencies: `STW-029` (the v3
+  trained config + v3 `DatabasePlayer3` + v3
+  `Blueprint::V3` env-var dispatch the
+  compare3 seats at the rotated seats),
+  `STW-018` (the v1-vs-v2 `Mode::Compare` +
+  `CompareReport` + `Room` shell the compare3
+  reuses one-for-one), and `STW-010` (the bench
+  harness the compare3 mirrors). Estimated
+  scope: M. Completion signal: `trainer
+  --compare3` exits 0 on a freshly-`--reset` DB
+  and prints a parseable single-line JSON
+  `Compare3Report` whose `ranked_winner` field
+  is one of `{"v1", "v2", "v3", "tie"}`; the
+  integration test passes; `cargo test
+  --workspace` and `cargo fmt --check` are
+  green.
+
 - [x] `STW-030` `verification:workspace-parallel` mainnet-block
   hinge close-out: the `steward/HINGES.md` rank #2 hinge
   (also listed in `steward/HAZARDS.md` as a mainnet-block

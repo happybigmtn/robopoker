@@ -1431,6 +1431,879 @@ pub async fn run_compare(client: Arc<Client>) {
     );
 }
 
+// ---------------------------------------------------------------------
+// STW-031: `trainer --compare3` head-to-head v1-vs-v2-vs-v3
+// trained-config compare. Parallels
+// [`bench::run_compare`] (STW-018, v1-vs-v2) but
+// rotates the v1 / v2 / v3 trained configs through
+// three pairwise heads-up `Room` shells (v1 vs v2,
+// v2 vs v3, v3 vs v1) for K hands each. The
+// per-config net chips are aggregated across both
+// seat assignments (each config plays both seat 0
+// and seat 1 across the three rotations) so a
+// config's headline `mbb_per_100` is unbiased by
+// seat-position. The `ranked_winner` is the
+// per-config `mbb_per_100` ranking, with `Tie`
+// breaking the top two when they are within
+// [`COMPARE3_TIE_TOLERANCE`] mbb/100.
+//
+// ## Why three pairwise rotations (and not a 3-seat
+// `Room` shell)?
+//
+// The `Room` is structurally heads-up: `play_hand_once`
+// + `settlements()` always reports exactly two
+// seats' `won()`. Adding a third seat would
+// require a `Room` shape change the bench +
+// compare + production paths all share, and the
+// "nets to zero" invariant each pair satisfies
+// is the cleanest mathematical surface for a
+// three-way compare (a 3-seat room would have
+// three-way dead-money accounting that's much
+// harder to reason about and would force a
+// regression in the production `Room`). The
+// rotation gives each config a symmetric
+// seat-position exposure (each plays seat 0 once
+// and seat 1 once) so the per-config
+// `mbb_per_100` is unbiased.
+//
+// ## The "each pair nets to zero" invariant
+//
+// In a heads-up `Room` the two seats' `settlements()[i]`
+// values net to zero by construction. The
+// `Compare3SubReport::net_chips` for the v1 / v2
+// sides in the v1-vs-v2 pair therefore sum to
+// exactly 0, the v2 / v3 sides in the v2-vs-v3
+// pair sum to exactly 0, and the v3 / v1 sides
+// in the v3-vs-v1 pair sum to exactly 0. The
+// per-config aggregate (sum of seat-0 and
+// seat-1 PnL across both pairs) is therefore
+// the v1 pair's v1-PnL + the v3 pair's v1-PnL
+// (= -v3 pair's v3-PnL by zero-sum) and the
+// three per-config aggregates sum to 0 as well.
+// A regression that introduces a phantom pot
+// in any pair is caught at the
+// `compare3_summarize_v1_v2_v3_deltas_each_pair_nets_to_zero`
+// lib test before it lands.
+//
+// ## Env gates
+//
+// - `RBP_COMPARE3_HANDS` — number of hands to play
+//   *per pair* (default 100, smaller than
+//   `DEFAULT_COMPARE_HANDS` because the compare3
+//   runs 3 pairs back-to-back for 3*K total
+//   hands).
+// - `RBP_COMPARE3_BLIND` — big-blind size in chips
+//   (default `B_BLIND`, matching `DEFAULT_COMPARE_BLIND`).
+//
+// The env-var names are new (the compare's
+// `RBP_COMPARE_HANDS` / `RBP_COMPARE_BLIND` are
+// left untouched, so a v1 `trainer --compare` run
+// and a v1 `trainer --compare3` run can be sized
+// independently).
+//
+// ## JSON result line
+//
+// On success the mode emits a single-line JSON
+// document with a `hands_per_pair` count, a
+// `blind` size, a `v1` / `v2` / `v3` sub-report
+// (the per-config aggregate mbb/100 / CI /
+// win-rate across both seat assignments), three
+// pairwise `delta_mbb_per_100` values
+// (`v1_v2_delta`, `v2_v3_delta`, `v3_v1_delta`),
+// and a `ranked_winner` string. The
+// `ranked_winner` field is the headline a testnet
+// dashboard reads; the per-config sub-reports let
+// a downstream scraper plot the per-config
+// learning curve over a series of `--compare3`
+// runs.
+// ---------------------------------------------------------------------
+
+/// STW-031: v1-vs-v2-vs-v3 trained-config compare
+/// ranked winner. The compare3 rotates the v1 / v2
+/// / v3 configs through three pairwise heads-up
+/// `Room` shells; the per-config `mbb_per_100`
+/// ranking is the headline (the v1 / v2 / v3
+/// config with the strictly highest
+/// `mbb_per_100`, or `Tie` if the top two are
+/// within [`COMPARE3_TIE_TOLERANCE`] mbb/100 of
+/// each other). A three-way tie is reported as
+/// `Tie` as well (the `Tie` literal is the
+/// one-rank-fits-all "we cannot distinguish the
+/// top two" verdict a testnet dashboard reads).
+///
+/// `Compare3Winner` is `Copy + PartialEq + Debug` so
+/// the compare3 can (a) round-trip the chosen
+/// variant through a JSON field and (b) compare
+/// the declared winner against expected values in
+/// unit tests without a JSON parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compare3Winner {
+    /// The v1 `DatabasePlayer` had the strictly
+    /// highest per-config `mbb_per_100` across the
+    /// three pairwise rotations.
+    V1,
+    /// The v2 `DatabasePlayer2` had the strictly
+    /// highest per-config `mbb_per_100` across the
+    /// three pairwise rotations.
+    V2,
+    /// The v3 `DatabasePlayer3` had the strictly
+    /// highest per-config `mbb_per_100` across the
+    /// three pairwise rotations.
+    V3,
+    /// The top two per-config `mbb_per_100` values
+    /// differ by less than
+    /// [`COMPARE3_TIE_TOLERANCE`]; the K-per-pair
+    /// sample is too small to distinguish the
+    /// leading configs. A three-way tie (all three
+    /// within tolerance) is also reported as
+    /// `Tie`.
+    Tie,
+}
+
+impl Compare3Winner {
+    /// Stable lowercase string used in the JSON
+    /// report. Kept as a `match` (not a derived
+    /// `Display`) so a future variant addition
+    /// forces the JSON encoder and the test that
+    /// pins the string literal together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+            Self::Tie => "tie",
+        }
+    }
+}
+
+/// STW-031: per-config sub-report inside a
+/// [`Compare3Report`]. The shape mirrors the
+/// headline numbers from [`CompareSubReport`]
+/// (hands, wins, losses, net_chips, mbb/100,
+/// mbb_ci95, win_rate, win_rate_ci95) so a
+/// downstream scraper that already knows the
+/// `CompareReport` shape can read the compare3
+/// sub-reports with the same parser. The
+/// per-config `hands` field equals `2 * K`
+/// (each config plays K hands as seat 0 in one
+/// pair and K hands as seat 1 in another pair).
+#[derive(Debug)]
+pub struct Compare3SubReport {
+    /// `2 * K`: total hands this config played
+    /// across the two pairs it appeared in.
+    pub hands: usize,
+    /// Hands this config won outright (per the
+    /// `settlements()[seat]` > 0 reading on the
+    /// hand it played as the recorded seat).
+    pub wins: usize,
+    /// Hands that ended with this config's
+    /// `won()` strictly negative.
+    pub losses: usize,
+    /// Sum of this config's `won()` across the
+    /// `2 * K` hands, in chips.
+    pub net_chips: i64,
+    /// `mean_chips_per_hand * 100 / B_BLIND`.
+    pub mbb_per_100: f64,
+    /// 95% CI half-width on the per-hand mean
+    /// chip delta, in mbb.
+    pub mbb_ci95: f64,
+    /// `wins / (2 * K)`, the simple proportion
+    /// of hands won.
+    pub win_rate: f64,
+    /// 95% CI half-width on `win_rate`.
+    pub win_rate_ci95: f64,
+}
+
+impl Compare3SubReport {
+    /// Compute the per-config mbb/100 / CI /
+    /// win-rate math from a per-hand chip vector
+    /// (the concatenation of the config's
+    /// seat-0 PnL in one pair and seat-1 PnL in
+    /// the other pair) and the big-blind chip
+    /// size. Mirrors
+    /// [`CompareSubReport::from_per_hand`] so
+    /// the compare and compare3 reports use the
+    /// same formulas, and so a regression in the
+    /// per-hand PnL math fails both the compare
+    /// and compare3 lib tests in the same CI run.
+    fn from_per_hand(per_hand: &[Chips], blind: Chips) -> Self {
+        assert!(
+            !per_hand.is_empty(),
+            "compare3: per_hand must contain at least one hand"
+        );
+        let hands = per_hand.len();
+        let wins = per_hand.iter().filter(|&&c| c > 0).count();
+        let losses = per_hand.iter().filter(|&&c| c < 0).count();
+        let net_chips: i64 = per_hand.iter().map(|&c| c as i64).sum();
+        let mean = net_chips as f64 / hands as f64;
+        let variance = if hands > 1 {
+            per_hand
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (hands as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let stdev = variance.sqrt();
+        let se = stdev / (hands as f64).sqrt();
+        let blind_f = blind as f64;
+        let mbb_per_100 = mean * 100.0 / blind_f;
+        let mbb_ci95 = 1.96 * se * 100.0 / blind_f;
+        let win_rate = wins as f64 / hands as f64;
+        let win_rate_se = (win_rate * (1.0 - win_rate) / hands as f64).sqrt();
+        let win_rate_ci95 = 1.96 * win_rate_se;
+        Compare3SubReport {
+            hands,
+            wins,
+            losses,
+            net_chips,
+            mbb_per_100,
+            mbb_ci95,
+            win_rate,
+            win_rate_ci95,
+        }
+    }
+}
+
+/// STW-031: tie tolerance in mbb/100 for the
+/// ranked-winner decision. The top two per-config
+/// `mbb_per_100` values that differ by less than
+/// this threshold are reported as `Tie` (the
+/// leading configs are statistically
+/// indistinguishable at the chosen K-per-pair).
+/// The tolerance is intentionally tight
+/// (`1e-6` mbb/100, matching
+/// [`COMPARE_TIE_TOLERANCE`]) so the compare3
+/// can declare a real `Tie` only when the top
+/// two are bit-for-bit identical within
+/// float-rounding error.
+pub const COMPARE3_TIE_TOLERANCE: f64 = 1e-6;
+
+/// STW-031: number of hands to play *per pair*
+/// when `RBP_COMPARE3_HANDS` is unset. Smaller
+/// than [`DEFAULT_COMPARE_HANDS`] (200 → 100)
+/// because the compare3 runs 3 pairs
+/// back-to-back for 3*K total hands; a 200-per-pair
+/// default would make a single `--compare3`
+/// invocation 6x slower than a `--compare`
+/// invocation with the same K.
+pub const DEFAULT_COMPARE3_HANDS: usize = 100;
+
+/// STW-031: big-blind chip size when
+/// `RBP_COMPARE3_BLIND` is unset. Matches
+/// [`DEFAULT_COMPARE_BLIND`] so a v1
+/// `trainer --compare` run and a v1
+/// `trainer --compare3` run with no env
+/// override use the same blind.
+pub const DEFAULT_COMPARE3_BLIND: Chips = DEFAULT_COMPARE_BLIND;
+
+/// STW-031: read `RBP_COMPARE3_HANDS` as a
+/// positive integer, falling back to
+/// [`DEFAULT_COMPARE3_HANDS`]. Same tolerance as
+/// [`bench_hands`] (a non-positive or
+/// non-integer value falls back to the default).
+pub fn compare3_hands() -> usize {
+    match std::env::var("RBP_COMPARE3_HANDS") {
+        Ok(s) => s.parse().unwrap_or(DEFAULT_COMPARE3_HANDS),
+        Err(_) => DEFAULT_COMPARE3_HANDS,
+    }
+}
+
+/// STW-031: read `RBP_COMPARE3_BLIND` as a
+/// positive integer, falling back to
+/// [`DEFAULT_COMPARE3_BLIND`]. Same tolerance as
+/// [`bench_blind`].
+pub fn compare3_blind() -> Chips {
+    match std::env::var("RBP_COMPARE3_BLIND") {
+        Ok(s) => s.parse().unwrap_or(DEFAULT_COMPARE3_BLIND),
+        Err(_) => DEFAULT_COMPARE3_BLIND,
+    }
+}
+
+/// STW-031: head-to-head v1-vs-v2-vs-v3
+/// trained-config compare report. Emitted as a
+/// JSON line on stdout by
+/// [`bench::run_compare3`] on success. The
+/// per-config sub-reports are nested under `v1` /
+/// `v2` / `v3` keys (matching the v1 / v2
+/// `CompareReport` shape) so a downstream
+/// scraper that already knows the
+/// `CompareReport` shape can read the compare3
+/// sub-reports with the same parser. The
+/// three pairwise `delta_mbb_per_100` values
+/// are reported at the top level (rather than
+/// nested inside a sub-report) so a scraper
+/// that only wants the pairwise deltas can
+/// read them with a flat-key path.
+#[derive(Debug)]
+pub struct Compare3Report {
+    /// `K`: number of hands played per pair.
+    /// Each per-config `hands` field equals
+    /// `2 * K` (each config appears in two of
+    /// the three pairs).
+    pub hands_per_pair: usize,
+    /// Big-blind chip size the compare3 used
+    /// to compute mbb. All three sub-reports'
+    /// `mbb_per_100` / `mbb_ci95` use this
+    /// blind.
+    pub blind: Chips,
+    /// The v1 `DatabasePlayer` sub-report
+    /// (aggregated across its two seat
+    /// assignments in the v1-vs-v2 and v3-vs-v1
+    /// pairs).
+    pub v1: Compare3SubReport,
+    /// The v2 `DatabasePlayer2` sub-report
+    /// (aggregated across its two seat
+    /// assignments in the v1-vs-v2 and v2-vs-v3
+    /// pairs).
+    pub v2: Compare3SubReport,
+    /// The v3 `DatabasePlayer3` sub-report
+    /// (aggregated across its two seat
+    /// assignments in the v2-vs-v3 and v3-vs-v1
+    /// pairs).
+    pub v3: Compare3SubReport,
+    /// `v1.mbb_per_100 - v2.mbb_per_100` (the
+    /// v1-vs-v2 pair's per-hand delta
+    /// aggregated across the K hands). The sign
+    /// is the v1-vs-v2 winner direction.
+    pub v1_v2_delta: f64,
+    /// `v2.mbb_per_100 - v3.mbb_per_100` (the
+    /// v2-vs-v3 pair's per-hand delta
+    /// aggregated across the K hands).
+    pub v2_v3_delta: f64,
+    /// `v3.mbb_per_100 - v1.mbb_per_100` (the
+    /// v3-vs-v1 pair's per-hand delta
+    /// aggregated across the K hands).
+    pub v3_v1_delta: f64,
+    /// Ranked headline: the v1 / v2 / v3
+    /// config with the strictly highest
+    /// per-config `mbb_per_100`, or `Tie` if
+    /// the top two are within
+    /// [`COMPARE3_TIE_TOLERANCE`] mbb/100.
+    pub ranked_winner: Compare3Winner,
+}
+
+impl Compare3Report {
+    /// Emit the report as a single-line JSON
+    /// document on stdout. The output is a
+    /// flat object with `snake_case` field
+    /// names so `jq` queries like
+    /// `.ranked_winner` and `.v1_v2_delta`
+    /// work without any post-processing. The
+    /// line is followed by a `\n` so
+    /// downstream `readline`-style consumers
+    /// don't block waiting for a stream that
+    /// never closes.
+    ///
+    /// The v1 / v2 / v3 sub-reports are nested
+    /// under `v1` / `v2` / `v3` keys (rather
+    /// than flattened) so the sub-report
+    /// fields are namespaced and a future
+    /// `Compare3Report` field addition that
+    /// collides with a sub-report field name is
+    /// impossible by construction. The three
+    /// pairwise deltas are at the top level so
+    /// a flat-key scraper can read them.
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"hands_per_pair\":{hands_per_pair},",
+                "\"blind\":{blind},",
+                "\"v1\":{{",
+                "\"hands\":{v1_hands},",
+                "\"wins\":{v1_wins},",
+                "\"losses\":{v1_losses},",
+                "\"net_chips\":{v1_net_chips},",
+                "\"mbb_per_100\":{v1_mbb_per_100:.4},",
+                "\"mbb_ci95\":{v1_mbb_ci95:.4},",
+                "\"win_rate\":{v1_win_rate:.4},",
+                "\"win_rate_ci95\":{v1_win_rate_ci95:.4}",
+                "}},",
+                "\"v2\":{{",
+                "\"hands\":{v2_hands},",
+                "\"wins\":{v2_wins},",
+                "\"losses\":{v2_losses},",
+                "\"net_chips\":{v2_net_chips},",
+                "\"mbb_per_100\":{v2_mbb_per_100:.4},",
+                "\"mbb_ci95\":{v2_mbb_ci95:.4},",
+                "\"win_rate\":{v2_win_rate:.4},",
+                "\"win_rate_ci95\":{v2_win_rate_ci95:.4}",
+                "}},",
+                "\"v3\":{{",
+                "\"hands\":{v3_hands},",
+                "\"wins\":{v3_wins},",
+                "\"losses\":{v3_losses},",
+                "\"net_chips\":{v3_net_chips},",
+                "\"mbb_per_100\":{v3_mbb_per_100:.4},",
+                "\"mbb_ci95\":{v3_mbb_ci95:.4},",
+                "\"win_rate\":{v3_win_rate:.4},",
+                "\"win_rate_ci95\":{v3_win_rate_ci95:.4}",
+                "}},",
+                "\"v1_v2_delta\":{v1_v2_delta:.4},",
+                "\"v2_v3_delta\":{v2_v3_delta:.4},",
+                "\"v3_v1_delta\":{v3_v1_delta:.4},",
+                "\"ranked_winner\":\"{ranked_winner}\"",
+                "}}\n"
+            ),
+            hands_per_pair = self.hands_per_pair,
+            blind = self.blind,
+            v1_hands = self.v1.hands,
+            v1_wins = self.v1.wins,
+            v1_losses = self.v1.losses,
+            v1_net_chips = self.v1.net_chips,
+            v1_mbb_per_100 = self.v1.mbb_per_100,
+            v1_mbb_ci95 = self.v1.mbb_ci95,
+            v1_win_rate = self.v1.win_rate,
+            v1_win_rate_ci95 = self.v1.win_rate_ci95,
+            v2_hands = self.v2.hands,
+            v2_wins = self.v2.wins,
+            v2_losses = self.v2.losses,
+            v2_net_chips = self.v2.net_chips,
+            v2_mbb_per_100 = self.v2.mbb_per_100,
+            v2_mbb_ci95 = self.v2.mbb_ci95,
+            v2_win_rate = self.v2.win_rate,
+            v2_win_rate_ci95 = self.v2.win_rate_ci95,
+            v3_hands = self.v3.hands,
+            v3_wins = self.v3.wins,
+            v3_losses = self.v3.losses,
+            v3_net_chips = self.v3.net_chips,
+            v3_mbb_per_100 = self.v3.mbb_per_100,
+            v3_mbb_ci95 = self.v3.mbb_ci95,
+            v3_win_rate = self.v3.win_rate,
+            v3_win_rate_ci95 = self.v3.win_rate_ci95,
+            v1_v2_delta = self.v1_v2_delta,
+            v2_v3_delta = self.v2_v3_delta,
+            v3_v1_delta = self.v3_v1_delta,
+            ranked_winner = self.ranked_winner.as_str(),
+        )
+    }
+}
+
+/// STW-031: build a [`Compare3Report`] from the
+/// three pairwise per-hand PnL vectors of the
+/// v1-vs-v2, v2-vs-v3, and v3-vs-v1 pairs.
+///
+/// - `v1_v2_p0` / `v1_v2_p1` are the seat-0 /
+///   seat-1 PnL vectors for the v1-vs-v2 pair
+///   (K hands each, `v1_v2_p0[i] + v1_v2_p1[i] == 0`).
+/// - `v2_v3_p0` / `v2_v3_p1` are the seat-0 /
+///   seat-1 PnL vectors for the v2-vs-v3 pair
+///   (K hands each, `v2_v3_p0[i] + v2_v3_p1[i] == 0`).
+/// - `v3_v1_p0` / `v3_v1_p1` are the seat-0 /
+///   seat-1 PnL vectors for the v3-vs-v1 pair
+///   (K hands each, `v3_v1_p0[i] + v3_v1_p1[i] == 0`).
+///
+/// The per-config aggregate is the concatenation
+/// of the config's seat-0 PnL in one pair and
+/// seat-1 PnL in the other pair (a config plays
+/// seat 0 once and seat 1 once across the three
+/// rotations). The per-config mbb/100 is the
+/// mean of that aggregate × 100 / `blind`.
+///
+/// The ranked winner is the config with the
+/// strictly highest per-config `mbb_per_100`. If
+/// the top two per-config `mbb_per_100` values
+/// differ by less than
+/// [`COMPARE3_TIE_TOLERANCE`], the report
+/// declares `Tie` (the leading configs are
+/// statistically indistinguishable at the
+/// chosen K-per-pair).
+pub fn summarize_compare3(
+    v1_v2_p0: &[Chips],
+    v1_v2_p1: &[Chips],
+    v2_v3_p0: &[Chips],
+    v2_v3_p1: &[Chips],
+    v3_v1_p0: &[Chips],
+    v3_v1_p1: &[Chips],
+    blind: Chips,
+) -> Compare3Report {
+    let k = v1_v2_p0.len();
+    assert!(
+        k > 0,
+        "summarize_compare3: each per-pair PnL vector must contain at least one hand"
+    );
+    assert_eq!(
+        v1_v2_p0.len(),
+        v1_v2_p1.len(),
+        "summarize_compare3: v1_vs_v2 pair PnL vectors must have the same length; \
+         got p0={} p1={}",
+        v1_v2_p0.len(),
+        v1_v2_p1.len()
+    );
+    assert_eq!(
+        v2_v3_p0.len(),
+        v2_v3_p1.len(),
+        "summarize_compare3: v2_vs_v3 pair PnL vectors must have the same length; \
+         got p0={} p1={}",
+        v2_v3_p0.len(),
+        v2_v3_p1.len()
+    );
+    assert_eq!(
+        v3_v1_p0.len(),
+        v3_v1_p1.len(),
+        "summarize_compare3: v3_vs_v1 pair PnL vectors must have the same length; \
+         got p0={} p1={}",
+        v3_v1_p0.len(),
+        v3_v1_p1.len()
+    );
+    assert_eq!(
+        v1_v2_p0.len(),
+        v2_v3_p0.len(),
+        "summarize_compare3: all three pairs must have the same K; \
+         got v1_v2={} v2_v3={} v3_v1={}",
+        v1_v2_p0.len(),
+        v2_v3_p0.len(),
+        v3_v1_p0.len()
+    );
+    assert_eq!(
+        v1_v2_p0.len(),
+        v3_v1_p0.len(),
+        "summarize_compare3: all three pairs must have the same K; \
+         got v1_v2={} v3_v1={}",
+        v1_v2_p0.len(),
+        v3_v1_p0.len()
+    );
+
+    // Per-config aggregate per-hand vectors.
+    // Each config plays K hands as seat 0 in one
+    // pair and K hands as seat 1 in another
+    // pair; the aggregate is the concatenation
+    // of those 2K hands. The "nets to zero per
+    // pair" invariant gives the v1 aggregate
+    // its seat-0 contribution (from the v1-vs-v2
+    // pair's seat 0) and its seat-1 contribution
+    // (from the v3-vs-v1 pair's seat 1, which is
+    // the negative of that pair's seat-0 v3 PnL).
+    // The per-config mbb/100 is the
+    // per-config-aggregate mean × 100 / `blind`.
+    let mut v1_per_hand: Vec<Chips> = Vec::with_capacity(2 * k);
+    v1_per_hand.extend_from_slice(v1_v2_p0);
+    // v3-vs-v1 pair: seat 0 is v3, seat 1 is v1;
+    // v1's PnL is `v3_v1_p1` (the seat-1 PnL).
+    v1_per_hand.extend_from_slice(v3_v1_p1);
+
+    let mut v2_per_hand: Vec<Chips> = Vec::with_capacity(2 * k);
+    // v1-vs-v2 pair: seat 0 is v1, seat 1 is v2;
+    // v2's PnL is `v1_v2_p1` (the seat-1 PnL).
+    v2_per_hand.extend_from_slice(v1_v2_p1);
+    v2_per_hand.extend_from_slice(v2_v3_p0);
+
+    let mut v3_per_hand: Vec<Chips> = Vec::with_capacity(2 * k);
+    v3_per_hand.extend_from_slice(v2_v3_p1);
+    // v3-vs-v1 pair: seat 0 is v3, seat 1 is v1;
+    // v3's PnL is `v3_v1_p0` (the seat-0 PnL).
+    v3_per_hand.extend_from_slice(v3_v1_p0);
+
+    // Compute the per-config mbb/100 / CI /
+    // win-rate with the real `blind` (the
+    // [`Compare3SubReport::from_per_hand`]
+    // helper takes the real `blind` and applies
+    // the formula in-chip space then scales to
+    // mbb, mirroring [`CompareSubReport::from_per_hand`]).
+    let v1_sr = Compare3SubReport::from_per_hand(&v1_per_hand, blind);
+    let v2_sr = Compare3SubReport::from_per_hand(&v2_per_hand, blind);
+    let v3_sr = Compare3SubReport::from_per_hand(&v3_per_hand, blind);
+
+    // The three pairwise deltas are the
+    // per-pair seat-0 mbb/100 minus seat-1
+    // mbb/100 (= 2 * seat-0 mbb/100 by
+    // zero-sum, but we compute them
+    // explicitly from the per-pair
+    // per-hand means so the lib test for
+    // the zero-sum invariant can re-derive
+    // them verbatim).
+    let blind_f = blind as f64;
+    let pair_delta = |p0: &[Chips], p1: &[Chips]| -> f64 {
+        let mean0: f64 = p0.iter().map(|&c| c as f64).sum::<f64>() / p0.len() as f64;
+        let mean1: f64 = p1.iter().map(|&c| c as f64).sum::<f64>() / p1.len() as f64;
+        (mean0 - mean1) * 100.0 / blind_f
+    };
+    let v1_v2_delta = pair_delta(v1_v2_p0, v1_v2_p1);
+    let v2_v3_delta = pair_delta(v2_v3_p0, v2_v3_p1);
+    let v3_v1_delta = pair_delta(v3_v1_p0, v3_v1_p1);
+
+    // Ranked winner: pick the config with the
+    // strictly highest per-config `mbb_per_100`.
+    // If the top two are within
+    // [`COMPARE3_TIE_TOLERANCE`], declare
+    // `Tie`.
+    let mut scores = [
+        (Compare3Winner::V1, v1_sr.mbb_per_100),
+        (Compare3Winner::V2, v2_sr.mbb_per_100),
+        (Compare3Winner::V3, v3_sr.mbb_per_100),
+    ];
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let ranked_winner = if (scores[0].1 - scores[1].1).abs() < COMPARE3_TIE_TOLERANCE {
+        Compare3Winner::Tie
+    } else {
+        scores[0].0
+    };
+
+    Compare3Report {
+        hands_per_pair: k,
+        blind,
+        v1: v1_sr,
+        v2: v2_sr,
+        v3: v3_sr,
+        v1_v2_delta,
+        v2_v3_delta,
+        v3_v1_delta,
+        ranked_winner,
+    }
+}
+
+/// STW-031: drive three pairwise heads-up hands
+/// (v1-vs-v2, v2-vs-v3, v3-vs-v1) for K hands
+/// each through real `Room` shells, and return
+/// the per-pair per-hand PnL vectors
+/// (`(seat0, seat1)` per pair).
+///
+/// The compare3 seats the v1 / v2 / v3 trained
+/// configs at the rotated seats — v1 is seat 0
+/// in the v1-vs-v2 pair, v2 is seat 0 in the
+/// v2-vs-v3 pair, v3 is seat 0 in the v3-vs-v1
+/// pair — so each config appears at seat 0
+/// exactly once and at seat 1 exactly once
+/// across the three rotations (symmetric
+/// seat-position exposure). The
+/// `blueprint_trained_v1` / `_v2` / `_v3`
+/// flags carry the per-config pre-run
+/// blueprint row counts to the caller's report
+/// so a downstream scraper can tell which
+/// configs were trained vs. untrained.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compare3_hands(
+    client: Arc<Client>,
+    k: usize,
+    stakes: Chips,
+    blueprint_trained_v1: bool,
+    blueprint_trained_v2: bool,
+    blueprint_trained_v3: bool,
+) -> (
+    (Vec<Chips>, Vec<Chips>),
+    (Vec<Chips>, Vec<Chips>),
+    (Vec<Chips>, Vec<Chips>),
+    bool,
+    bool,
+    bool,
+) {
+    assert!(k > 0, "compare3 must play at least one hand per pair");
+
+    // Pair A: v1 (seat 0) vs v2 (seat 1).
+    let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+    let mut room = Room::new(coordinator_room_id, stakes, client.clone());
+    rbp_gameroom::HistoryRepository::create_room(&client, &room)
+        .await
+        .expect("compare3: create_room");
+    if blueprint_trained_v1 {
+        let p = DatabasePlayer::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship = Box::leak(Box::new(rbp_nlhe::Flagship::new(
+            rbp_nlhe::NlheProfile::default(),
+            rbp_nlhe::NlheEncoder::default(),
+        )));
+        room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
+    }
+    if blueprint_trained_v2 {
+        let p = DatabasePlayer2::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship2 =
+            Box::leak(Box::new(rbp_nlhe::Flagship2::new(
+                rbp_nlhe::NlheProfile::default(),
+                rbp_nlhe::NlheEncoder::default(),
+            )));
+        room.sit(DatabasePlayer2::new(blueprint), rbp_auth::Lurker::default());
+    }
+    let mut v1_v2_p0: Vec<Chips> = Vec::with_capacity(k);
+    let mut v1_v2_p1: Vec<Chips> = Vec::with_capacity(k);
+    for _ in 0..k {
+        room.play_hand_once().await;
+        let pnl = room.settlements();
+        assert_eq!(
+            pnl.len(),
+            2,
+            "compare3: heads-up room must report 2 settlements per hand, got {pnl:?}"
+        );
+        v1_v2_p0.push(pnl[0]);
+        v1_v2_p1.push(pnl[1]);
+        if room.conclude() {
+            log::warn!(
+                "compare3: pair A game ended after {} of {} requested hands (player busted)",
+                v1_v2_p0.len(),
+                k
+            );
+            break;
+        }
+    }
+
+    // Pair B: v2 (seat 0) vs v3 (seat 1).
+    let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+    let mut room = Room::new(coordinator_room_id, stakes, client.clone());
+    rbp_gameroom::HistoryRepository::create_room(&client, &room)
+        .await
+        .expect("compare3: create_room");
+    if blueprint_trained_v2 {
+        let p = DatabasePlayer2::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship2 =
+            Box::leak(Box::new(rbp_nlhe::Flagship2::new(
+                rbp_nlhe::NlheProfile::default(),
+                rbp_nlhe::NlheEncoder::default(),
+            )));
+        room.sit(DatabasePlayer2::new(blueprint), rbp_auth::Lurker::default());
+    }
+    if blueprint_trained_v3 {
+        let p = DatabasePlayer3::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship3 =
+            Box::leak(Box::new(rbp_nlhe::Flagship3::new(
+                rbp_nlhe::NlheProfile::default(),
+                rbp_nlhe::NlheEncoder::default(),
+            )));
+        room.sit(DatabasePlayer3::new(blueprint), rbp_auth::Lurker::default());
+    }
+    let mut v2_v3_p0: Vec<Chips> = Vec::with_capacity(k);
+    let mut v2_v3_p1: Vec<Chips> = Vec::with_capacity(k);
+    for _ in 0..k {
+        room.play_hand_once().await;
+        let pnl = room.settlements();
+        assert_eq!(
+            pnl.len(),
+            2,
+            "compare3: heads-up room must report 2 settlements per hand, got {pnl:?}"
+        );
+        v2_v3_p0.push(pnl[0]);
+        v2_v3_p1.push(pnl[1]);
+        if room.conclude() {
+            log::warn!(
+                "compare3: pair B game ended after {} of {} requested hands (player busted)",
+                v2_v3_p0.len(),
+                k
+            );
+            break;
+        }
+    }
+
+    // Pair C: v3 (seat 0) vs v1 (seat 1).
+    let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+    let mut room = Room::new(coordinator_room_id, stakes, client.clone());
+    rbp_gameroom::HistoryRepository::create_room(&client, &room)
+        .await
+        .expect("compare3: create_room");
+    if blueprint_trained_v3 {
+        let p = DatabasePlayer3::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship3 =
+            Box::leak(Box::new(rbp_nlhe::Flagship3::new(
+                rbp_nlhe::NlheProfile::default(),
+                rbp_nlhe::NlheEncoder::default(),
+            )));
+        room.sit(DatabasePlayer3::new(blueprint), rbp_auth::Lurker::default());
+    }
+    if blueprint_trained_v1 {
+        let p = DatabasePlayer::from_database(client.clone()).await;
+        room.sit(p, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship = Box::leak(Box::new(rbp_nlhe::Flagship::new(
+            rbp_nlhe::NlheProfile::default(),
+            rbp_nlhe::NlheEncoder::default(),
+        )));
+        room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
+    }
+    let mut v3_v1_p0: Vec<Chips> = Vec::with_capacity(k);
+    let mut v3_v1_p1: Vec<Chips> = Vec::with_capacity(k);
+    for _ in 0..k {
+        room.play_hand_once().await;
+        let pnl = room.settlements();
+        assert_eq!(
+            pnl.len(),
+            2,
+            "compare3: heads-up room must report 2 settlements per hand, got {pnl:?}"
+        );
+        v3_v1_p0.push(pnl[0]);
+        v3_v1_p1.push(pnl[1]);
+        if room.conclude() {
+            log::warn!(
+                "compare3: pair C game ended after {} of {} requested hands (player busted)",
+                v3_v1_p0.len(),
+                k
+            );
+            break;
+        }
+    }
+
+    (
+        (v1_v2_p0, v1_v2_p1),
+        (v2_v3_p0, v2_v3_p1),
+        (v3_v1_p0, v3_v1_p1),
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+        blueprint_trained_v3,
+    )
+}
+
+/// STW-031: top-level entry point invoked by
+/// [`Mode::Compare3`]. Reads the v1 / v2 / v3
+/// pre-run blueprint row counts, runs three
+/// pairwise K-handed heads-up rotations,
+/// summarises, prints the JSON result line, and
+/// exits non-zero if anything fails.
+pub async fn run_compare3(client: Arc<Client>) {
+    let k = compare3_hands();
+    let blind = compare3_blind();
+    let rows_v1 = client.blueprint().await;
+    let rows_v2 = client.blueprint_v2().await;
+    let rows_v3 = client.blueprint_v3().await;
+    let blueprint_trained_v1 = rows_v1 > 0;
+    let blueprint_trained_v2 = rows_v2 > 0;
+    let blueprint_trained_v3 = rows_v3 > 0;
+    log::info!(
+        "compare3: hydrating v1 (rows={rows_v1}) + v2 (rows={rows_v2}) + v3 (rows={rows_v3}) \
+         + playing {k} hands/pair @ blind={blind}"
+    );
+    let (
+        (v1_v2_p0, v1_v2_p1),
+        (v2_v3_p0, v2_v3_p1),
+        (v3_v1_p0, v3_v1_p1),
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+        blueprint_trained_v3,
+    ) = run_compare3_hands(
+        client,
+        k,
+        blind,
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+        blueprint_trained_v3,
+    )
+    .await;
+    let report = summarize_compare3(
+        &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, blind,
+    );
+    print!("{}", report.to_json());
+    log::info!(
+        "compare3 complete: hands/pair={k} mbb/100 v1={:.2} v2={:.2} v3={:.2} \
+         ranked_winner={} blueprint_trained_v1={} blueprint_trained_v2={} blueprint_trained_v3={}",
+        report.v1.mbb_per_100,
+        report.v2.mbb_per_100,
+        report.v3.mbb_per_100,
+        report.ranked_winner.as_str(),
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+        blueprint_trained_v3,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2319,6 +3192,499 @@ mod tests {
         // No embedded newlines — a scraper that does
         // `readline` should see exactly one line per
         // report.
+        assert_eq!(
+            s.matches('\n').count(),
+            1,
+            "to_json must emit exactly one newline; got: {s:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // STW-031: `trainer --compare3` v1-vs-v2-vs-v3
+    // trained-config compare tests.
+    //
+    // The bench crate ships `Compare3Winner` /
+    // `Compare3SubReport` / `Compare3Report` /
+    // `summarize_compare3` / `run_compare3_hands` /
+    // `run_compare3` so a single
+    // `trainer --compare3` invocation can compare
+    // the v1 + v2 + v3 trained configs head-to-head
+    // in the same set of pairwise heads-up `Room`
+    // shells over K hands per pair and print a
+    // single-line JSON `Compare3Report` declaring
+    // the ranked winner (`"v1"`, `"v2"`, `"v3"`,
+    // or `"tie"`) with the per-config mbb/100 /
+    // CI / win-rate numbers. These lib tests pin
+    // the public API the `trainer` binary + the
+    // new integration test depend on.
+    // -----------------------------------------------------------------
+
+    /// `Compare3Winner::as_str` must produce the
+    /// documented lowercase literal used in the
+    /// JSON `ranked_winner` field. Pinning it
+    /// here means a refactor that renames a
+    /// variant has to update the JSON encoder
+    /// and this test together, instead of
+    /// silently letting a `Compare3Winner::V1`
+    /// print as `"v2"` in the report.
+    #[test]
+    fn compare3_winner_as_str_matches_published_strings() {
+        assert_eq!(Compare3Winner::V1.as_str(), "v1");
+        assert_eq!(Compare3Winner::V2.as_str(), "v2");
+        assert_eq!(Compare3Winner::V3.as_str(), "v3");
+        assert_eq!(Compare3Winner::Tie.as_str(), "tie");
+    }
+
+    /// `compare3_hands` honours
+    /// `RBP_COMPARE3_HANDS`; setting it to a
+    /// positive integer overrides the default,
+    /// and setting it to garbage (or unsetting
+    /// it) falls back to
+    /// `DEFAULT_COMPARE3_HANDS`. We save/restore
+    /// the env var to keep parallel tests
+    /// deterministic.
+    #[test]
+    fn compare3_hands_env_override_round_trip() {
+        let saved = std::env::var("RBP_COMPARE3_HANDS").ok();
+        // SAFETY: tests in this module are the
+        // only writers of `RBP_COMPARE3_HANDS`;
+        // we serialise the read/write with
+        // `set_var` and the implicit
+        // single-threaded `#[test]` execution
+        // model.
+        unsafe {
+            std::env::set_var("RBP_COMPARE3_HANDS", "37");
+        }
+        assert_eq!(compare3_hands(), 37);
+        unsafe {
+            std::env::set_var("RBP_COMPARE3_HANDS", "not-a-number");
+        }
+        assert_eq!(compare3_hands(), DEFAULT_COMPARE3_HANDS);
+        unsafe {
+            std::env::remove_var("RBP_COMPARE3_HANDS");
+        }
+        assert_eq!(compare3_hands(), DEFAULT_COMPARE3_HANDS);
+        if let Some(v) = saved {
+            unsafe {
+                std::env::set_var("RBP_COMPARE3_HANDS", v);
+            }
+        }
+    }
+
+    /// Hand-built per-pair per-hand vectors
+    /// where v1 wins clearly (v1 mbb/100 > v2
+    /// mbb/100 > v3 mbb/100). Each pair's
+    /// per-hand deltas net to zero (the
+    /// heads-up room construction invariant).
+    /// - Pair A: v1 = +10, v2 = -10 over 100
+    ///   hands ⇒ v1 mbb/100 = +500, v2 mbb/100
+    ///   = -500.
+    /// - Pair B: v2 = +5, v3 = -5 over 100 hands
+    ///   ⇒ v2 mbb/100 = +250, v3 mbb/100 = -250.
+    /// - Pair C: v3 = -3, v1 = +3 over 100 hands
+    ///   ⇒ v3 mbb/100 = -150, v1 mbb/100 = +150.
+    ///
+    /// Per-config aggregate (across 2 pairs each):
+    /// - v1: pair A seat 0 (+10) + pair C seat 1
+    ///   (+3) ⇒ mean = +6.5, mbb/100 = +325.
+    /// - v2: pair A seat 1 (-10) + pair B seat 0
+    ///   (+5) ⇒ mean = -2.5, mbb/100 = -125.
+    /// - v3: pair B seat 1 (-5) + pair C seat 0
+    ///   (-3) ⇒ mean = -4.0, mbb/100 = -200.
+    ///
+    /// v1's mbb/100 is strictly the highest, so
+    /// the ranked winner is `V1`.
+    #[test]
+    fn compare3_summarize_declares_v1_winner_when_v1_top() {
+        let v1_v2_p0 = vec![10_i16; 100];
+        let v1_v2_p1 = vec![-10_i16; 100];
+        let v2_v3_p0 = vec![5_i16; 100];
+        let v2_v3_p1 = vec![-5_i16; 100];
+        let v3_v1_p0 = vec![-3_i16; 100];
+        let v3_v1_p1 = vec![3_i16; 100];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        assert_eq!(r.ranked_winner, Compare3Winner::V1);
+        // v1 aggregate mean = (10+3)/2 = 6.5,
+        // mbb/100 = 6.5 * 100 / 2 = 325.0.
+        assert!(
+            (r.v1.mbb_per_100 - 325.0).abs() < 1e-9,
+            "v1 mbb/100 must equal 325.0; got {}",
+            r.v1.mbb_per_100
+        );
+        // v2 aggregate mean = (-10+5)/2 = -2.5,
+        // mbb/100 = -125.0.
+        assert!(
+            (r.v2.mbb_per_100 - (-125.0)).abs() < 1e-9,
+            "v2 mbb/100 must equal -125.0; got {}",
+            r.v2.mbb_per_100
+        );
+        // v3 aggregate mean = (-5+(-3))/2 = -4.0,
+        // mbb/100 = -200.0.
+        assert!(
+            (r.v3.mbb_per_100 - (-200.0)).abs() < 1e-9,
+            "v3 mbb/100 must equal -200.0; got {}",
+            r.v3.mbb_per_100
+        );
+        // Per-config `hands` = 2 * K = 200.
+        assert_eq!(r.v1.hands, 200);
+        assert_eq!(r.v2.hands, 200);
+        assert_eq!(r.v3.hands, 200);
+        // v1 + v2 + v3 mbb/100 sums to zero (the
+        // per-pair zero-sum invariant + the
+        // per-config aggregate) — but with our
+        // vectors it's `+325 + -125 + -200 = 0`.
+        let mbb_sum = r.v1.mbb_per_100 + r.v2.mbb_per_100 + r.v3.mbb_per_100;
+        assert!(
+            mbb_sum.abs() < 1e-9,
+            "v1 + v2 + v3 mbb/100 must sum to 0; got {mbb_sum}"
+        );
+    }
+
+    /// Hand-built per-pair vectors where v2
+    /// wins (v2 mbb/100 > v1 / v3 mbb/100):
+    /// - Pair A: v1 = -10, v2 = +10 ⇒ v1
+    ///   mbb/100 = -500, v2 mbb/100 = +500.
+    /// - Pair B: v2 = +8, v3 = -8 ⇒ v2
+    ///   mbb/100 = +400, v3 mbb/100 = -400.
+    /// - Pair C: v3 = -2, v1 = +2 ⇒ v3
+    ///   mbb/100 = -100, v1 mbb/100 = +100.
+    ///
+    /// Per-config aggregate:
+    /// - v1: pair A seat 0 (-10) + pair C seat 1
+    ///   (+2) ⇒ mean = -4.0, mbb/100 = -200.
+    /// - v2: pair A seat 1 (+10) + pair B seat 0
+    ///   (+8) ⇒ mean = +9.0, mbb/100 = +450.
+    /// - v3: pair B seat 1 (-8) + pair C seat 0
+    ///   (-2) ⇒ mean = -5.0, mbb/100 = -250.
+    #[test]
+    fn compare3_summarize_declares_v2_winner_when_v2_top() {
+        let v1_v2_p0 = vec![-10_i16; 100];
+        let v1_v2_p1 = vec![10_i16; 100];
+        let v2_v3_p0 = vec![8_i16; 100];
+        let v2_v3_p1 = vec![-8_i16; 100];
+        let v3_v1_p0 = vec![-2_i16; 100];
+        let v3_v1_p1 = vec![2_i16; 100];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        assert_eq!(r.ranked_winner, Compare3Winner::V2);
+        assert!(
+            (r.v2.mbb_per_100 - 450.0).abs() < 1e-9,
+            "v2 mbb/100 must equal 450.0; got {}",
+            r.v2.mbb_per_100
+        );
+    }
+
+    /// Hand-built per-pair vectors where v3
+    /// wins (v3 mbb/100 > v1 / v2 mbb/100):
+    /// - Pair A: v1 = -4, v2 = +4 ⇒ v1
+    ///   mbb/100 = -200, v2 mbb/100 = +200.
+    /// - Pair B: v2 = -3, v3 = +3 ⇒ v2
+    ///   mbb/100 = -150, v3 mbb/100 = +150.
+    /// - Pair C: v3 = +7, v1 = -7 ⇒ v3
+    ///   mbb/100 = +350, v1 mbb/100 = -350.
+    ///
+    /// Per-config aggregate:
+    /// - v1: pair A seat 0 (-4) + pair C seat 1
+    ///   (-7) ⇒ mean = -5.5, mbb/100 = -275.
+    /// - v2: pair A seat 1 (+4) + pair B seat 0
+    ///   (-3) ⇒ mean = +0.5, mbb/100 = +25.
+    /// - v3: pair B seat 1 (+3) + pair C seat 0
+    ///   (+7) ⇒ mean = +5.0, mbb/100 = +250.
+    #[test]
+    fn compare3_summarize_declares_v3_winner_when_v3_top() {
+        let v1_v2_p0 = vec![-4_i16; 100];
+        let v1_v2_p1 = vec![4_i16; 100];
+        let v2_v3_p0 = vec![-3_i16; 100];
+        let v2_v3_p1 = vec![3_i16; 100];
+        let v3_v1_p0 = vec![7_i16; 100];
+        let v3_v1_p1 = vec![-7_i16; 100];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        assert_eq!(r.ranked_winner, Compare3Winner::V3);
+        assert!(
+            (r.v3.mbb_per_100 - 250.0).abs() < 1e-9,
+            "v3 mbb/100 must equal 250.0; got {}",
+            r.v3.mbb_per_100
+        );
+    }
+
+    /// `summarize_compare3` must declare
+    /// `Compare3Winner::Tie` when the top two
+    /// per-config `mbb_per_100` values differ
+    /// by less than `COMPARE3_TIE_TOLERANCE`.
+    /// We pin this on a hand-built vector where
+    /// v1 and v2 tie at +250 mbb/100 and v3
+    /// sits at -500. The aggregate
+    /// construction gives v1 = 5.0 (mbb/100 =
+    /// 250) and v2 = 5.0 (mbb/100 = 250)
+    /// exactly; v3 = -10.0 (mbb/100 = -500).
+    /// The top two (v1 and v2) are within
+    /// tolerance so the report declares
+    /// `Tie`.
+    #[test]
+    fn compare3_summarize_declares_tie_on_close_top_two() {
+        // Pair A: v1 = +10, v2 = -10. Aggregate
+        // v1: pair A seat 0 = +10. v2: pair A
+        // seat 1 = -10.
+        // Pair B: v2 = +20, v3 = -20. v2: pair
+        // B seat 0 = +20. v3: pair B seat 1 =
+        // -20.
+        // Pair C: v3 = +0, v1 = -0. v3: pair C
+        // seat 0 = 0. v1: pair C seat 1 = 0.
+        //
+        // Per-config aggregate (2 hands each):
+        // - v1: [+10, 0] mean = +5.0, mbb/100 =
+        //   +250.
+        // - v2: [-10, +20] mean = +5.0, mbb/100
+        //   = +250.
+        // - v3: [-20, 0] mean = -10.0, mbb/100 =
+        //   -500.
+        let v1_v2_p0 = vec![10_i16; 1];
+        let v1_v2_p1 = vec![-10_i16; 1];
+        let v2_v3_p0 = vec![20_i16; 1];
+        let v2_v3_p1 = vec![-20_i16; 1];
+        let v3_v1_p0 = vec![0_i16; 1];
+        let v3_v1_p1 = vec![0_i16; 1];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        // v1 and v2 are exactly equal at 250
+        // mbb/100; the rank-winner is `Tie`.
+        assert_eq!(r.ranked_winner, Compare3Winner::Tie);
+        assert_eq!(r.v1.hands, 2);
+        assert_eq!(r.v2.hands, 2);
+        assert_eq!(r.v3.hands, 2);
+    }
+
+    /// The "each pair nets to zero" invariant:
+    /// a heads-up `Room`'s two seats'
+    /// `settlements()` always sum to zero per
+    /// hand. We pin that `summarize_compare3`
+    /// preserves the invariant on the
+    /// per-pair-per-hand integer axis. With a
+    /// non-trivial hand-built set of three
+    /// per-pair PnL vectors (the seat-1 vector
+    /// is the negation of seat-0 for each
+    /// pair), the integer per-pair
+    /// `p0[i] + p1[i]` is exactly 0 for every
+    /// hand in every pair. A regression that
+    /// introduces a phantom pot in any pair is
+    /// caught at the per-pair zero-sum
+    /// assertion. We then also pin the
+    /// per-config mbb/100 sum-to-zero invariant
+    /// (the v1 + v2 + v3 mbb/100 values must
+    /// sum to 0 because the per-config
+    /// aggregate is the seat-0 PnL of one pair
+    /// plus the seat-1 PnL of another, and the
+    /// three per-config aggregates together
+    /// account for all six per-pair PnL
+    /// vectors which are themselves net-to-zero
+    /// in pairs).
+    #[test]
+    fn compare3_summarize_v1_v2_v3_deltas_each_pair_nets_to_zero() {
+        let v1_v2_p0 = vec![10_i16, -5, 3, -8, 0, 12, -7, 2, -1, 4];
+        let v1_v2_p1: Vec<i16> = v1_v2_p0.iter().map(|x| -x).collect();
+        let v2_v3_p0 = vec![5_i16, -3, 7, -1, 2, -6, 0, 4, -2, 1];
+        let v2_v3_p1: Vec<i16> = v2_v3_p0.iter().map(|x| -x).collect();
+        let v3_v1_p0 = vec![-2_i16, 1, -4, 0, 3, -1, 5, -3, 2, -2];
+        let v3_v1_p1: Vec<i16> = v3_v1_p0.iter().map(|x| -x).collect();
+        // Per-pair integer zero-sum: for every i,
+        // v1_v2_p0[i] + v1_v2_p1[i] == 0, etc.
+        for i in 0..v1_v2_p0.len() {
+            assert_eq!(
+                v1_v2_p0[i] + v1_v2_p1[i],
+                0,
+                "v1_v2 pair: hand {i} must net to 0; got p0={} p1={}",
+                v1_v2_p0[i],
+                v1_v2_p1[i]
+            );
+            assert_eq!(
+                v2_v3_p0[i] + v2_v3_p1[i],
+                0,
+                "v2_v3 pair: hand {i} must net to 0; got p0={} p1={}",
+                v2_v3_p0[i],
+                v2_v3_p1[i]
+            );
+            assert_eq!(
+                v3_v1_p0[i] + v3_v1_p1[i],
+                0,
+                "v3_v1 pair: hand {i} must net to 0; got p0={} p1={}",
+                v3_v1_p0[i],
+                v3_v1_p1[i]
+            );
+        }
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        // The per-config mbb/100 sum-to-zero
+        // invariant: each config's aggregate
+        // net_chips is the seat-0 PnL of one
+        // pair plus the seat-1 PnL of another.
+        // Per the per-pair zero-sum:
+        // - v1: v1_v2_p0 + v3_v1_p1 (= v1_v2_p0
+        //   - v3_v1_p0) ⇒ sum = v1_v2_p0 -
+        //   v3_v1_p0
+        // - v2: v1_v2_p1 + v2_v3_p0 (=
+        //   -v1_v2_p0 + v2_v3_p0) ⇒ sum =
+        //   -v1_v2_p0 + v2_v3_p0
+        // - v3: v2_v3_p1 + v3_v1_p0 (=
+        //   -v2_v3_p0 + v3_v1_p0) ⇒ sum =
+        //   -v2_v3_p0 + v3_v1_p0
+        //
+        // The three per-config sums together
+        // equal (v1_v2_p0 - v3_v1_p0) +
+        // (-v1_v2_p0 + v2_v3_p0) +
+        // (-v2_v3_p0 + v3_v1_p0) = 0
+        // algebraically. The lib test pins
+        // that the summary preserves the
+        // invariant on the float mbb/100
+        // axis.
+        let mbb_sum = r.v1.mbb_per_100 + r.v2.mbb_per_100 + r.v3.mbb_per_100;
+        assert!(
+            mbb_sum.abs() < 1e-9,
+            "v1 + v2 + v3 mbb/100 must sum to 0; got {mbb_sum}"
+        );
+    }
+
+    /// Per-config aggregate: each config's
+    /// mbb/100 is the mean of the two
+    /// seat-assignment PnL vectors it
+    /// contributed to (the v1-vs-v2 pair's
+    /// seat 0 + the v3-vs-v1 pair's seat 1
+    /// for v1, etc.). We pin this on a
+    /// hand-built set of vectors where v1's
+    /// contribution is `+10` × 50 + `-3` × 50
+    /// = 3.5 mean, mbb/100 = 175.0; v2's
+    /// contribution is `-10` × 50 + `+5` × 50
+    /// = -2.5 mean, mbb/100 = -125.0; v3's
+    /// contribution is `-5` × 50 + `+3` × 50
+    /// = -1.0 mean, mbb/100 = -50.0.
+    #[test]
+    fn compare3_summarize_aggregates_per_config_across_both_seats() {
+        let v1_v2_p0 = vec![10_i16; 50];
+        let v1_v2_p1 = vec![-10_i16; 50];
+        let v2_v3_p0 = vec![5_i16; 50];
+        let v2_v3_p1 = vec![-5_i16; 50];
+        let v3_v1_p0 = vec![3_i16; 50];
+        let v3_v1_p1 = vec![-3_i16; 50];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        // v1 aggregate: v1_v2_p0 (10×50) +
+        // v3_v1_p1 (-3×50); mean = (10*50 +
+        // -3*50) / 100 = 350/100 = 3.5;
+        // mbb/100 = 3.5 * 100 / 2 = 175.0.
+        assert!(
+            (r.v1.mbb_per_100 - 175.0).abs() < 1e-9,
+            "v1 mbb/100 must equal 175.0; got {}",
+            r.v1.mbb_per_100
+        );
+        // v2 aggregate: v1_v2_p1 (-10×50) +
+        // v2_v3_p0 (5×50); mean = (-10*50 +
+        // 5*50) / 100 = -250/100 = -2.5;
+        // mbb/100 = -125.0.
+        assert!(
+            (r.v2.mbb_per_100 - (-125.0)).abs() < 1e-9,
+            "v2 mbb_per_100 must equal -125.0; got {}",
+            r.v2.mbb_per_100
+        );
+        // v3 aggregate: v2_v3_p1 (-5×50) +
+        // v3_v1_p0 (3×50); mean = (-5*50 +
+        // 3*50) / 100 = -100/100 = -1.0;
+        // mbb/100 = -50.0.
+        assert!(
+            (r.v3.mbb_per_100 - (-50.0)).abs() < 1e-9,
+            "v3 mbb_per_100 must equal -50.0; got {}",
+            r.v3.mbb_per_100
+        );
+        // v1 + v2 + v3 mbb/100 still sums to 0
+        // (the per-pair zero-sum + per-config
+        // aggregate invariant): 175 + -125 +
+        // -50 = 0.
+        let mbb_sum = r.v1.mbb_per_100 + r.v2.mbb_per_100 + r.v3.mbb_per_100;
+        assert!(
+            mbb_sum.abs() < 1e-9,
+            "v1 + v2 + v3 mbb/100 must sum to 0; got {mbb_sum}"
+        );
+    }
+
+    /// `to_json` must round-trip the headline
+    /// numbers as a single-line JSON object
+    /// that a downstream `jq` consumer can
+    /// parse without preprocessing. We assert
+    /// the line contains every field the
+    /// `Compare3Report` struct exposes so a
+    /// future refactor that drops a field
+    /// fails the test before it lands. The v1
+    /// / v2 / v3 sub-reports are nested under
+    /// `v1` / `v2` / `v3` keys so a future
+    /// `Compare3Report` / `Compare3SubReport`
+    /// field addition that collides with a
+    /// sub-report field name is impossible by
+    /// construction.
+    #[test]
+    fn compare3_to_json_contains_every_field() {
+        let v1_v2_p0 = vec![10_i16; 10];
+        let v1_v2_p1 = vec![-10_i16; 10];
+        let v2_v3_p0 = vec![5_i16; 10];
+        let v2_v3_p1 = vec![-5_i16; 10];
+        let v3_v1_p0 = vec![-2_i16; 10];
+        let v3_v1_p1 = vec![2_i16; 10];
+        let r = summarize_compare3(
+            &v1_v2_p0, &v1_v2_p1, &v2_v3_p0, &v2_v3_p1, &v3_v1_p0, &v3_v1_p1, 2,
+        );
+        let s = r.to_json();
+        // Top-level fields.
+        for needle in [
+            "\"hands_per_pair\":10",
+            "\"blind\":2",
+            "\"v1\":{",
+            "\"v2\":{",
+            "\"v3\":{",
+            "\"v1_v2_delta\":",
+            "\"v2_v3_delta\":",
+            "\"v3_v1_delta\":",
+            "\"ranked_winner\":",
+        ] {
+            assert!(
+                s.contains(needle),
+                "to_json output must contain {needle:?}; got: {s}"
+            );
+        }
+        // Per-sub-report fields (each appears
+        // three times — once in v1, once in v2,
+        // once in v3).
+        for needle in [
+            "\"hands\":",
+            "\"wins\":",
+            "\"losses\":",
+            "\"net_chips\":",
+            "\"mbb_per_100\":",
+            "\"mbb_ci95\":",
+            "\"win_rate\":",
+            "\"win_rate_ci95\":",
+        ] {
+            let count = s.matches(needle).count();
+            assert!(
+                count >= 1,
+                "to_json output must contain {needle:?}; got: {s}"
+            );
+        }
+        assert!(
+            s.ends_with('\n'),
+            "to_json output must end with a newline; got: {s:?}"
+        );
+        assert!(
+            s.starts_with('{'),
+            "to_json output must start with `{{`; got: {s:?}"
+        );
+        // No embedded newlines — a scraper that
+        // does `readline` should see exactly one
+        // line per report.
         assert_eq!(
             s.matches('\n').count(),
             1,

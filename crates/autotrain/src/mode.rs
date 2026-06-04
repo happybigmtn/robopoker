@@ -81,6 +81,27 @@ pub enum Mode {
     /// by `RBP_COMPARE_HANDS` (default 200) and
     /// `RBP_COMPARE_BLIND` (default `B_BLIND`).
     Compare,
+    /// STW-031: head-to-head v1-vs-v2-vs-v3
+    /// three-way trained-config compare.
+    /// Seats the v1 / v2 / v3 `DatabasePlayer` /
+    /// `DatabasePlayer2` / `DatabasePlayer3` in three
+    /// pairwise heads-up rotations (v1 vs v2, v2 vs v3,
+    /// v3 vs v1) for K hands each — each config plays
+    /// both seat 0 and seat 1 across the three
+    /// rotations, so the per-config `mbb_per_100`
+    /// ranking is unbiased by seat position. Prints a
+    /// single-line JSON `Compare3Report` declaring the
+    /// ranked winner (`"v1"`, `"v2"`, `"v3"`, or
+    /// `"tie"`) with the per-config mbb/100 / CI /
+    /// win-rate numbers and the three pairwise
+    /// `delta_mbb_per_100` values (v1-vs-v2, v2-vs-v3,
+    /// v3-vs-v1). Sized by `RBP_COMPARE3_HANDS` (default
+    /// 100) and `RBP_COMPARE3_BLIND` (default
+    /// `B_BLIND`). Lands the v1-vs-v2-vs-v3 follow-on
+    /// the STW-029 v3 trained-config row names as the
+    /// "next-next slice if a v3 trained config proves
+    /// meaningfully different from the v1 / v2 pair".
+    Compare3,
     /// STW-028: re-verify a testnet live launch proof
     /// receipt bundle on disk (the directory the
     /// `scripts/testnet-live-proof.sh` runbook writes
@@ -126,6 +147,7 @@ impl Mode {
                 "--smoke" => return Self::Smoke,
                 "--bench" => return Self::Bench,
                 "--compare" => return Self::Compare,
+                "--compare3" => return Self::Compare3,
                 "--verify-receipt" => {
                     // The value is the next argv (matches
                     // the `trainer --replay` style of not
@@ -196,7 +218,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --replay <path> | --verify-receipt <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path>"
         );
         std::process::exit(1);
     }
@@ -305,6 +327,30 @@ impl Mode {
             // compare integration tests in the same
             // CI run.
             Self::Compare => crate::bench::run_compare(client).await,
+            // STW-031: v1-vs-v2-vs-v3 three-way
+            // trained-config compare. Mirrors the
+            // `Self::Compare` arm — the compare3
+            // runs three pairwise K-handed
+            // heads-up rotations (v1 vs v2, v2 vs
+            // v3, v3 vs v1) for K hands each and
+            // prints a single-line JSON
+            // `Compare3Report` declaring the
+            // ranked winner. The compare3 is
+            // structurally parallel to the
+            // compare (one `Room` shell per
+            // pair, three pairs, one JSON
+            // report) so a v1 `trainer --compare`
+            // run and a v1 `trainer --compare3`
+            // run can coexist in the same
+            // database without colliding on the
+            // v1 / v2 / v3 staging tables, the
+            // v1 / v2 / v3 blueprint tables, or
+            // the v1 / v2 / v3 epoch rows. A
+            // regression in the per-hand PnL
+            // math fails both the compare and
+            // compare3 integration tests in the
+            // same CI run.
+            Self::Compare3 => crate::bench::run_compare3(client).await,
             // The `Replay` and `VerifyReceipt` arms are
             // handled above; the compiler still requires
             // an exhaustive match, so the unreachable
