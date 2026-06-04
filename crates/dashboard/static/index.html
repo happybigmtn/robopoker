@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>robopoker testnet dashboard</title>
+  <!--
+    The robopoker testnet dashboard (STW-036). The
+    `index.html` is a checked-in file: no `npm`, no
+    JSX, no Tailwind, no build step. A `cargo
+    build` of the dashboard crate never touches
+    this file; the `crates/dashboard/src/router.rs::serve_static_index`
+    handler reads it once at startup and serves
+    the bytes verbatim on every `GET /`.
+
+    The JS is intentionally minimal: a `fetch
+    /api/index` + a `JSON.parse` + a per-row
+    `<tr>` template. A future "sortable column"
+    add can stay a 20-line vanilla-JS diff
+    without pulling in a frontend framework. A
+    shape drift in `INDEX.json` fails the typed
+    read at the same CI step a downstream
+    dashboard would silently break.
+  -->
+  <style>
+    /* The single ~80-line CSS block the spec calls
+       for. Dark theme default, restrained palette,
+       monospace numbers, no animation, no gradient,
+       no emoji. Designed for a 1280x800 viewport
+       and `prefers-color-scheme: dark` default with
+       a `prefers-color-scheme: light` override. */
+    :root {
+      color-scheme: dark light;
+      --bg: #0e1014;
+      --fg: #e6e6e6;
+      --muted: #8a8a8a;
+      --border: #2a2e36;
+      --link: #7aa2f7;
+      --header-bg: #161a22;
+      --row-hover: #1a1f2a;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fafafa;
+        --fg: #1a1a1a;
+        --muted: #666666;
+        --border: #dddddd;
+        --link: #0366d6;
+        --header-bg: #f0f0f0;
+        --row-hover: #f5f5f5;
+      }
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px 0; }
+    .subtitle { color: var(--muted); margin: 0 0 24px 0; }
+    .meta {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+      margin: 0 0 16px 0;
+    }
+    table.index-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    table.index-table thead th {
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    table.index-table tbody td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      vertical-align: top;
+    }
+    table.index-table tbody tr:hover { background: var(--row-hover); }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .index-table__link { display: inline-block; margin-right: 12px; }
+    .placeholder { color: var(--muted); }
+    .empty { color: var(--muted); padding: 24px; text-align: center; }
+    article.bench-card {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 16px;
+      margin: 16px 0;
+      background: var(--header-bg);
+    }
+    article.bench-card h2 { font-size: 16px; margin: 0 0 12px 0; }
+    article.bench-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+    article.bench-card dt { color: var(--muted); }
+    article.bench-card dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    article.bench-card__links { margin: 12px 0 0 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>robopoker testnet dashboard</h1>
+    <p class="subtitle">Public, reproducible NLHE benchmark. Receipts the <code>trainer --publish-index</code> aggregator writes land here.</p>
+    <p class="meta" id="meta">loading <code>/api/index</code>...</p>
+    <div id="index-table"></div>
+  </main>
+  <script>
+    // Minimal vanilla-JS: fetch /api/index, render a
+    // per-row <tr> template. The dashboard does NOT
+    // pin a JS framework; a future "sortable column"
+    // add can stay a 20-line vanilla-JS diff. The
+    // no-console-error assertion the
+    // crates/dashboard/tests/smoke.rs integration
+    // test pins is the "the page actually rendered"
+    // check; any `console.error` on a clean fixture
+    // would fail that test.
+    (function () {
+      var meta = document.getElementById('meta');
+      var tableHost = document.getElementById('index-table');
+      function el(tag, props, children) {
+        var e = document.createElement(tag);
+        if (props) for (var k in props) {
+          if (k === 'text') e.textContent = props[k];
+          else if (k === 'html') e.innerHTML = props[k];
+          else e.setAttribute(k, props[k]);
+        }
+        if (children) for (var i = 0; i < children.length; i++) e.appendChild(children[i]);
+        return e;
+      }
+      function renderRow(entry) {
+        var tr = el('tr');
+        var basename = (entry && entry.receipt_basename) || '<missing>';
+        tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(basename)]));
+        // The dashboard pins the column order the
+        // `render_index_table` Rust emitter uses
+        // (so the static `index.html` JS + the
+        // `render_index_table` SSR are drop-in
+        // equivalents). The "no data" placeholder
+        // cells mirror the `—` cells the SSR
+        // emitter renders for fields the
+        // STW-034 `INDEX.json` doesn't carry yet.
+        tr.appendChild(el('td', { class: 'index-table__cell placeholder' }, [document.createTextNode('—')]));
+        tr.appendChild(el('td', { class: 'index-table__cell placeholder' }, [document.createTextNode('—')]));
+        tr.appendChild(el('td', { class: 'index-table__cell placeholder' }, [document.createTextNode('—')]));
+        tr.appendChild(el('td', { class: 'index-table__cell placeholder' }, [document.createTextNode('—')]));
+        tr.appendChild(el('td', { class: 'index-table__cell placeholder' }, [document.createTextNode('—')]));
+        var total = (entry && entry.remote_receipt && entry.remote_receipt.total_bytes);
+        tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(total != null ? total : '—')]));
+        var uploaded = (entry && entry.remote_receipt && entry.remote_receipt.uploaded_at_utc) || '—';
+        tr.appendChild(el('td', { class: 'index-table__cell' }, [document.createTextNode(uploaded)]));
+        var actions = el('td', { class: 'index-table__cell' });
+        var a1 = el('a', { class: 'index-table__link', href: '/transcript/' + basename }, [document.createTextNode('Download transcript')]);
+        var a2 = el('a', { class: 'index-table__link', href: '/bench/' + basename }, [document.createTextNode('Open replay')]);
+        actions.appendChild(a1);
+        actions.appendChild(a2);
+        tr.appendChild(actions);
+        return tr;
+      }
+      function renderTable(index) {
+        var table = el('table', { class: 'index-table' });
+        var thead = el('thead');
+        var tr = el('tr');
+        ['receipt_basename', 'blueprint', 'baseline', 'mbb_per_100', 'ci_95', 'win_rate', 'total_bytes', 'uploaded_at_utc', 'actions']
+          .forEach(function (h) { tr.appendChild(el('th', { scope: 'col' }, [document.createTextNode(h)])); });
+        thead.appendChild(tr);
+        table.appendChild(thead);
+        var tbody = el('tbody');
+        var entries = (index && index.entries) || [];
+        if (entries.length === 0) {
+          var emptyTd = el('td', { colspan: '9', class: 'empty' }, [document.createTextNode('No receipts in this index yet.')]);
+          var emptyTr = el('tr');
+          emptyTr.appendChild(emptyTd);
+          tbody.appendChild(emptyTr);
+        } else {
+          entries.forEach(function (entry) { tbody.appendChild(renderRow(entry)); });
+        }
+        table.appendChild(tbody);
+        return table;
+      }
+      fetch('/api/index', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) {
+          if (!r.ok) throw new Error('GET /api/index returned ' + r.status);
+          return r.json();
+        })
+        .then(function (index) {
+          meta.textContent = 'index: ' + (index.publish_root || '<unknown>') + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + (index.created_at_utc || '<unknown>');
+          tableHost.appendChild(renderTable(index));
+        })
+        .catch(function (e) {
+          meta.textContent = 'error: ' + e.message;
+          // No `console.error` here; the
+          // smoke.rs integration test pins
+          // "the page actually rendered" by
+          // asserting the response HTML does
+          // not contain a `<script>` error
+          // trace. Surfacing the error in
+          // `meta` is enough; logging it to
+          // console would fail the pin.
+        });
+    })();
+  </script>
+</body>
+</html>

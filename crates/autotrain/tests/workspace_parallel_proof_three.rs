@@ -285,3 +285,140 @@ fn summary_headline_format_contains_runs_and_failures() {
         last_idx = idx;
     }
 }
+
+/// Absolute path to the new STW-037 operator-runnable
+/// 3-consecutive full-workspace proof runbook script. Sibling
+/// of the `script_path()` helper above; mirrors the
+/// `crates/dashboard/` `dashboard_script_path()` /
+/// `crates/autotrain/tests/script_shape.rs`
+/// `testnet_live_publish_dashboard_script_path()` conventions
+/// so a future operator can find the runbook with the same
+/// `scripts/<name>.sh` relative path the rest of the
+/// autotrain pipeline uses.
+fn operator_runnable_three_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("workspace-parallel-proof-three.sh")
+}
+
+#[test]
+fn operator_runnable_three_script_exists_and_parses() {
+    // STW-037 operator-runnable 3-consecutive
+    // full-workspace proof runbook. The last
+    // un-closed `verification:workspace-parallel`
+    // mainnet-block hinge: STW-030 shipped the cheap
+    // in-CI 3-consecutive *gameplay-only* proof, and
+    // STW-020 shipped the canonical 3-consecutive
+    // *full-workspace* proof, but the operator path
+    // an actual operator / nightly worker runs is
+    // hand-orchestrated with a no-output knob. STW-037
+    // ships `scripts/workspace-parallel-proof-three.sh`
+    // — a pure-bash driver that invokes the STW-030
+    // lib test 3 times back-to-back in 3 separate
+    // `cargo test` invocations AND invokes the
+    // STW-020 runbook once, capturing each invocation's
+    // stdout + stderr + exit into a per-invocation
+    // `logs/workspace-parallel-proof-three/<UTC-ISO>/invocation-{1,2,3,4}/{stdout,stderr,exit}.txt`
+    // layout. The four pins below mirror the
+    // STW-020 `workspace_parallel_proof.rs`
+    // `script_exists_and_is_executable` /
+    // `script_parses_with_bash_n` pinners + the
+    // STW-019 / STW-032 / STW-033 / STW-034 / STW-035
+    // shell-shape pins the autotrain pipeline
+    // already follows, so a regression in the new
+    // runbook's surface (file missing, syntax broken,
+    // executable bit cleared, no STW-030 sub-invocation
+    // listed, no STW-020 runbook sub-invocation listed,
+    // headline-format drift) fails CI at the same
+    // step a future operator would silently break.
+    let p = operator_runnable_three_script_path();
+    assert!(
+        p.exists(),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script missing at {}; the STW-037 hinge has no shell \
+         entry point (the STW-030 in-CI 3-consecutive gameplay-only proof \
+         and the STW-020 canonical 3-consecutive full-workspace proof \
+         are still hand-orchestrated for an operator path)",
+        p.display()
+    );
+    // The owner-executable bit must be set; a future
+    // `chmod -x` regression (e.g. a cross-checkout that
+    // strips the bit) fails the test before a worker
+    // tries to shell out to the script. Mirrors the
+    // `workspace_parallel_proof.rs::script_exists_and_is_executable`
+    // pinner + every
+    // `script_shape.rs::testnet_live_publish_*_script_exists_and_parses`
+    // pinner.
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        assert!(
+            mode & 0o100 != 0,
+            "STW-037 operator-runnable 3-consecutive full-workspace proof \
+             runbook script at {} must have its owner-executable bit set \
+             (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches an operator
+    // or nightly run.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/workspace-parallel-proof-three.sh");
+    assert!(
+        out.status.success(),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The new runbook's body must (a) emit the pinned
+    // `workspace parallel proof three complete:`
+    // headline prefix the dashboard scraper greps for
+    // (a regression in the prefix fails the new
+    // sub-test at CI time), and (b) list the
+    // STW-030 lib test as a sub-invocation (so a
+    // regression that drops the in-CI gameplay-only
+    // 3-consecutive sub-invocations fails the
+    // operator path the runbook is the entry point
+    // for). The `run_three_consecutive_clean_gameplay_lib_test_runs`
+    // lib-test name is the same lib-test name the
+    // existing two sub-tests pin, so a regression
+    // that renames the lib test fails all three
+    // sub-tests at the same CI step.
+    let script = std::fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("STW-037: read {}: {e}", p.display()));
+    assert!(
+        script.contains("workspace parallel proof three complete:"),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script at {} must print a \
+         `workspace parallel proof three complete:` headline line; the \
+         dashboard scraper relies on this exact prefix",
+        p.display()
+    );
+    assert!(
+        script.contains("run_three_consecutive_clean_gameplay_lib_test_runs"),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script at {} must list the STW-030 \
+         `run_three_consecutive_clean_gameplay_lib_test_runs` lib test \
+         as a sub-invocation (the in-CI gameplay-only 3-consecutive \
+         proof the new runbook chains 3 times back-to-back); a \
+         regression that drops the STW-030 sub-invocation leaves the \
+         new runbook as a one-shot STW-020 wrapper without the \
+         STW-030 3-consecutive gameplay-only proof",
+        p.display()
+    );
+}

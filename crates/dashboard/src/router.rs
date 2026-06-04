@@ -1,0 +1,625 @@
+//! `router` — the dashboard's `axum` router.
+//!
+//! The dashboard's `(b)` layer. Exposes four routes on a
+//! single [`serve`] entry point:
+//!
+//! - `GET /` — serves the static `index.html` (the
+//!   vanilla-JS sortable-table frontend the spec ships).
+//!   The file is checked in at
+//!   `crates/dashboard/static/index.html`; the router
+//!   reads it once at startup and serves the bytes
+//!   verbatim on every `GET /`.
+//! - `GET /api/index` — returns the typed `INDEX.json`
+//!   the dashboard's JS fetches. The handler delegates to
+//!   the `IndexClient` and serialises the typed
+//!   `PublishIndex` back to JSON via `serde_json` so a
+//!   `GET /api/index` response is byte-identical to the
+//!   on-disk `INDEX.json` the trainer wrote.
+//! - `GET /transcript/:id` — proxies the
+//!   `transcript-<id>.json` bundle a per-row `Download
+//!   transcript` link points at. The `:id` is a flat
+//!   `<basename>` (no slashes); the handler reads the
+//!   bundle from the `RBP_DASHBOARD_TRANSCRIPT_DIR` env
+//!   knob (default `./transcripts`).
+//! - `GET /bench/:id` — renders an HTML card (the
+//!   [`render::render_bench_card`] emitter) for the
+//!   `:id`'d receipt. The `:id` matches the `:id` the
+//!   `GET /transcript/:id` route accepts.
+//!
+//! The router is `axum::Router`-shaped and is exposed as
+//! the `dashboard_app()` builder function so the smoke
+//! integration test can drive a real `axum::Router`
+//! through `tower::ServiceExt::oneshot` without spinning
+//! up a TCP listener.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::Body;
+use axum::extract::{Path, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use rbp_autotrain::PublishIndex;
+
+use crate::index_client::IndexClient;
+use crate::render;
+
+/// `RBP_DASHBOARD_TRANSCRIPT_DIR` env knob — the directory
+/// the `GET /transcript/:id` route reads the per-receipt
+/// `transcript-<id>.json` bundle from. The default
+/// `./transcripts` is the bench harness's default
+/// `RBP_BENCH_TRANSCRIPT_DIR`, so a single host running
+/// the trainer + the dashboard picks up the bench's
+/// per-hand bundles without configuration.
+pub const DEFAULT_TRANSCRIPT_DIR: &str = "./transcripts";
+
+/// `RBP_DASHBOARD_DEPLOYED_URL` env knob — the Cloudflare
+/// Pages / production URL the README's
+/// `## Public dashboard` section points at. The dashboard
+/// build script reads this at deploy time; the
+/// `crates/autotrain/tests/script_shape.rs` shape pins
+/// assert the README's `## Public dashboard` line carries
+/// a `Public dashboard: <URL>` token this knob sets.
+pub const DEFAULT_DEPLOYED_URL: &str = "https://robopoker-testnet-dashboard.pages.dev/";
+
+/// Shared state the router hands to every handler. The
+/// `IndexClient` is `Clone`-able (the inner source URL is
+/// a `String`) so the state can live behind an
+/// `Arc<AppState>` without locking.
+#[derive(Clone)]
+pub struct AppState {
+    /// The typed `INDEX.json` reader. The `GET /api/index`
+    /// handler delegates to this client.
+    pub index_client: IndexClient,
+    /// Absolute path to the `transcripts/` directory the
+    /// `GET /transcript/:id` route reads from. Resolved
+    /// from the `RBP_DASHBOARD_TRANSCRIPT_DIR` env knob
+    /// at startup; defaults to [`DEFAULT_TRANSCRIPT_DIR`].
+    pub transcript_dir: PathBuf,
+    /// The static `index.html` bytes the `GET /` handler
+    /// serves. Loaded once at startup from
+    /// `crates/dashboard/static/index.html` (resolved
+    /// relative to the workspace root at build time via
+    /// [`static_index_html_path`]).
+    pub static_index_html: Arc<String>,
+}
+
+impl AppState {
+    /// Build a fresh `AppState` from the env knobs. The
+    /// `index_client` source URL falls back to the
+    /// [`IndexClient::from_env`] default; the
+    /// `transcript_dir` falls back to
+    /// [`DEFAULT_TRANSCRIPT_DIR`]; the `static_index_html`
+    /// is loaded from the workspace-relative
+    /// `static/index.html` path.
+    pub fn from_env() -> Self {
+        let transcript_dir = PathBuf::from(
+            std::env::var("RBP_DASHBOARD_TRANSCRIPT_DIR")
+                .unwrap_or_else(|_| DEFAULT_TRANSCRIPT_DIR.to_string()),
+        );
+        let static_index_html = Arc::new(
+            std::fs::read_to_string(static_index_html_path()).unwrap_or_else(|e| {
+                panic!(
+                    "static/index.html missing at {}: {e}",
+                    static_index_html_path().display()
+                )
+            }),
+        );
+        Self {
+            index_client: IndexClient::from_env(),
+            transcript_dir,
+            static_index_html,
+        }
+    }
+}
+
+/// Build the `axum::Router` the dashboard serves. The
+/// returned `Router` is `Send + 'static` (the `AppState`
+/// is `Clone`, the handlers are `axum`-compatible
+/// closures) so a `serve()`-spawned tokio task can move
+/// it into a `tokio::spawn` closure.
+///
+/// Routes (4, mirrors the spec):
+///
+/// - `GET /` → `serve_static_index`
+/// - `GET /api/index` → `serve_typed_index`
+/// - `GET /transcript/:id` → `serve_transcript`
+/// - `GET /bench/:id` → `serve_bench_card`
+pub fn dashboard_app(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(serve_static_index))
+        .route("/api/index", get(serve_typed_index))
+        .route("/transcript/:id", get(serve_transcript))
+        .route("/bench/:id", get(serve_bench_card))
+        .with_state(state)
+}
+
+/// Resolve the absolute path of the checked-in static
+/// `index.html`. Walk up from `CARGO_MANIFEST_DIR` (the
+/// `crates/dashboard/` directory) to the workspace root,
+/// then read `<workspace>/crates/dashboard/static/index.html`.
+/// The function panics at startup if the file is missing
+/// (the `cargo build` of the dashboard crate is the
+/// authoritative pin on the file's existence).
+pub fn static_index_html_path() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest.join("static").join("index.html")
+}
+
+/// `GET /` — serve the static `index.html` the
+/// `index_client` / `render` modules feed. The response
+/// is `text/html; charset=utf-8` with a 200 status. The
+/// `cache-control: no-cache` header keeps a CI worker
+/// re-fetching the index on every page load (a
+/// `trainer --publish-index` + `aws s3 sync` deploys a
+/// new `INDEX.json`, the next dashboard reload picks it
+/// up without a hard refresh).
+async fn serve_static_index(State(state): State<AppState>) -> Response {
+    let mut response = (
+        StatusCode::OK,
+        Body::from((*state.static_index_html).clone()),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+/// `GET /api/index` — return the typed `PublishIndex` as
+/// JSON. The handler delegates to
+/// [`IndexClient::fetch_index`] and serialises the
+/// result via `serde_json` so a `GET /api/index`
+/// response is byte-identical to the on-disk
+/// `INDEX.json` the `trainer --publish-index` arm wrote.
+///
+/// An error in the typed read (missing file, malformed
+/// JSON, HTTP timeout) surfaces as a `500 Internal
+/// Server Error` with the `IndexClientError`'s `Display`
+/// impl as the body — a regression in the
+/// `IndexClientError` shape fails the
+/// `serve_typed_index_returns_500_on_missing_file`
+/// lib test at the same CI step a downstream dashboard
+/// scraper would silently break.
+async fn serve_typed_index(State(state): State<AppState>) -> Response {
+    match state.index_client.fetch_index() {
+        Ok(index) => typed_index_to_response(&index),
+        Err(err) => err.into_response(),
+    }
+}
+
+impl IntoResponse for crate::index_client::IndexClientError {
+    fn into_response(self) -> Response {
+        let body = self.to_string();
+        let mut response = (StatusCode::INTERNAL_SERVER_ERROR, Body::from(body)).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        response
+    }
+}
+
+fn typed_index_to_response(index: &PublishIndex) -> Response {
+    // `serde_json::to_string_pretty` is the same encoder
+    // the trainer's `--publish-index` arm uses (see
+    // `crates/autotrain/src/publish_index.rs::publish_index`),
+    // so the dashboard's `GET /api/index` response and
+    // the on-disk `INDEX.json` are byte-identical. A
+    // regression in the encoder fails the smoke test
+    // at the same CI step a downstream scraper would
+    // silently break.
+    let body = serde_json::to_string_pretty(index).expect("PublishIndex is always serialisable");
+    let mut response = (StatusCode::OK, Body::from(body)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    response
+}
+
+/// `GET /transcript/:id` — proxy the
+/// `transcript-<id>.json` bundle the bench wrote. The
+/// handler reads the file from the
+/// `RBP_DASHBOARD_TRANSCRIPT_DIR` directory; a missing
+/// file is a `404 Not Found` with a one-line diagnostic
+/// in the body.
+async fn serve_transcript(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !is_safe_id(&id) {
+        return not_found("invalid transcript id");
+    }
+    // The bench harness names every per-hand
+    // bundle `transcript-<id>.json` (the
+    // STW-014 `to_json()` writer does this); the
+    // `:id` path parameter is the *basename* a
+    // per-row `Download transcript` link points
+    // at, so the on-disk file the handler reads
+    // is `transcripts/transcript-<id>.json`.
+    let path = state.transcript_dir.join(format!("transcript-{id}.json"));
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mut response = (StatusCode::OK, Body::from(bytes)).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            response
+        }
+        Err(e) => not_found(&format!(
+            "transcript `{id}` not found at {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// `GET /bench/:id` — render a `BenchReport`-shaped HTML
+/// card for the `:id`'d receipt. The handler reads the
+/// receipt's `bench/stdout.txt` (a `BenchReport`
+/// JSON-line the bench harness writes) from
+/// `<RBP_DASHBOARD_RECEIPT_DIR>/<id>/bench/stdout.txt`,
+/// parses the per-line JSON via `serde_json`, and
+/// projects it through the [`render::render_bench_card`]
+/// emitter.
+///
+/// A missing bench JSON line (the receipt was not
+/// produced by the bench) surfaces as a `404 Not Found`
+/// with a one-line diagnostic; a corrupt JSON line
+/// surfaces as a `500 Internal Server Error`. The
+/// `RBP_DASHBOARD_RECEIPT_DIR` env knob defaults to
+/// `./receipts`, the directory the
+/// `scripts/testnet-live-proof.sh` runbook writes to.
+pub const DEFAULT_RECEIPT_DIR: &str = "./receipts";
+
+async fn serve_bench_card(State(_state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !is_safe_id(&id) {
+        return not_found("invalid bench id");
+    }
+    let bench_line = read_bench_json_line(&id);
+    let bench_line = match bench_line {
+        Ok(s) => s,
+        Err(e) => return not_found(&e),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&bench_line) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+    let card = render::render_bench_card(&project_bench_card_fields(&id, &parsed));
+    let mut response = (StatusCode::OK, Body::from(card)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
+}
+
+/// Read the bench JSON line the `trainer --bench` arm
+/// prints to `<RBP_DASHBOARD_RECEIPT_DIR>/<id>/bench/stdout.txt`.
+/// The `stdout.txt` is the bench subprocess's captured
+/// stdout; the last non-empty line is the `BenchReport`
+/// JSON a downstream consumer parses.
+fn read_bench_json_line(id: &str) -> Result<String, String> {
+    let receipt_dir = PathBuf::from(
+        std::env::var("RBP_DASHBOARD_RECEIPT_DIR")
+            .unwrap_or_else(|_| DEFAULT_RECEIPT_DIR.to_string()),
+    );
+    let path = receipt_dir.join(id).join("bench").join("stdout.txt");
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| format!("bench stdout missing at {}: {e}", path.display()))?;
+    body.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("bench stdout empty at {}", path.display()))
+}
+
+/// Project a `serde_json::Value` (a parsed `BenchReport`
+/// JSON line) into the flat [`render::BenchCardFields`]
+/// the renderer consumes. A missing field defaults to
+/// `0.0` / `""` so a future `BenchReport` field
+/// addition doesn't break the dashboard render — the
+/// column instead reads `0.0000` until the next slice
+/// wires the field through.
+fn project_bench_card_fields(
+    receipt_basename: &str,
+    v: &serde_json::Value,
+) -> render::BenchCardFields {
+    render::BenchCardFields {
+        receipt_basename: receipt_basename.to_string(),
+        blueprint: v
+            .get("blueprint")
+            .and_then(|x| x.as_str())
+            .unwrap_or("v1")
+            .to_string(),
+        baseline: v
+            .get("baseline")
+            .and_then(|x| x.as_str())
+            .unwrap_or("fish")
+            .to_string(),
+        mbb_per_100: v.get("mbb_per_100").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        mbb_ci95: v.get("mbb_ci95").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        win_rate: v.get("win_rate").and_then(|x| x.as_f64()).unwrap_or(0.0),
+    }
+}
+
+fn not_found(detail: &str) -> Response {
+    let body = format!("dashboard: {detail}\n");
+    let mut response = (StatusCode::NOT_FOUND, Body::from(body)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+}
+
+/// Reject `:id` paths that include `..` / `/` / NUL
+/// bytes. The handler maps a rejected id to a
+/// `404 Not Found` (rather than `400 Bad Request`) so a
+/// URL the dashboard would render — but that escapes
+/// the `transcripts/` dir — fails with the same shape a
+/// genuinely missing file fails with.
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains('\0')
+}
+
+/// Bind the dashboard's router to a `tokio::net::TcpListener`
+/// on `addr` and serve it forever. The function is the
+/// `serve(addr)` entry point the spec calls for; it
+/// returns when the listener fails (e.g. port already
+/// in use) or the runtime is shut down.
+///
+/// The `AppState` is built from env knobs via
+/// [`AppState::from_env`]; a CI worker that wants to
+/// point the dashboard at a specific `INDEX.json` (or
+/// a specific `transcripts/` dir) sets
+/// `RBP_DASHBOARD_INDEX_URL` / `RBP_DASHBOARD_TRANSCRIPT_DIR`
+/// before calling `serve`.
+pub async fn serve(addr: std::net::SocketAddr) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let state = AppState::from_env();
+    let app = dashboard_app(state);
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 3 lib tests pinning the per-route shape:
+    //!
+    //! 1. `serve_typed_index_returns_index_bytes` — a
+    //!    `GET /api/index` against a fixture `INDEX.json`
+    //!    returns 200 + a body the `serde_json` round-trip
+    //!    parses into the same `PublishIndex` the fixture
+    //!    started with.
+    //! 2. `serve_transcript_returns_404_on_missing` —
+    //!    `GET /transcript/nonexistent` against an empty
+    //!    transcript dir returns 404.
+    //! 3. `serve_bench_card_renders_pinned_columns` —
+    //!    `GET /bench/<id>` against a fixture
+    //!    `<id>/bench/stdout.txt` returns 200 + a
+    //!    response body whose `<dt>` columns are
+    //!    `blueprint` / `baseline` / `mbb_per_100` in
+    //!    that order.
+
+    use super::*;
+    use rbp_autotrain::{IndexedEntry, PublishIndex, PublishedRemoteReceipt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static SEQ: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "rbp-dashboard-router-{label}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            ));
+            std::fs::create_dir_all(&dir).expect("mkdir tempdir");
+            Self { path: dir }
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn fixture_index() -> PublishIndex {
+        let receipt = PublishedRemoteReceipt {
+            plan: rbp_autotrain::PublishRemotePlan {
+                bucket: "robopoker-testnet-dashboard".to_string(),
+                prefix: "testnet-live-proof-20260604T050000Z/".to_string(),
+                region: "us-east-1".to_string(),
+                s3_objects: vec![],
+                bundle_sha256: "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313"
+                    .to_string(),
+                bundle_bytes: 20503,
+                receipt_basename: "testnet-live-proof-20260604T050000Z".to_string(),
+                runbook_version: "STW-033 v1".to_string(),
+                created_at_utc: "<unknown>".to_string(),
+                dry_run: true,
+            },
+            uploaded_at_utc: "<unknown>".to_string(),
+            s3_objects: vec![],
+            total_bytes: 20503,
+            bundle_sha256: "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313"
+                .to_string(),
+            runbook_version: "STW-033 v1".to_string(),
+        };
+        PublishIndex {
+            publish_root: "/tmp/publish-root".to_string(),
+            runbook_version: "STW-034 v1".to_string(),
+            created_at_utc: "<unknown>".to_string(),
+            entry_count: 1,
+            total_bytes: 20503,
+            entries: vec![IndexedEntry {
+                receipt_basename: "testnet-live-proof-20260604T050000Z".to_string(),
+                receipt_dir: "/tmp/publish-root/testnet-live-proof-20260604T050000Z"
+                    .to_string(),
+                remote_receipt_path:
+                    "/tmp/publish-root/testnet-live-proof-20260604T050000Z/remote/remote_receipt.json"
+                        .to_string(),
+                remote_receipt: receipt,
+            }],
+        }
+    }
+
+    fn write_index(dir: &std::path::Path, index: &PublishIndex) {
+        let body = serde_json::to_string_pretty(index).expect("serialise index");
+        std::fs::write(dir.join("INDEX.json"), body).expect("write INDEX.json");
+    }
+
+    /// Build an `AppState` pointing at a fixture
+    /// `INDEX.json` in a temp dir, with the bench /
+    /// transcript dirs pointing at sibling subdirs of
+    /// the same temp dir so the test owns the full
+    /// fixture layout.
+    fn app_state_for(dir: &TempDir) -> AppState {
+        write_index(dir.path(), &fixture_index());
+        AppState {
+            index_client: IndexClient::from_path(dir.path().join("INDEX.json")),
+            transcript_dir: dir.path().to_path_buf(),
+            static_index_html: Arc::new("<!doctype html><title>fixture</title>".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_typed_index_returns_index_bytes() {
+        let dir = TempDir::new("index");
+        let app = dashboard_app(app_state_for(&dir));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/index")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot /api/index");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("read body");
+        let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+        let parsed: PublishIndex =
+            serde_json::from_str(body_str).expect("body must be a valid PublishIndex");
+        assert_eq!(parsed, fixture_index());
+    }
+
+    #[tokio::test]
+    async fn serve_transcript_returns_404_on_missing() {
+        let dir = TempDir::new("transcript");
+        let app = dashboard_app(app_state_for(&dir));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/transcript/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot /transcript/nonexistent");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serve_bench_card_renders_pinned_columns() {
+        let dir = TempDir::new("bench");
+        write_index(dir.path(), &fixture_index());
+        // Drop a synthetic `bench/stdout.txt` with a
+        // single `BenchReport` JSON line the bench
+        // arm produces. The router's `serve_bench_card`
+        // reads this file + projects it through
+        // `project_bench_card_fields` + emits the
+        // rendered HTML.
+        let id = "testnet-live-proof-20260604T050000Z";
+        let bench_dir = dir.path().join(id).join("bench");
+        std::fs::create_dir_all(&bench_dir).expect("mkdir bench");
+        std::fs::write(
+            bench_dir.join("stdout.txt"),
+            r#"{"hands":200,"wins":114,"losses":86,"net_chips":1234,"mbb_per_100":12.3456,"mbb_ci95":1.2345,"win_rate":0.5700,"win_rate_ci95":0.0345,"blind":2,"blueprint_trained":true,"blueprint":"v1","baseline":"fish","transcript":true}
+"#,
+        )
+        .expect("write bench stdout");
+        // SAFETY: the test owns this env knob for the
+        // duration of the test; the env var is
+        // `remove_var`'d before the test returns. A
+        // parallel `cargo test` invocation cannot read
+        // a meaningful value from this knob (the
+        // dashboard startup picks up whatever is
+        // current at the moment of the read), so the
+        // racy nature of `set_var` does not surface a
+        // flaky assertion in this test.
+        unsafe {
+            std::env::set_var("RBP_DASHBOARD_RECEIPT_DIR", dir.path());
+        }
+        let app = dashboard_app(app_state_for(&dir));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&format!("/bench/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot /bench/<id>");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("read body");
+        let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+        // Pinned column order: `blueprint` / `baseline`
+        // / `mbb_per_100` (in that order in the
+        // response body).
+        let i_bp = body_str.find("blueprint").expect("contains `blueprint`");
+        let i_ba = body_str.find("baseline").expect("contains `baseline`");
+        let i_mbb = body_str
+            .find("mbb_per_100")
+            .expect("contains `mbb_per_100`");
+        assert!(
+            i_bp < i_ba && i_ba < i_mbb,
+            "bench card must be ordered blueprint < baseline < mbb_per_100; got: bp={i_bp} ba={i_ba} mbb={i_mbb}\nbody: {body_str}"
+        );
+        // The headline numbers the spec pins (the
+        // `12.3456` and `1.2345` mbb/100 / CI values
+        // from the fixture stdout line) must appear in
+        // the rendered body.
+        assert!(
+            body_str.contains("12.3456"),
+            "body must contain mbb/100 headline: {body_str}"
+        );
+        assert!(
+            body_str.contains("1.2345"),
+            "body must contain mbb CI half-width: {body_str}"
+        );
+        // SAFETY: see the `set_var` call above — the
+        // racy `set_var` / `remove_var` pair is
+        // acceptable in a `#[cfg(test)]` integration
+        // test where the env knob is opaque to any
+        // other test.
+        unsafe {
+            std::env::remove_var("RBP_DASHBOARD_RECEIPT_DIR");
+        }
+    }
+}

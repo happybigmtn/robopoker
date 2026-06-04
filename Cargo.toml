@@ -16,6 +16,13 @@ members  = [
     "crates/gameroom",
     "crates/server",
     "crates/autotrain",
+    # Testnet dashboard crate (STW-036): the visible
+    # consumer of the STW-034 `INDEX.json` aggregator +
+    # the STW-014 `transcript-<id>.json` bundles. The
+    # crate is a pure-`axum` typed-read + render + serve
+    # surface; no engine state, no DB connection, no
+    # training pipeline dependency.
+    "crates/dashboard",
     # Facade crate
     "crates/rbp",
     # Binary crates

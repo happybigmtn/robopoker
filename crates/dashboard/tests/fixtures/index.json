@@ -1,0 +1,121 @@
+{
+  "publish_root": "/tmp/publish-root-fixture",
+  "runbook_version": "STW-034 v1",
+  "created_at_utc": "<unknown>",
+  "entry_count": 2,
+  "total_bytes": 41006,
+  "entries": [
+    {
+      "receipt_basename": "testnet-live-proof-20260604T050000Z",
+      "receipt_dir": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z",
+      "remote_receipt_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/remote/remote_receipt.json",
+      "remote_receipt": {
+        "plan": {
+          "bucket": "robopoker-testnet-dashboard",
+          "prefix": "testnet-live-proof-20260604T050000Z/",
+          "region": "us-east-1",
+          "s3_objects": [
+            {
+              "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/bundle.tar.gz",
+              "sha256": "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313",
+              "bytes": 20503,
+              "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/bundle.tar.gz"
+            },
+            {
+              "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/manifest.json",
+              "sha256": "8f4b0b66d5ba168dc563f9adfe138b4855fd11907c1e5872e9930d35c4de47fe",
+              "bytes": 544,
+              "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/manifest.json"
+            },
+            {
+              "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/bundle.sha256",
+              "sha256": "0be60c236daa2efad4e97582b88c4f4ef26f7104ceb7c335da55bff70a32545e",
+              "bytes": 175,
+              "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/bundle.sha256"
+            }
+          ],
+          "bundle_sha256": "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313",
+          "bundle_bytes": 20503,
+          "receipt_basename": "testnet-live-proof-20260604T050000Z",
+          "runbook_version": "STW-033 v1",
+          "created_at_utc": "<unknown>",
+          "dry_run": true
+        },
+        "uploaded_at_utc": "<unknown>",
+        "s3_objects": [
+          {
+            "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/bundle.tar.gz",
+            "sha256": "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313",
+            "bytes": 20503,
+            "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/bundle.tar.gz"
+          },
+          {
+            "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/manifest.json",
+            "sha256": "8f4b0b66d5ba168dc563f9adfe138b4855fd11907c1e5872e9930d35c4de47fe",
+            "bytes": 544,
+            "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/manifest.json"
+          },
+          {
+            "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T050000Z/bundle.sha256",
+            "sha256": "0be60c236daa2efad4e97582b88c4f4ef26f7104ceb7c335da55bff70a32545e",
+            "bytes": 175,
+            "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T050000Z/bundle.sha256"
+          }
+        ],
+        "total_bytes": 21222,
+        "bundle_sha256": "cff28a13f2471bd15324b69f65e6ffa869a4ecd84748dc0e78719a7ffef11313",
+        "runbook_version": "STW-033 v1"
+      }
+    },
+    {
+      "receipt_basename": "testnet-live-proof-20260604T140107Z",
+      "receipt_dir": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z",
+      "remote_receipt_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/remote/remote_receipt.json",
+      "remote_receipt": {
+        "plan": {
+          "bucket": "robopoker-testnet-dashboard",
+          "prefix": "testnet-live-proof-20260604T140107Z/",
+          "region": "us-east-1",
+          "s3_objects": [
+            {
+              "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/bundle.tar.gz",
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "bytes": 19260,
+              "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T140107Z/bundle.tar.gz"
+            },
+            {
+              "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/manifest.json",
+              "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+              "bytes": 524,
+              "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T140107Z/manifest.json"
+            }
+          ],
+          "bundle_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "bundle_bytes": 19260,
+          "receipt_basename": "testnet-live-proof-20260604T140107Z",
+          "runbook_version": "STW-033 v1",
+          "created_at_utc": "<unknown>",
+          "dry_run": true
+        },
+        "uploaded_at_utc": "<unknown>",
+        "s3_objects": [
+          {
+            "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/bundle.tar.gz",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "bytes": 19260,
+            "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T140107Z/bundle.tar.gz"
+          },
+          {
+            "local_path": "/tmp/publish-root-fixture/testnet-live-proof-20260604T140107Z/manifest.json",
+            "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+            "bytes": 524,
+            "s3_uri": "s3://robopoker-testnet-dashboard/testnet-live-proof-20260604T140107Z/manifest.json"
+          }
+        ],
+        "total_bytes": 19784,
+        "bundle_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "runbook_version": "STW-033 v1"
+      }
+    }
+  ]
+}

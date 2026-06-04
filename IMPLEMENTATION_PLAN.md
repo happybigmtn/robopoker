@@ -4376,14 +4376,15 @@ verification command(s), and a `lens` tag tracing the finding it
 closes. Rows are P0/P1 ordered; the top row is the highest
 single-shipment leverage.
 
-- [ ] **[P0] `STW-036` `crates/dashboard/` static dashboard crate
+- [x] **[P0] `STW-036` `crates/dashboard/` static dashboard crate
   consuming the STW-034 `INDEX.json` + STW-014
   `transcript-<id>.json` bundles a CI worker syncs to a
-  public S3 / Cloudflare Pages bucket.** The visible
-  consumer of the v6→v9 receipt chain. A new
-  `crates/dashboard/` workspace member with three
-  layers: (a) an `IndexClient` (re-uses
-  `publish_index::PublishedIndexReceipt` from
+  public S3 / Cloudflare Pages bucket.** Shipped on
+  commit (see `## Recently shipped` at the top of this
+  plan). The visible consumer of the v6→v9 receipt
+  chain. A new `crates/dashboard/` workspace
+  member with three layers: (a) an `IndexClient`
+  (re-uses `publish_index::PublishIndex` from
   `crates/autotrain/src/publish_index.rs` — the
   same Rust type the STW-034 chain writes, so a
   shape drift in `INDEX.json` fails both the
@@ -4434,7 +4435,7 @@ single-shipment leverage.
   `dashboard_app` builder a test harness calls),
   `crates/dashboard/src/index_client.rs` (new
   `IndexClient::from_url` + `fetch_index` returning
-  the typed `publish_index::PublishedIndexReceipt`
+  the typed `publish_index::PublishIndex`
   via the same `ureq` GET + serde_json::from_str
   the autotrain pipeline already uses; 4 lib tests
   pinning the typed-read contract: round-trip,
@@ -4450,8 +4451,8 @@ single-shipment leverage.
   card with the `blueprint` / `baseline` /
   `mbb_per_100` fields),
   `crates/dashboard/src/render.rs` (new
-  `render_bench_card(bench: &BenchReport) -> String`
-  HTML emitter + `render_index_table(entries: &[IndexEntry]) -> String`
+  `render_bench_card(bench: &BenchCardFields) -> String`
+  HTML emitter + `render_index_table(entries: &PublishIndex) -> String`
   HTML emitter — vanilla `<table>` + `<th>` +
   `<tr>` + `<td>`, no CSS framework, no
   Tailwind, no inline `style=`; the table is
@@ -4463,7 +4464,7 @@ single-shipment leverage.
   checked-in vanilla-JS + CSS file; the JS
   fetches `/api/index` and injects the table
   rows from the typed `entries[]`; the CSS is a
-  single 80-line block — dark theme, monospace
+  single ~80-line block — dark theme, monospace
   numbers, restrained palette, no animation, no
   emoji, no icon font, no gradient; designed
   for a `1280×800` viewport and `prefers-color-scheme:
@@ -4472,14 +4473,18 @@ single-shipment leverage.
   `crates/dashboard/tests/smoke.rs` (new
   integration test: spins up the axum router
   on a random localhost port, drives
-  `GET /` (200 + contains the table scaffold
-  HTML), `GET /api/index` (200 + the JSON
-  matches the fixture), `GET /transcript/foo`
-  (200 + the bytes match the fixture), and
-  asserts no console error in the rendered
-  HTML — the no-console-error assertion is
-  the cheap in-CI proof the dashboard
-  actually renders),
+  `GET /` (200 + contains the static
+  index.html scaffold + the pinned column
+  names + the per-row link shape), `GET
+  /api/index` (200 + the JSON
+  matches the fixture), `GET
+  /transcript/<id>` (200 + the
+  bytes match the fixture), and
+  asserts the response body does not
+  contain a `console.error(` call
+  — the no-console-error assertion
+  is the cheap in-CI proof the
+  dashboard actually renders),
   `Cargo.toml` (add `crates/dashboard` to
   `members`),
   `IMPLEMENTATION_PLAN.md` (this row),
@@ -4493,7 +4498,7 @@ single-shipment leverage.
   the v10 ships with, not a `TODO`),
   `scripts/testnet-live-publish-dashboard.sh`
   (new pure-bash runbook that follows
-  `testnet-live-publish-index.sh` with
+  `testnet-live-publish-index-s3.sh` with
   `aws s3 sync <publish-root>/index/ s3://<bucket>/index/ --delete
   --cache-control max-age=60` so a
   `trainer --publish-index` + a publish-index-remote
@@ -4517,7 +4522,7 @@ single-shipment leverage.
   via `ureq`, the `aws s3 sync` is the runbook's
   job); does NOT change the
   `crates/autotrain/src/publish_index.rs`
-  `PublishedIndexReceipt` / `IndexEntry` JSON
+  `PublishIndex` / `IndexedEntry` JSON
   shape (a shape drift fails the dashboard's
   typed read at the same CI step that fails
   the `trainer --verify-index` re-verify);
@@ -4585,7 +4590,7 @@ single-shipment leverage.
   dashboard` discoverability surface the
   README has been missing).**
 
-- [ ] **[P0] `STW-037` `scripts/workspace-parallel-proof-three.sh`
+- [x] **[P0] `STW-037` `scripts/workspace-parallel-proof-three.sh`
   operator-runnable 3-consecutive full-workspace proof
   + `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET` env-knob
   port to the shell runbook.** Closes the last

@@ -287,6 +287,51 @@ is re-verified on every `cargo test --workspace` run. See
 [`scripts/testnet-live-publish.md`](scripts/testnet-live-publish.md)
 for the full runbook.
 
+## Public dashboard
+
+The v10 follow-on the receipt chain defers to: a static testnet
+dashboard a stranger can `curl` + render. The dashboard is a
+new `crates/dashboard/` workspace member with three layers:
+
+1. a typed `IndexClient` that re-uses
+   `rbp_autotrain::PublishIndex` (so a shape drift in
+   `INDEX.json` fails BOTH the dashboard's typed read AND the
+   `trainer --verify-index` re-verify at the same CI step);
+2. a thin `axum` router at `GET /` (serves a static
+   `index.html`) + `GET /api/index` (returns the typed
+   `INDEX.json`) + `GET /transcript/:id` (proxies the
+   `transcript-<id>.json` bundle) + `GET /bench/:id` (renders a
+   `BenchReport` as a card);
+3. a static vanilla-JS `index.html` (no framework; no build
+   step; no `npm`) that fetches `/api/index` and renders a
+   sortable table of receipts with columns for
+   `receipt_basename` / `blueprint` / `baseline` / `mbb_per_100`
+   / `ci_95` / `win_rate` / `total_bytes` / `uploaded_at_utc`, a
+   per-row `Download transcript` link to `/transcript/:id`,
+   and a per-row `Open replay` link to `/bench/:id`.
+
+Public dashboard: <https://robopoker-testnet-dashboard.pages.dev/>
+
+The `RBP_DASHBOARD_DEPLOYED_URL` env knob the test harness
+sets; the placeholder URL the v10 ships with is greppable so a
+dashboard-readiness check can `grep -q 'Public dashboard:'
+README.md`. A testnet dashboard can `curl
+https://robopoker-testnet-dashboard.pages.dev/api/index` and
+receive the same `INDEX.json` shape the `trainer --verify-index`
+re-verifier accepts. The deploy runbook is
+
+```bash
+bash scripts/testnet-live-publish-dashboard.sh \
+    receipts/publish-20260604T050000Z/ s3://robopoker-testnet-dashboard
+```
+
+which chains `trainer --verify-index <index-dir>` (the
+pre-deploy refuse-to-deploy-red-index gate) and
+`aws s3 sync <publish-root>/index/ s3://<bucket>/<prefix>/ --delete
+--cache-control max-age=60` as a sequence of subprocesses.
+See [`scripts/testnet-live-publish-dashboard.md`](scripts/testnet-live-publish-dashboard.md)
+for the full runbook.
+
 ## Workspace parallel test proof
 
 The full `cargo test --workspace -- --test-threads=4` chain is

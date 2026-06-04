@@ -1162,3 +1162,290 @@ fn testnet_live_publish_index_s3_doc_references_verify_index_remote_cli() {
         publish_index_s3_doc_path().display()
     );
 }
+
+// --- STW-036 dashboard-deploy runbook shape pins -----------------
+//
+// The STW-036 dashboard-deploy runbook
+// (`scripts/testnet-live-publish-dashboard.sh`) is the v10
+// follow-on the STW-035 publish-index-remote runbook doc
+// defers to: a CI worker that produced an `INDEX.json` (via
+// the STW-034 → STW-035 chain) wants to `aws s3 sync` it to
+// a public dashboard bucket. The four pins below mirror the
+// STW-019 + STW-032 + STW-033 + STW-034 + STW-035 file-on-
+// disk + pre-upload-gate + CLI-reference + doc-reference
+// pinners the autotrain pipeline already follows, so a
+// regression in the dashboard-deploy runbook's surface
+// (file missing, syntax broken, executable bit cleared, no
+// pre-deploy `trainer --verify-index` call, no `aws s3 sync`
+// call, no `RBP_DASHBOARD_INDEX_URL` env-knob mention in
+// the doc) fails CI at the same step a future operator
+// would silently break.
+
+fn dashboard_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-dashboard.sh")
+}
+
+#[test]
+fn testnet_live_publish_dashboard_script_exists_and_parses() {
+    // The dashboard-deploy runbook script must
+    // be on disk, executable, and parse with
+    // `bash -n`. A regression that drops the file
+    // (or breaks the bash grammar) fails the gate
+    // at CI time before a CI worker can shell out
+    // to it. Mirrors the STW-019 + STW-032 +
+    // STW-033 + STW-034 + STW-035 file-on-disk
+    // pins.
+    let p = dashboard_script_path();
+    assert!(
+        p.exists(),
+        "STW-036 dashboard-deploy runbook script missing at {}; \
+         the testnet dashboard deploy has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-036 dashboard-deploy runbook script at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without
+    // executing it. A non-zero exit (a syntax
+    // error) fails the test so a future edit that
+    // breaks the bash grammar fails CI before it
+    // reaches a live dashboard-deploy step.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/testnet-live-publish-dashboard.sh");
+    assert!(
+        out.status.success(),
+        "STW-036 dashboard-deploy runbook script must parse with `bash -n` \
+         (got exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn testnet_live_publish_dashboard_script_has_verify_index_pre_deploy_gate() {
+    // The dashboard-deploy runbook script must
+    // shell out to `trainer --verify-index
+    // <index-dir>` BEFORE the `aws s3 sync` step
+    // (the "refuse to deploy a red index" gate
+    // the STW-034 index verifier is the source
+    // of truth for). The pin is by byte offset:
+    // `--verify-index` must appear in the script
+    // body before `aws s3 sync` appears. A
+    // regression that re-orders the chain (or
+    // drops the verify step) fails the gate so a
+    // CI worker that runs the script can never
+    // push a red index to the dashboard bucket.
+    // Mirrors the STW-035
+    // `testnet_live_publish_index_s3_script_has_verify_index_pre_upload_gate`
+    // pinner.
+    // The pin is by byte offset on the *actual* call
+    // site (not the `aws s3 sync` substring the
+    // docstring / echo lines use). The runtime call
+    // site is `"$AWS_BIN" s3 sync`, so we look for
+    // `"$AWS_BIN" s3 sync` as the pre-deploy gate's
+    // "aws s3 sync" anchor. A regression that
+    // re-orders the chain (or drops the verify step)
+    // fails the gate so a CI worker that runs the
+    // script can never push a red index to the
+    // dashboard bucket. Mirrors the STW-035
+    // `testnet_live_publish_index_s3_script_has_verify_index_pre_upload_gate`
+    // pinner.
+    let script = read(&dashboard_script_path());
+    let verify_index_pos = script.find("--verify-index").unwrap_or_else(|| {
+        panic!(
+            "STW-036 dashboard-deploy runbook script at {} must reference the \
+                 `trainer --verify-index <index-dir>` CLI subcommand as the pre-deploy gate",
+            dashboard_script_path().display()
+        )
+    });
+    let aws_sync_pos = script.find("\"$AWS_BIN\" s3 sync").unwrap_or_else(|| {
+        panic!(
+            "STW-036 dashboard-deploy runbook script at {} must invoke the \
+                 `aws s3 sync` step",
+            dashboard_script_path().display()
+        )
+    });
+    assert!(
+        verify_index_pos < aws_sync_pos,
+        "STW-036 dashboard-deploy runbook script must shell out to \
+         `--verify-index` (byte offset {verify_index_pos}) BEFORE `aws s3 sync` \
+         (byte offset {aws_sync_pos}); the pre-deploy gate fires before the \
+         deploy step so a red index cannot reach the dashboard bucket"
+    );
+}
+
+#[test]
+fn testnet_live_publish_dashboard_script_references_aws_s3_sync() {
+    // The dashboard-deploy runbook script must
+    // invoke the `aws s3 sync <local>
+    // <bucket>/<prefix>/ --delete --cache-control
+    // max-age=60` step. We assert by `aws s3
+    // sync` substring because that is the form
+    // the operator types and the form a CI
+    // dashboard scraper greps. Mirrors the
+    // STW-033 `aws s3 cp` pinner + the STW-035
+    // `aws s3 cp` pinner the autotrain pipeline
+    // already follows.
+    let script = read(&dashboard_script_path());
+    // The `aws s3 sync` call site uses the
+    // `"$AWS_BIN" s3 sync` form (so a worker can
+    // override the `aws` binary path via the
+    // `AWS_BIN` env knob), not the literal
+    // `aws s3 sync` form. The substring we pin
+    // is the runtime call anchor.
+    assert!(
+        script.contains("\"$AWS_BIN\" s3 sync"),
+        "STW-036 dashboard-deploy runbook script at {} must invoke \
+         `aws s3 sync` (via the `$AWS_BIN` env knob); a worker reading the \
+         script would not know how to deploy the dashboard data feed",
+        dashboard_script_path().display()
+    );
+    assert!(
+        script.contains("--delete"),
+        "STW-036 dashboard-deploy runbook script at {} must invoke \
+         `aws s3 sync ... --delete` so a removed receipt's INDEX.json row \
+         is no longer reflected in the dashboard",
+        dashboard_script_path().display()
+    );
+    assert!(
+        script.contains("--cache-control"),
+        "STW-036 dashboard-deploy runbook script at {} must invoke \
+         `aws s3 sync ... --cache-control max-age=60` so the dashboard's \
+         browser-fetched INDEX.json stays fresh on a 1-minute Cache-Control window",
+        dashboard_script_path().display()
+    );
+}
+
+// --- STW-037 operator-runnable 3-consecutive full-workspace
+//     proof runbook shape pins -----------------------------
+//
+// The STW-037 operator-runnable runbook
+// (`scripts/workspace-parallel-proof-three.sh`) closes the
+// last un-closed `verification:workspace-parallel`
+// mainnet-block hinge. STW-020 ships
+// `scripts/workspace-parallel-proof.sh` (the canonical
+// 3-consecutive *full-workspace* proof an operator has to
+// hand-orchestrate with a no-output knob) and STW-030 ships
+// the cheap in-CI 2-second 3-consecutive *gameplay-only*
+// proof the
+// `crates/autotrain/tests/workspace_parallel_proof_three.rs::run_three_consecutive_clean_gameplay_lib_test_runs`
+// lib test drives. STW-037 sits in between: a pure-bash
+// runbook an operator / nightly worker can `bash
+// scripts/workspace-parallel-proof-three.sh` from a clean
+// checkout and get a single command that invokes the
+// STW-030 lib test 3 times back-to-back in 3 separate
+// `cargo test` invocations AND invokes the STW-020 runbook
+// once, capturing each invocation's stdout + stderr + exit
+// into a per-invocation
+// `logs/workspace-parallel-proof-three/<UTC-ISO>/invocation-{1,2,3,4}/{stdout,stderr,exit}.txt`
+// layout. The single pin below mirrors the
+// `workspace_parallel_proof.rs::script_exists_and_is_executable`
+// / `script_parses_with_bash_n` pinners + the
+// STW-019 / STW-032 / STW-033 / STW-034 / STW-035 / STW-036
+// shell-shape pins the autotrain pipeline already follows,
+// so a regression in the new runbook's surface (file
+// missing, syntax broken, executable bit cleared) fails CI
+// at the same step a future operator would silently break.
+// The companion
+// `crates/autotrain/tests/workspace_parallel_proof_three.rs::operator_runnable_three_script_exists_and_parses`
+// sub-test owns the deeper "lists
+// `run_three_consecutive_clean_gameplay_lib_test_runs` as a
+// sub-invocation + emits the pinned
+// `workspace parallel proof three complete:` headline"
+// pins so a regression in either surface fails CI at the
+// step that catches the runbook-side drift OR the
+// lib-test-side drift (the two are separate test files so
+// a regression in one does not silently dodge the other).
+
+fn workspace_parallel_proof_three_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("workspace-parallel-proof-three.sh")
+}
+
+#[test]
+fn workspace_parallel_proof_three_script_exists_and_parses() {
+    // The STW-037 operator-runnable runbook script
+    // must be on disk, executable, and parse with
+    // `bash -n`. A regression that drops the file
+    // (or breaks the bash grammar) fails the gate
+    // at CI time before a CI worker can shell out
+    // to it. Mirrors the STW-019 + STW-032 +
+    // STW-033 + STW-034 + STW-035 + STW-036
+    // file-on-disk pins + the
+    // `workspace_parallel_proof.rs::script_exists_and_is_executable`
+    // / `script_parses_with_bash_n` pinners.
+    let p = workspace_parallel_proof_three_script_path();
+    assert!(
+        p.exists(),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script missing at {}; the STW-037 hinge has no shell \
+         entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-037 operator-runnable 3-consecutive full-workspace proof \
+             runbook script at {} must have its owner-executable bit set \
+             (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without
+    // executing it. A non-zero exit (a syntax
+    // error) fails the test so a future edit that
+    // breaks the bash grammar fails CI before it
+    // reaches a live STW-037 run.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/workspace-parallel-proof-three.sh");
+    assert!(
+        out.status.success(),
+        "STW-037 operator-runnable 3-consecutive full-workspace proof \
+         runbook script must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

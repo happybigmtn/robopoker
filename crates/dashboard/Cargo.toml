@@ -1,0 +1,41 @@
+[package]
+name            = "rbp-dashboard"
+version         = "1.0.0"
+edition         = "2024"
+rust-version    = "1.90"
+authors         = ["Kelechi Ukah <ukahkelechi@gmail.com>"]
+description     = "Static testnet dashboard: typed INDEX.json reader + axum router + vanilla-JS frontend for the STW-034 aggregator"
+license         = "MIT"
+repository      = "https://github.com/krukah/robopoker"
+keywords        = ["dashboard", "testnet", "poker", "static", "reproducible"]
+categories      = ["web-programming::http-server", "game-development"]
+
+[dependencies]
+# Internal crates
+# `publish_index` re-exports the `PublishIndex` / `IndexedEntry` /
+# `PublishedRemoteReceipt` types the STW-034 trainer arm writes;
+# reusing them here means a shape drift fails BOTH the
+# `trainer --verify-index` re-verify AND the dashboard's typed
+# read at the same CI step.
+rbp-autotrain   = { version = "1.0", path = "../autotrain" }
+rbp-core        = { version = "1.0", path = "../util" }
+
+# External dependencies
+# `axum` is the router the spec calls for; the dashboard exposes
+# four routes (`GET /`, `GET /api/index`, `GET /transcript/:id`,
+# `GET /bench/:id`) on a single `serve(addr)` entry point.
+axum            = { version = "0.7", features = ["macros"] }
+tower           = "0.5"
+tokio           = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync"] }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+# `ureq` is the no-async-ecosystem HTTP client the spec
+# specifies for the prod-index fetch; the dashboard's
+# `IndexClient` is blocking-on-purpose (the index fetch is a
+# one-shot startup operation, not a per-request hot path) and
+# `ureq` keeps the dep tree tiny — no `reqwest` / `hyper`
+# client feature flags, no `tokio` integration.
+ureq            = { version = "2", default-features = false }
+
+[dev-dependencies]
+serde_json      = { workspace = true }
