@@ -72,10 +72,73 @@ use rbp_core::ID;
 use rbp_core::S_BLIND;
 use rbp_database::Check;
 use rbp_gameroom::DatabasePlayer;
+use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
 use rbp_gameroom::Room;
 use std::sync::Arc;
 use tokio_postgres::Client;
+
+/// Named baseline the bench seats at seat 1 (the seat opposite
+/// the trained blueprint).
+///
+/// The CEO testnet roadmap lists a "stronger named baseline
+/// (e.g. a rule-based or a second trained config)" as the v2
+/// next slice after the v1 "blueprint beats random" proof
+/// (STW-010). [`Baseline::Fish`] is the v1 random bot that the
+/// bench has always used; [`Baseline::Equity`] seats the
+/// `EquityBot` named baseline (Monte Carlo equity + a small
+/// threshold table on `Action` legality), so the bench result
+/// can claim "trained bot beats a *named* rule-based baseline"
+/// rather than just "beats uniform random".
+///
+/// `Baseline` is `Copy + PartialEq + Debug` so the bench can
+/// (a) round-trip the chosen variant through a JSON field and
+/// (b) compare the selected baseline against expected values in
+/// unit tests without a JSON parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    /// Random-uniform player (the v1 default). Always
+    /// available, no `database` feature requirement.
+    Fish,
+    /// Rule-based named baseline: estimates hand equity from
+    /// `Observation::simulate(256)` and picks the highest-priority
+    /// legal action that matches a 0.50 call / 0.65 raise
+    /// threshold table. Defined in `rbp_gameroom::EquityBot`.
+    Equity,
+}
+
+impl Baseline {
+    /// Stable lowercase string used in the JSON report and in
+    /// the `RBP_BENCH_BASELINE` env var. Kept as a `match` (not
+    /// a derived `Display`) so a future baseline addition
+    /// forces the env-var parser and the JSON field together —
+    /// a silent mismatch between the two would let a stale
+    /// `RBP_BENCH_BASELINE=fish` pick the new baseline.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fish => "fish",
+            Self::Equity => "equity",
+        }
+    }
+    /// Parse a baseline name from the `RBP_BENCH_BASELINE` env
+    /// var, falling back to [`DEFAULT_BENCH_BASELINE`]. Unknown
+    /// values fall back to the default too — the bench should
+    /// run with sensible defaults rather than fail a worker
+    /// because a stale env var was left in the shell (same
+    /// tolerance as `bench_hands` / `bench_blind`).
+    pub fn from_env() -> Self {
+        match std::env::var("RBP_BENCH_BASELINE").ok().as_deref() {
+            Some("fish") => Self::Fish,
+            Some("equity") => Self::Equity,
+            _ => DEFAULT_BENCH_BASELINE,
+        }
+    }
+}
+
+/// Default seat-1 baseline when `RBP_BENCH_BASELINE` is unset.
+/// [`Baseline::Fish`] preserves the v1 behaviour (random
+/// baseline), so existing bench reports stay comparable.
+pub const DEFAULT_BENCH_BASELINE: Baseline = Baseline::Fish;
 
 /// Number of hands to play when `RBP_BENCH_HANDS` is unset.
 ///
@@ -162,6 +225,12 @@ pub struct BenchReport {
     /// `DatabasePlayer` was playing with the default untrained
     /// policy, not a trained one.
     pub blueprint_trained: bool,
+    /// Which named baseline the bench seated at seat 1. A
+    /// downstream scraper can group reports by `baseline` to
+    /// produce a "trained bot vs fish" curve and a "trained
+    /// bot vs equity-bot" curve from the same `BenchReport`
+    /// stream. See [`Baseline`] for the variant list.
+    pub baseline: Baseline,
 }
 
 impl BenchReport {
@@ -186,7 +255,8 @@ impl BenchReport {
                 "\"win_rate\":{win_rate:.4},",
                 "\"win_rate_ci95\":{win_rate_ci95:.4},",
                 "\"blind\":{blind},",
-                "\"blueprint_trained\":{blueprint_trained}",
+                "\"blueprint_trained\":{blueprint_trained},",
+                "\"baseline\":\"{baseline}\"",
                 "}}\n"
             ),
             hands = self.hands,
@@ -199,6 +269,7 @@ impl BenchReport {
             win_rate_ci95 = self.win_rate_ci95,
             blind = self.blind,
             blueprint_trained = self.blueprint_trained,
+            baseline = self.baseline.as_str(),
         )
     }
 }
@@ -208,7 +279,11 @@ impl BenchReport {
 /// as a separate type from the per-hand input so the test that
 /// pins the mbb/100 + CI math can build it from a known vector
 /// (e.g. `vec![10; 200]`) without standing up a real `Room`.
-pub fn summarize(per_hand: &[Chips], blind: Chips) -> BenchReport {
+///
+/// `baseline` is the seat-1 baseline that produced the per-hand
+/// vector; it is stamped straight into the [`BenchReport`] so
+/// the JSON output carries the same value the caller passed in.
+pub fn summarize(per_hand: &[Chips], blind: Chips, baseline: Baseline) -> BenchReport {
     assert!(
         !per_hand.is_empty(),
         "per_hand must contain at least one hand"
@@ -258,12 +333,13 @@ pub fn summarize(per_hand: &[Chips], blind: Chips) -> BenchReport {
         win_rate_ci95,
         blind,
         blueprint_trained: true,
+        baseline,
     }
 }
 
-/// Drive K heads-up hands of `DatabasePlayer` (seat 0) vs
-/// `Fish` (seat 1) through a real `Room`, and return the
-/// per-hand `seat_0.won()` vector.
+/// Drive K heads-up hands of `DatabasePlayer` (seat 0) vs a
+/// named baseline (seat 1) through a real `Room`, and return
+/// the per-hand `seat_0.won()` vector.
 ///
 /// The bench intentionally uses the production `Room` shell (not
 /// a hand-written engine loop) so the result reflects exactly
@@ -272,8 +348,11 @@ pub fn summarize(per_hand: &[Chips], blind: Chips) -> BenchReport {
 /// create_player / create_action` writes the live server issues),
 /// the engine drives the players through choice and chance nodes
 /// in order, and the per-hand PnL is read off the showdown game
-/// state via [`Room::settlements`]. The one customization is the
-/// seat occupants: `DatabasePlayer` at seat 0, `Fish` at seat 1.
+/// state via [`Room::settlements`]. The two customisations are
+/// the seat occupants: `DatabasePlayer` at seat 0, and the
+/// caller-selected [`Baseline`] at seat 1 (either [`Baseline::Fish`]
+/// for the v1 random baseline or [`Baseline::Equity`] for the v2
+/// rule-based named baseline).
 ///
 /// `stakes` is the per-hand blind size in chips; we use the
 /// production default of `B_BLIND` so the bench's mbb/100
@@ -295,6 +374,7 @@ pub async fn run_hands(
     k: usize,
     stakes: Chips,
     blueprint_trained: bool,
+    baseline: Baseline,
 ) -> Result<Vec<Chips>, String> {
     assert!(k > 0, "bench must play at least one hand");
     let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
@@ -326,7 +406,15 @@ pub async fn run_hands(
         )));
         room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
     }
-    room.sit(Fish, rbp_auth::Lurker::default());
+    // Seat-1 baseline dispatch. Both branches are synchronous
+    // `Player` constructors (no DB round-trip), so the bench
+    // picks the seat-1 bot at hand-setup time. A future
+    // database-backed baseline would slot in here as a third
+    // arm of the `match`.
+    match baseline {
+        Baseline::Fish => room.sit(Fish, rbp_auth::Lurker::default()),
+        Baseline::Equity => room.sit(EquityBot, rbp_auth::Lurker::default()),
+    }
     let mut per_hand = Vec::with_capacity(k);
     for _ in 0..k {
         room.play_hand_once().await;
@@ -373,6 +461,7 @@ pub async fn run_hands(
 pub async fn run(client: Arc<Client>) {
     let k = bench_hands();
     let blind = bench_blind();
+    let baseline = Baseline::from_env();
     // A `trainer --smoke` pre-run is the documented prep for the
     // bench (the CEO roadmap lists the smoke proof first, the
     // bench second). The bench does not require it — running the
@@ -382,25 +471,27 @@ pub async fn run(client: Arc<Client>) {
     let rows_before = client.blueprint().await;
     let blueprint_trained = rows_before > 0;
     log::info!(
-        "bench: hydrating blueprint (rows={rows_before}) + playing {k} hands @ blind={blind}"
+        "bench: hydrating blueprint (rows={rows_before}) + playing {k} hands @ blind={blind} baseline={baseline}",
+        baseline = baseline.as_str(),
     );
-    let per_hand = match run_hands(client, k, blind, blueprint_trained).await {
+    let per_hand = match run_hands(client, k, blind, blueprint_trained, baseline).await {
         Ok(v) => v,
         Err(e) => {
             log::error!("bench failed: {e}");
             std::process::exit(3);
         }
     };
-    let mut report = summarize(&per_hand, blind);
+    let mut report = summarize(&per_hand, blind, baseline);
     report.blueprint_trained = blueprint_trained;
     print!("{}", report.to_json());
     log::info!(
-        "bench complete: hands={k} mbb/100={:.2} ci95=±{:.2} wins={} losses={} blueprint_trained={}",
+        "bench complete: hands={k} mbb/100={:.2} ci95=±{:.2} wins={} losses={} blueprint_trained={} baseline={}",
         report.mbb_per_100,
         report.mbb_ci95,
         report.wins,
         report.losses,
         report.blueprint_trained,
+        report.baseline.as_str(),
     );
     // Empty blueprint: the result is real but it isn't
     // "trained beats baseline"; we exit 0 so the binary's
@@ -429,7 +520,7 @@ mod tests {
     #[test]
     fn mbb_per_100_formula_matches_mean_times_hundred_over_blind() {
         let per_hand = vec![10_i16; 200];
-        let r = summarize(&per_hand, 2);
+        let r = summarize(&per_hand, 2, Baseline::Fish);
         // 200 hands * 10 chips = 2000 net chips; mean = 10
         // chips/hand; mbb/100 = 10 * 100 / 2 = 500.0.
         assert!((r.mbb_per_100 - 500.0).abs() < 1e-9);
@@ -444,7 +535,7 @@ mod tests {
     #[test]
     fn zero_mean_vector_yields_zero_mbb_and_zero_ci() {
         let per_hand = vec![0_i16; 100];
-        let r = summarize(&per_hand, 2);
+        let r = summarize(&per_hand, 2, Baseline::Fish);
         assert_eq!(r.mbb_per_100, 0.0);
         assert_eq!(r.mbb_ci95, 0.0);
         assert_eq!(r.wins, 0);
@@ -460,7 +551,7 @@ mod tests {
     #[test]
     fn mixed_wins_and_losses_split_count() {
         let per_hand = vec![10_i16, -5, -5, 0];
-        let r = summarize(&per_hand, 2);
+        let r = summarize(&per_hand, 2, Baseline::Fish);
         assert_eq!(r.wins, 1);
         assert_eq!(r.losses, 2);
         assert_eq!(r.net_chips, 0);
@@ -482,7 +573,7 @@ mod tests {
     fn win_rate_ci95_matches_normal_approx_formula() {
         let mut per_hand = vec![1_i16; 50];
         per_hand.extend(vec![-1_i16; 50]);
-        let r = summarize(&per_hand, 2);
+        let r = summarize(&per_hand, 2, Baseline::Fish);
         assert!((r.win_rate - 0.5).abs() < 1e-9);
         let expected = 1.96 * (0.5_f64 * 0.5_f64 / 100_f64).sqrt();
         assert!(
@@ -502,7 +593,7 @@ mod tests {
     #[test]
     fn to_json_contains_every_field() {
         let per_hand = vec![3_i16; 10];
-        let r = summarize(&per_hand, 2);
+        let r = summarize(&per_hand, 2, Baseline::Equity);
         let s = r.to_json();
         for needle in [
             "\"hands\":10",
@@ -515,6 +606,7 @@ mod tests {
             "\"win_rate_ci95\":",
             "\"blind\":2",
             "\"blueprint_trained\":true",
+            "\"baseline\":\"equity\"",
         ] {
             assert!(
                 s.contains(needle),
@@ -567,5 +659,81 @@ mod tests {
                 std::env::set_var("RBP_BENCH_HANDS", v);
             }
         }
+    }
+
+    /// `Baseline::as_str` is the canonical lowercase form used
+    /// in both the JSON `baseline` field and the
+    /// `RBP_BENCH_BASELINE` env var. Pinning it here means a
+    /// refactor that renames a variant has to update the env-var
+    /// parser, the JSON field, and this test together, instead
+    /// of silently letting a stale `RBP_BENCH_BASELINE=fish`
+    /// pick a renamed variant.
+    #[test]
+    fn baseline_as_str_matches_published_strings() {
+        assert_eq!(Baseline::Fish.as_str(), "fish");
+        assert_eq!(Baseline::Equity.as_str(), "equity");
+    }
+
+    /// `Baseline::from_env` honours `RBP_BENCH_BASELINE` for
+    /// known values (`fish`, `equity`) and falls back to
+    /// `DEFAULT_BENCH_BASELINE` for missing/unset/unknown
+    /// values. Same save/restore discipline as
+    /// `bench_hands_env_override_round_trip`.
+    #[test]
+    fn baseline_from_env_round_trip() {
+        let saved = std::env::var("RBP_BENCH_BASELINE").ok();
+        // SAFETY: tests in this module are the only writers of
+        // `RBP_BENCH_BASELINE`; we serialise the read/write
+        // with `set_var` and the implicit single-threaded
+        // `#[test]` execution model.
+        unsafe {
+            std::env::set_var("RBP_BENCH_BASELINE", "fish");
+        }
+        assert_eq!(Baseline::from_env(), Baseline::Fish);
+        unsafe {
+            std::env::set_var("RBP_BENCH_BASELINE", "equity");
+        }
+        assert_eq!(Baseline::from_env(), Baseline::Equity);
+        unsafe {
+            std::env::set_var("RBP_BENCH_BASELINE", "not-a-baseline");
+        }
+        assert_eq!(Baseline::from_env(), DEFAULT_BENCH_BASELINE);
+        unsafe {
+            std::env::remove_var("RBP_BENCH_BASELINE");
+        }
+        assert_eq!(Baseline::from_env(), DEFAULT_BENCH_BASELINE);
+        if let Some(v) = saved {
+            unsafe {
+                std::env::set_var("RBP_BENCH_BASELINE", v);
+            }
+        }
+    }
+
+    /// `summarize` must stamp the caller-supplied `Baseline`
+    /// straight into the `BenchReport` so a downstream scraper
+    /// can group reports by baseline without re-parsing the
+    /// raw `per_hand` vector. This test pins both the v1
+    /// default (`Fish`) and the v2 named baseline (`Equity`)
+    /// paths in one go.
+    #[test]
+    fn summarize_stamps_baseline_into_report() {
+        let per_hand = vec![0_i16; 4];
+        let r_fish = summarize(&per_hand, 2, Baseline::Fish);
+        assert_eq!(r_fish.baseline, Baseline::Fish);
+        assert!(r_fish.to_json().contains("\"baseline\":\"fish\""));
+        let r_equity = summarize(&per_hand, 2, Baseline::Equity);
+        assert_eq!(r_equity.baseline, Baseline::Equity);
+        assert!(r_equity.to_json().contains("\"baseline\":\"equity\""));
+    }
+
+    /// `DEFAULT_BENCH_BASELINE` must be `Baseline::Fish` to
+    /// preserve v1 bench-report comparability: every bench run
+    /// that predates the Baseline slice seated `Fish` at seat
+    /// 1, so a downstream dashboard that aggregates reports by
+    /// `baseline` needs the v1 default to land in the same
+    /// bucket as the explicit `RBP_BENCH_BASELINE=fish` runs.
+    #[test]
+    fn default_bench_baseline_is_fish() {
+        assert_eq!(DEFAULT_BENCH_BASELINE, Baseline::Fish);
     }
 }
