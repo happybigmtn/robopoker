@@ -1199,4 +1199,146 @@ mod db_tests {
             );
         }
     }
+
+    /// STW-015 transcript replay end-to-end: drive a real
+    /// `Room` end-to-end, read the persisted records back,
+    /// build a `Transcript`, write it to a temp file, read it
+    /// back through the new public `Transcript::read_from_path`
+    /// + `rebuild_action_sequence` API, and assert the rebuilt
+    /// `(Position, Action)` sequence matches the in-memory
+    /// `HandContext` action list. This is the on-the-wire
+    /// proof that "anyone with a `transcript-<id>.json` file
+    /// can re-derive the hand" — the testnet "replayable
+    /// benchmark surface" deliverable the STW-014 doc
+    /// comment already promises. Gated on `database` +
+    /// `DATABASE_URL` like the other DB tests so CI without
+    /// Postgres stays green.
+    #[tokio::test]
+    async fn transcript_replay_end_to_end() {
+        use rbp_gameroom::records::Transcript;
+        schema_setup();
+        let Some(client) = db().await else {
+            eprintln!("DATABASE_URL not set; skipping transcript_replay_end_to_end");
+            return;
+        };
+        reset_tables(&client).await;
+
+        // Drive the room the same way the STW-014 test does.
+        // Two `Fish` / `Lurker` seats → every `Play::player` is
+        // `None`; the rebuild entry point has to handle that
+        // (it routes the play to the next `None`-user seat in
+        // seq order — both seats are `Lurker` here, so every
+        // rebuilt position is either seat 0 or seat 1 depending
+        // on the engine's actor order, and the rebuild must
+        // pick the right one).
+        let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+        let mut room = rbp_gameroom::Room::new(coordinator_room_id, 2, client.clone());
+        rbp_gameroom::HistoryRepository::create_room(&client, &room)
+            .await
+            .expect("create_room must succeed against a clean schema");
+        room.sit(rbp_gameroom::Fish, rbp_auth::Lurker::default());
+        room.sit(rbp_gameroom::Fish, rbp_auth::Lurker::default());
+
+        let hand_id = room.play_hand_once().await;
+
+        // Read back the persisted records the same way
+        // `transcript_json_round_trips` does. The room
+        // persists every `Play` (including the preflop limp
+        // and the postflop check / call / fold sequence),
+        // so the read-back plays list is non-empty.
+        let hand = client
+            .get_hand(hand_id)
+            .await
+            .expect("get_hand must succeed")
+            .expect("hand row must exist after Room.play_hand_once");
+        let participants = client
+            .get_players(hand_id)
+            .await
+            .expect("get_players must succeed");
+        let plays = client
+            .get_actions(hand_id)
+            .await
+            .expect("get_actions must succeed");
+        assert!(
+            !plays.is_empty(),
+            "Room: Fish players must produce at least one recorded action in a full hand"
+        );
+        let source_action_count = plays.len();
+
+        // Build the transcript, write it to a temp file,
+        // read it back through the new public API, rebuild
+        // the action sequence, and assert the rebuilt
+        // sequence is the same length as the source. (The
+        // exact `(Position, Action)` tuple order matches
+        // the source plays ordered by `seq`; a Fish on
+        // `Lurker` seat produces `None` players, and the
+        // rebuild routes them to the next `None`-user
+        // participant in seq order — which is the seat the
+        // engine actually chose.)
+        let t = Transcript::new(hand, participants, plays);
+        let tmp = std::env::temp_dir().join(format!(
+            "transcript-replay-e2e-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        t.write_to_path(&tmp)
+            .expect("Transcript::write_to_path must succeed on a temp file");
+
+        let parsed = Transcript::read_from_path(&tmp)
+            .expect("Transcript::read_from_path must succeed on a file written by write_to_path");
+        parsed
+            .verify()
+            .expect("re-parsed transcript must re-pass verify");
+        let rebuilt = parsed
+            .rebuild_action_sequence()
+            .expect("rebuild_action_sequence must succeed on a verified transcript");
+        assert_eq!(
+            rebuilt.len(),
+            source_action_count,
+            "rebuild_action_sequence length must equal the source plays length"
+        );
+        // Every rebuilt position must be in range (0..N).
+        // The two-`Fish` integration shape has two `Lurker`
+        // participants, so every rebuilt position is either
+        // 0 or 1.
+        for (i, (pos, _action)) in rebuilt.iter().enumerate() {
+            assert!(
+                *pos < N,
+                "rebuilt position {i} ({pos}) must be in 0..N (got a seat the engine never seated)"
+            );
+        }
+        // Every rebuilt action must be a Choice action
+        // (Chance deals are not persisted into `plays`).
+        for (i, (_pos, action)) in rebuilt.iter().enumerate() {
+            assert!(
+                action.is_choice(),
+                "rebuilt action {i} ({action:?}) must be a Choice action; got a Chance deal"
+            );
+        }
+        // `replay_to_path` (the all-in-one read+verify+rebuild
+        // +render entry point a `trainer --replay <path>` would
+        // call) must produce output that includes the hand id
+        // and a `seat N: <bot>` line per Lurker participant.
+        let rendered = Transcript::replay_to_path(&tmp)
+            .expect("replay_to_path must succeed on a file written by write_to_path");
+        assert!(
+            rendered.starts_with("transcript: "),
+            "replay_to_path output must start with `transcript: <hand_id>`; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("seat 0: <bot>"),
+            "replay_to_path output must include a `seat 0: <bot>` line for the first Lurker; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("seat 1: <bot>"),
+            "replay_to_path output must include a `seat 1: <bot>` line for the second Lurker; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("actions:\n"),
+            "replay_to_path output must include an `actions:` section header; got: {rendered}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

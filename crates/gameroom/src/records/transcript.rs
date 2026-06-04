@@ -276,6 +276,175 @@ impl Transcript {
         Self::new(hand, participants, plays)
     }
 
+    /// Read a `Transcript` from a JSON file on disk, the symmetric
+    /// inverse of [`Self::write_to_path`]. This is the entry
+    /// point a downstream "replay from the README" tool uses:
+    /// a `trainer --replay <path>` (or any equivalent) calls
+    /// `Transcript::read_from_path(path)`, asserts the result
+    /// `verify()`s, and then calls
+    /// [`Self::rebuild_action_sequence`] to recover the
+    /// `(Position, Action)` list the original hand consumed.
+    ///
+    /// The file must be a UTF-8 JSON document in the exact
+    /// shape [`Self::to_json`] produces. [`Self::from_json`]
+    /// does the heavy lifting; this wrapper converts the I/O
+    /// error into a `String` so the caller can surface a
+    /// one-line diagnostic without pulling in a full error
+    /// library. `verify` is **not** run on read — the caller
+    /// runs it explicitly so it can decide whether a corrupt
+    /// transcript is an error or a `log::warn!` (the bench
+    /// harness downgrades corruption to a warning; a CLI
+    /// `trainer --replay` would propagate the error).
+    pub fn read_from_path(path: &std::path::Path) -> Result<Self, String> {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| format!("read_from_path: failed to read {}: {e}", path.display()))?;
+        Self::from_json(&s)
+    }
+
+    /// Recover the `(Position, Action)` sequence the original
+    /// hand consumed, by inverting the conversion `Room::flush_hand`
+    /// performs: the `Participant::seat` column is the source of
+    /// truth for the per-`Member` seat, the `Play::seq` column
+    /// orders the actions, and `Play::action` carries the
+    /// engine decision. A `Play::player` of `None` (a `Lurker`
+    /// seat) is recovered from the `Participant` whose `user` is
+    /// also `None` *and* whose seat is the same `Position` the
+    /// engine was about to act on at that seq — but the engine
+    /// is not available here, so a `None` `Play::player` is
+    /// resolved by "the only participant with `user == None`
+    /// at that seq step". In practice the on-the-wire shape is
+    /// either "every `Play::player` is a `Member` id" (the
+    /// production casino with a logged-in user at every seat)
+    /// or "every `Play::player` is `None` and there is exactly
+    /// one `Participant` per seat" (the two-`Fish`/two-`Lurker`
+    /// integration-test shape); the rebuild covers both.
+    ///
+    /// Returns `Ok(Vec<(Position, Action)>)` on success,
+    /// `Err(TranscriptError)` if the transcript is not
+    /// internally consistent. The same orphan-player and
+    /// non-monotonic-seq checks [`Self::verify`] makes also
+    /// apply here, because both classes of corruption make
+    /// reconstruction impossible: a missing `Participant`
+    /// means the seat identity is gone, and a non-monotonic
+    /// `seq` means the action order is gone. The function
+    /// calls `verify` first and surfaces the same
+    /// `TranscriptError` to the caller; rebuilding is only
+    /// attempted against a transcript that already passed
+    /// `verify`.
+    pub fn rebuild_action_sequence(&self) -> Result<Vec<(Position, Action)>, TranscriptError> {
+        // Re-use the same integrity check the on-disk reader
+        // runs; a corrupt transcript cannot be rebuilt, and the
+        // caller should know why before they iterate the result.
+        self.verify()?;
+        // Build the `Member -> seat` lookup. The bench harness
+        // and the production casino both stamp `Participant::user`
+        // for human seats; the two-`Fish` integration-test
+        // shape stamps `user = None` for both. The `None` case
+        // is handled by the fallback below.
+        let mut seat_by_member: std::collections::HashMap<uuid::Uuid, Position> =
+            std::collections::HashMap::with_capacity(self.participants.len());
+        for p in &self.participants {
+            if let Some(uid) = p.user() {
+                seat_by_member.insert(uid.inner(), p.seat());
+            }
+        }
+        // `None`-user seats: collect them in seat order so a
+        // play with `player = None` resolves to "the Nth
+        // `None`-user participant in seq order". This is the
+        // documented two-`Fish`/`two-`Lurker` shape; the
+        // production casino path always has a real `Member`
+        // id, so this branch never runs in production.
+        let mut none_seats: Vec<Position> = self
+            .participants
+            .iter()
+            .filter(|p| p.user().is_none())
+            .map(|p| p.seat())
+            .collect();
+        none_seats.sort_unstable();
+        let mut none_seat_idx: usize = 0;
+        // Sort plays by `seq` and rebuild. The bench harness
+        // re-sorts on read so a stale or hand-edited
+        // transcript still passes `verify`; the rebuild
+        // mirrors the bench's read-back order.
+        let mut sorted_plays: Vec<&Play> = self.plays.iter().collect();
+        sorted_plays.sort_by_key(|p| p.seq());
+        let mut out: Vec<(Position, Action)> = Vec::with_capacity(sorted_plays.len());
+        for play in sorted_plays {
+            let pos = match play.player() {
+                Some(uid) => *seat_by_member.get(&uid.inner()).ok_or_else(|| {
+                    // `verify` already caught this; the
+                    // duplicate error is a defence-in-depth
+                    // path so a future refactor that
+                    // loosens `verify` does not silently
+                    // produce a `None` seat.
+                    TranscriptError::OrphanPlayer {
+                        seq: play.seq(),
+                        member: uid.inner().to_string(),
+                    }
+                })?,
+                None => {
+                    let seat = *none_seats.get(none_seat_idx).ok_or_else(|| {
+                        TranscriptError::OrphanPlayer {
+                            seq: play.seq(),
+                            member: "<none-user seat exhausted>".to_string(),
+                        }
+                    })?;
+                    none_seat_idx += 1;
+                    seat
+                }
+            };
+            out.push((pos, play.action()));
+        }
+        Ok(out)
+    }
+
+    /// Replay a transcript file to a `String`: read it from
+    /// disk, rebuild the action sequence, and render the
+    /// `(Position, Action)` list as one action per line.
+    /// This is the "anyone with a `transcript-<id>.json`
+    /// file can re-derive the hand" surface the testnet
+    /// "replayable benchmark surface" proof point requires
+    /// — the bench harness writes the file, a downstream
+    /// `trainer --replay <path>` (or a dashboard's "replay"
+    /// button) reads it. The on-the-wire format is
+    /// intentionally simple so a downstream parser does not
+    /// need a serde dependency:
+    ///
+    /// ```text
+    /// transcript: <hand_id>
+    /// seat 0: P0 As Kd
+    /// seat 1: P1 7c 2h
+    /// actions:
+    /// 0 Call(1)
+    /// 1 Check
+    /// 2 Check
+    /// ```
+    ///
+    /// Returns `Err(String)` if the file cannot be read, the
+    /// JSON cannot be parsed, the transcript fails `verify`,
+    /// or the rebuild cannot recover a seat. The caller is
+    /// expected to print the string and exit 0 (success) or
+    /// the error and exit non-zero (corrupt or missing file).
+    pub fn replay_to_path(path: &std::path::Path) -> Result<String, String> {
+        let t = Self::read_from_path(path)?;
+        t.verify().map_err(|e| e.to_string())?;
+        let rebuilt = t.rebuild_action_sequence().map_err(|e| e.to_string())?;
+        let mut out = String::with_capacity(64 + rebuilt.len() * 16);
+        out.push_str(&format!("transcript: {}\n", t.hand().id().inner()));
+        for p in t.participants() {
+            let user = p
+                .user()
+                .map(|u| u.inner().to_string())
+                .unwrap_or_else(|| "<bot>".to_string());
+            out.push_str(&format!("seat {}: {} {}\n", p.seat(), user, p.hole()));
+        }
+        out.push_str("actions:\n");
+        for (i, (pos, action)) in rebuilt.iter().enumerate() {
+            out.push_str(&format!("{i} P{pos} {action:?}\n"));
+        }
+        Ok(out)
+    }
+
     /// Parse a `Transcript` from a JSON string that was
     /// produced by [`Self::to_json`] (or any conformant
     /// encoder). The on-disk shape matches
@@ -776,5 +945,235 @@ mod tests {
         parsed
             .verify()
             .expect("re-parsed transcript must re-pass verify");
+    }
+
+    // -----------------------------------------------------------------
+    // STW-015: transcript replay tool tests.
+    //
+    // The STW-014 bench writes `transcript-<hand_id>.json` per
+    // hand into `RBP_BENCH_TRANSCRIPT_DIR`; the STW-015 replay
+    // tool reads those files back and re-derives the
+    // `(Position, Action)` sequence the original hand consumed.
+    // These three lib tests pin the new public API:
+    // `read_from_path` (the I/O wrapper), `rebuild_action_sequence`
+    // (the in-memory rebuild), and `replay_to_path` (the
+    // all-in-one read+rebuild+render entry point a `trainer
+    // --replay <path>` would call). The end-to-end "real Room
+    // write -> file -> read -> rebuild" proof lives in
+    // `crates/gameroom/tests/hand_roundtrip.rs` so the live
+    // Postgres dependency stays there.
+    // -----------------------------------------------------------------
+
+    /// `read_from_path` must be the symmetric inverse of
+    /// `write_to_path`: a transcript written to a temp file
+    /// re-parses into a `Transcript` whose `to_json` matches
+    /// the original byte-for-byte. The on-the-wire contract a
+    /// downstream `trainer --replay <path>` (or any other
+    /// "replay from the README" tool) depends on.
+    #[test]
+    fn read_from_path_round_trips_write_to_path() {
+        let hand = sample_hand();
+        let participants = sample_participants();
+        let member = participants[0].user();
+        let plays = sample_plays(hand.id(), member);
+        let original = Transcript::new(hand, participants, plays);
+        let tmp = std::env::temp_dir().join(format!(
+            "transcript-read-from-path-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        original
+            .write_to_path(&tmp)
+            .expect("write_to_path must succeed");
+        let parsed = Transcript::read_from_path(&tmp)
+            .unwrap_or_else(|e| panic!("read_from_path must succeed: {e}"));
+        assert_eq!(
+            original.to_json(),
+            parsed.to_json(),
+            "read_from_path → to_json must equal the source to_json byte-for-byte"
+        );
+        parsed
+            .verify()
+            .expect("re-parsed transcript must re-pass verify");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// `rebuild_action_sequence` must return the
+    /// `(Position, Action)` sequence the original
+    /// `HandContext::record` calls produced, in seq order.
+    /// This is the "replay-to-terminal" half of the
+    /// round-trip the integration test in
+    /// `crates/gameroom/tests/hand_roundtrip.rs::records_replay_to_terminal_state`
+    /// already proves for in-memory `Hand` / `Participant` /
+    /// `Play` triples; this lib test lifts the same logic into
+    /// the public `Transcript` API and pins it as a unit.
+    #[test]
+    fn rebuild_action_sequence_returns_recorded_order() {
+        let hand = sample_hand();
+        let participants = sample_participants();
+        let member = participants[0].user();
+        let plays = sample_plays(hand.id(), member);
+        let t = Transcript::new(hand, participants, plays);
+        let rebuilt = t
+            .rebuild_action_sequence()
+            .expect("rebuild_action_sequence must succeed on a verified transcript");
+        // The seat-0 `Member` is the `Some` participant in
+        // `sample_participants`; the seat-1 bot has `user =
+        // None`. All three sample plays attribute to the
+        // seat-0 `Member`, so every rebuild position must be
+        // seat 0.
+        let expected: Vec<(rbp_core::Position, Action)> =
+            vec![(0, Action::Call(0)), (0, Action::Check), (0, Action::Check)];
+        assert_eq!(
+            rebuilt, expected,
+            "rebuild_action_sequence must recover the (Position, Action) triple in seq order"
+        );
+    }
+
+    /// `rebuild_action_sequence` must propagate
+    /// `TranscriptError::OrphanPlayer` on a transcript where a
+    /// `Play::player` references a `Member` not in the
+    /// participant list. The same defensive check `verify`
+    /// makes, applied to the rebuild entry point: a corrupt
+    /// transcript cannot be silently rebuilt as a sequence
+    /// with a `None` seat.
+    #[test]
+    fn rebuild_action_sequence_errors_on_orphan_player() {
+        let hand = sample_hand();
+        let participants = sample_participants();
+        let orphan: ID<Member> = ID::from(uuid::Uuid::from_u128(0xdeadbeef));
+        let plays = vec![
+            Play::new(hand.id(), 0, Some(orphan), Action::Check),
+            Play::new(hand.id(), 1, Some(orphan), Action::Check),
+        ];
+        let t = Transcript::new(hand, participants, plays);
+        match t.rebuild_action_sequence() {
+            Err(TranscriptError::OrphanPlayer { seq: 0, member }) => {
+                assert_eq!(member, orphan.inner().to_string());
+            }
+            other => panic!("rebuild_action_sequence must surface OrphanPlayer; got {other:?}"),
+        }
+    }
+
+    /// `rebuild_action_sequence` must propagate
+    /// `TranscriptError::NonMonotonicSeq` on a transcript
+    /// whose `seq` field is not a contiguous, zero-based
+    /// monotonic sequence. Same defensive contract as
+    /// `verify_detects_non_monotonic_seq` (above), applied to
+    /// the rebuild entry point.
+    #[test]
+    fn rebuild_action_sequence_errors_on_non_monotonic_seq() {
+        let hand = sample_hand();
+        let participants = sample_participants();
+        let member = participants[0].user();
+        let plays = vec![
+            Play::new(hand.id(), 0, member, Action::Check),
+            Play::new(hand.id(), 2, member, Action::Check),
+        ];
+        let t = Transcript::new(hand, participants, plays);
+        match t.rebuild_action_sequence() {
+            Err(TranscriptError::NonMonotonicSeq { seq: 2 }) => {}
+            other => {
+                panic!("rebuild_action_sequence must surface NonMonotonicSeq; got {other:?}")
+            }
+        }
+    }
+
+    /// `replay_to_path` is the all-in-one
+    /// `read_from_path + verify + rebuild + render` entry
+    /// point a `trainer --replay <path>` (or a dashboard
+    /// "replay" button) would call. The on-the-wire shape
+    /// must include the hand id, a `seat N: ...` line per
+    /// participant, and an `actions:` section with one
+    /// `seq P<pos> <Action>` line per recorded action. A
+    /// downstream parser that does not want a serde
+    /// dependency can scrape the output with a regex.
+    #[test]
+    fn replay_to_path_renders_hand_participants_and_actions() {
+        let hand = sample_hand();
+        let participants = sample_participants();
+        let member = participants[0].user();
+        let plays = sample_plays(hand.id(), member);
+        let t = Transcript::new(hand, participants, plays);
+        let tmp = std::env::temp_dir().join(format!(
+            "transcript-replay-to-path-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        t.write_to_path(&tmp).expect("write_to_path must succeed");
+        let rendered = Transcript::replay_to_path(&tmp)
+            .unwrap_or_else(|e| panic!("replay_to_path must succeed: {e}"));
+        // Hand id line.
+        assert!(
+            rendered.starts_with("transcript: "),
+            "replay_to_path output must start with `transcript: <hand_id>`; got: {rendered}"
+        );
+        // Both seats present (sample_participants has two
+        // participants, the second with `user = None`).
+        assert!(
+            rendered.contains("seat 0: "),
+            "replay_to_path output must include a `seat 0:` line; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("seat 1: <bot>"),
+            "replay_to_path output must include a `seat 1: <bot>` line for the None-user participant; got: {rendered}"
+        );
+        // Actions section.
+        assert!(
+            rendered.contains("actions:\n"),
+            "replay_to_path output must include an `actions:` section header; got: {rendered}"
+        );
+        // The first action is `Call(0)`; the second and third
+        // are `Check`. The rendered format is `0 P0 Call(0)` /
+        // `1 P0 Check` / `2 P0 Check`.
+        assert!(
+            rendered.contains("0 P0 Call(0)"),
+            "replay_to_path output must include the first rebuilt action `0 P0 Call(0)`; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("1 P0 Check"),
+            "replay_to_path output must include the second rebuilt action `1 P0 Check`; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("2 P0 Check"),
+            "replay_to_path output must include the third rebuilt action `2 P0 Check`; got: {rendered}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// `replay_to_path` must surface an error on a missing
+    /// file, not panic. The function is the entry point a
+    /// CLI / dashboard "replay" button calls, and a missing
+    /// file is the most common failure (a stale `bench`
+    /// run, a typo in the path, a wiped transcript dir). A
+    /// `String` error is the right contract: the caller logs
+    /// it and exits non-zero.
+    #[test]
+    fn replay_to_path_errors_on_missing_file() {
+        let missing = std::env::temp_dir().join(format!(
+            "transcript-does-not-exist-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        // Make sure the path really is missing — `temp_dir`
+        // is shared between parallel test runs, and a
+        // collision would silently make the test pass.
+        assert!(
+            !missing.exists(),
+            "precondition: missing file must not exist; got {}",
+            missing.display()
+        );
+        let err = Transcript::replay_to_path(&missing)
+            .expect_err("replay_to_path must return Err for a missing file");
+        assert!(
+            err.starts_with("read_from_path:"),
+            "replay_to_path error must come from read_from_path; got {err}"
+        );
     }
 }

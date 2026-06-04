@@ -11,6 +11,153 @@ context.
 
 ## Active items (worker-ready)
 
+- [x] `STW-015` Public transcript replay tool — surface the
+  "anyone with a `transcript-<hand_id>.json` can re-derive
+  the hand" deliverable the STW-014 doc comment already
+  promises but does not deliver. The bench harness writes
+  per-hand bundles under `RBP_BENCH_TRANSCRIPT_DIR`; the
+  missing piece is the public read + rebuild entry point a
+  downstream "replay from the README" tool (e.g. a
+  `trainer --replay <path>` or a dashboard "replay" button)
+  would call. Do NOT redesign the `Transcript` shape, do
+  NOT change the `HistoryRepository` API, do NOT introduce
+  a new solver, do NOT change the room protocol, do NOT
+  add a new CLI flag in this slice — the new public API is
+  three `Transcript` methods a downstream binary can call
+  without further choreography. The CLI wiring is the next
+  slice if a `trainer --replay` is needed.
+  Owner files: `crates/gameroom/src/records/transcript.rs`
+  (add `read_from_path`, `rebuild_action_sequence`,
+  `replay_to_path`), `crates/gameroom/tests/hand_roundtrip.rs`
+  (extend `db_tests` with a `transcript_replay_end_to_end`
+  integration test that drives a real `Room`, writes the
+  transcript to a temp file, reads it back through the new
+  public API, rebuilds the `(Position, Action)` sequence,
+  and asserts the rebuilt length and seat range match the
+  source),
+  `IMPLEMENTATION_PLAN.md`,
+  `genesis/plans/000-ceo-testnet-roadmap.md` (mark the
+  "Public reproducible benchmark surface" item as
+  in-progress with STW-015 and the file-replay surface
+  under it).
+  Scope boundary: add three new `Transcript` methods —
+  `read_from_path(path) -> Result<Self, String>` (symmetric
+  inverse of the existing `write_to_path`),
+  `rebuild_action_sequence() -> Result<Vec<(Position,
+  Action)>, TranscriptError>` (the in-memory rebuild that
+  recovers seat from `Participant::user` or, for `Lurker`
+  seats, from the next `None`-user participant in seat
+  order; the same logic the existing
+  `hand_roundtrip.rs::records_replay_to_terminal_state`
+  test already proves for `Hand` / `Participant` / `Play`
+  triples, lifted into the public `Transcript` API), and
+  `replay_to_path(path) -> Result<String, String>` (the
+  all-in-one `read + verify + rebuild + render` entry
+  point a CLI or dashboard would call). The render format
+  is intentionally a simple line-based text shape
+  (`transcript: <hand_id>`, one `seat N: <user-or-bot>
+  <hole>` per participant, an `actions:` section with one
+  `seq P<pos> <Action>` per action) so a downstream parser
+  does not need a serde dependency. Do NOT change the
+  `Schema` contracts, do NOT change the `HistoryRepository`
+  API, do NOT add a new solver, do NOT change the room
+  protocol.
+  Acceptance criteria:
+  (a) `crates/gameroom/src/records/transcript.rs` adds the
+      three new public methods. `read_from_path` reads a
+      `transcript-<id>.json` from disk and returns the
+      parsed `Transcript`; the underlying `from_json` is
+      the existing parser, no new JSON code is needed.
+      `rebuild_action_sequence` runs `verify` first and
+      then inverts the conversion: build a
+      `Member -> seat` lookup from the `Participant` rows
+      (skipping `None`-user participants), build a
+      `None-user seat` vector in seat order, sort the
+      `Play` rows by `seq`, and for each play pick the
+      seat from the `Member` lookup (or, for `None`
+      players, the next `None`-user seat in seq order).
+      `replay_to_path` is the all-in-one read+verify+
+      rebuild+render entry point.
+  (b) `crates/gameroom/src/records/transcript.rs::tests`
+      adds the six new lib tests:
+      - `read_from_path_round_trips_write_to_path` — write
+        a fixture transcript to a temp file, read it back,
+        assert `to_json` matches byte-for-byte and the
+        re-parsed transcript re-passes `verify`.
+      - `rebuild_action_sequence_returns_recorded_order` —
+        known `(Position, Action)` sequence, rebuild,
+        assert identity.
+      - `rebuild_action_sequence_errors_on_orphan_player`
+        — orphan `Member` id surfaces `OrphanPlayer`
+        (same defensive contract `verify` has).
+      - `rebuild_action_sequence_errors_on_non_monotonic_seq`
+        — non-monotonic `seq` surfaces `NonMonotonicSeq`.
+      - `replay_to_path_renders_hand_participants_and_actions`
+        — fixture transcript, write + replay, assert the
+        rendered output includes `transcript: <hand_id>`,
+        a `seat N: ...` line per participant, an
+        `actions:` section, and a per-action
+        `seq P<pos> <Action>` line.
+      - `replay_to_path_errors_on_missing_file` — a
+        non-existent path returns `Err` whose message
+        starts with `read_from_path:`.
+      The tests run under `cargo test -p rbp-gameroom`
+      (no `database` feature required — they only touch
+      the in-memory `Transcript` type and a temp file).
+  (c) `crates/gameroom/tests/hand_roundtrip.rs` adds a
+      `transcript_replay_end_to_end` integration test
+      (gated on `database` + `DATABASE_URL` like the
+      existing `transcript_json_round_trips`) that drives
+      a real `Room` end-to-end (two `Fish` / `Lurker`
+      seats), reads the persisted `Hand` / `Participant`
+      / `Play` back through `HistoryRepository`, builds a
+      `Transcript`, writes it to a temp file, calls the
+      new `Transcript::read_from_path` +
+      `rebuild_action_sequence` + `replay_to_path`
+      public API, and asserts (i) the rebuilt length
+      equals the source plays length, (ii) every rebuilt
+      position is in `0..N` (the engine never seated a
+      player at that seat), (iii) every rebuilt action
+      is a Choice action (Chance deals are not persisted
+      into `plays`), and (iv) the `replay_to_path`
+      rendered output includes `transcript: <hand_id>`,
+      a `seat N: <bot>` line per Lurker participant, and
+      the `actions:` section header.
+  (d) `genesis/plans/000-ceo-testnet-roadmap.md` marks
+      the "Public reproducible benchmark surface" item as
+      in-progress with STW-015, with a one-line note that
+      the file-replay surface is now public (a `trainer
+      --replay <path>` or equivalent downstream tool can
+      re-derive the hand from the `transcript-<id>.json`
+      files the bench writes).
+  Verification commands:
+  `cargo test -p rbp-gameroom --tests --lib`,
+  `cargo test -p rbp-gameroom --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo check --workspace --all-features`,
+  `cargo fmt --check`.
+  Required tests: the six new lib tests in (b) + the new
+  `transcript_replay_end_to_end` integration test in (c);
+  no padding of unrelated suites.
+  Dependencies: `STW-006` (Schema/BulkSchema split) for
+  the `Schema::creates()` and `Schema::freeze()` paths the
+  persistence reads depend on; `STW-008` (hand-persistence
+  round-trip) for the live-DB `HistoryRepository` writes
+  `Room::flush_hand` issues; `STW-014` (transcript bundle)
+  for the `Transcript::write_to_path` symmetric inverse
+  this slice surfaces and the bench harness's per-hand
+  `transcript-<id>.json` writer.
+  Estimated scope: S.
+  Completion signal: `cargo test -p rbp-gameroom
+  --features database --tests --lib` is green, the new
+  `transcript_replay_end_to_end` integration test passes
+  against a live Postgres (or short-circuits on a missing
+  `DATABASE_URL`), and a hand-written `trainer --replay`
+  (or a downstream tool) can take a `transcript-<id>.json`
+  produced by the bench and re-derive the `(Position,
+  Action)` sequence + a renderable text summary.
+
 - [x] `STW-003` Restore database-backed server/gameroom build.
   Owner files: `crates/gameroom/Cargo.toml`, `crates/gameroom/src/players/database.rs`,
   `crates/gameroom/src/players/realtime.rs`, `crates/gameroom/src/players/zerotemp.rs`,

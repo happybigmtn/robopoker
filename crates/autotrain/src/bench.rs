@@ -75,7 +75,6 @@ use rbp_gameroom::BlufferBot;
 use rbp_gameroom::DatabasePlayer;
 use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
-use rbp_gameroom::HistoryRepository;
 use rbp_gameroom::PreflopBot;
 use rbp_gameroom::Room;
 use std::sync::Arc;
