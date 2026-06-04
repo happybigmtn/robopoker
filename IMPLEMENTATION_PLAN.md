@@ -3430,6 +3430,301 @@ re-running the chain.
   `testnet_live_publish_s3_script_*`
   shape pins pass.
 
+## Active items (worker-ready) — v8 follow-on chain
+
+The v7 chain (STW-019 → STW-028 → STW-032 → STW-033) is closed: every
+`testnet-live-proof` / `testnet-live-publish` / `testnet-live-publish-s3`
+follow-on named in the runbook docs has shipped. The next claimable
+slice is the v8 follow-on a testnet dashboard naturally wants: a
+deterministic aggregator over every `publish/*/remote/remote_receipt.json`
+the STW-033 chain produced on a single machine, so a dashboard can
+fetch one file (`INDEX.json`) instead of listing the bucket + fetching
+N manifests.
+
+- [x] `STW-034` `trainer --publish-index
+  <publish-root>` aggregator +
+  no-DB `trainer --verify-index
+  <index-path>` re-verifier.
+  Scans every immediate
+  `publish/<basename>/remote/`
+  subdirectory under
+  `<publish-root>/`, reads
+  the `remote_receipt.json`
+  each STW-033
+  `trainer --publish-remote`
+  arm wrote, and produces
+  a deterministic
+  `publish/<basename>/index/INDEX.json`
+  + `SUMMARY.txt` pair:
+  the `entries[]` array
+  is sorted by
+  `receipt_basename` (so
+  re-running the index
+  step on an unchanged
+  publish root produces a
+  byte-identical
+  `INDEX.json`), each
+  entry inlines the
+  `PublishedRemoteReceipt`
+  the STW-033 runbook
+  wrote (bucket + prefix
+  + `s3_objects[]` +
+  `bundle_sha256` +
+  `total_bytes` +
+  `uploaded_at_utc` +
+  `runbook_version`), and
+  the top-level object
+  records the
+  `publish_root` +
+  `runbook_version` +
+  `created_at_utc`
+  (`<unknown>` sentinel
+  when the
+  `RBP_PUBLISH_INDEX_UTC`
+  env knob is unset so
+  the lib test +
+  integration test are
+  byte-stable) +
+  `entry_count` +
+  `total_bytes`
+  (the sum of every
+  entry's `total_bytes`).
+  The `--publish-index`
+  arm refuses to index a
+  red `remote_receipt.json`:
+  a
+  `PublishedRemoteReceipt::verify`
+  pre-index gate fires
+  per entry so a
+  `trainer --publish-index <root>`
+  on a red entry exits 2 +
+  prints the pinned
+  `live_proof publish_index
+  error: remote receipt
+  is red: ...` line and
+  writes no
+  `INDEX.json` (the
+  "refuse to paper-over
+  a red remote receipt"
+  invariant the STW-028
+  receipt verifier +
+  STW-032 bundle
+  verifier + STW-033
+  remote-receipt verifier
+  already enforce). The
+  new `Mode::VerifyIndex`
+  arm is the no-DB
+  no-rebuild re-verify
+  path: it re-hashes
+  every local file the
+  `INDEX.json` claims to
+  have inlined (each
+  entry's
+  `s3_objects[].local_path`
+  is read + re-sha256'd
+  + compared to the
+  entry's `sha256`),
+  asserts every digest
+  matches, asserts every
+  `s3_uri` in the index
+  appears in the
+  inlined plan, and
+  prints a one-line
+  `live_proof index
+  verification passed:
+  ...` /
+  `live_proof index
+  verification failed:
+  ...` headline a
+  dashboard scraper can
+  `grep ^live_proof index
+  verification` the log.
+  The companion
+  `scripts/testnet-live-publish-index.sh`
+  runbook is pure bash,
+  mirrors the STW-019 +
+  STW-032 + STW-033
+  shape (script exists +
+  is executable + parses
+  with `bash -n` +
+  refuses to run on a
+  missing publish root
+  with exit 3), and
+  chains
+  `trainer --publish-index <publish-root>`
+  (the index writer) +
+  `trainer --verify-index <index-path>`
+  (the index re-verifier)
+  as a sequence of
+  subprocesses. The
+  `INDEX.json` is
+  **read-only** with
+  respect to the
+  publish root: the
+  indexer writes its
+  output under
+  `<publish_root>/index/`,
+  so a
+  `trainer --publish-index`
+  invocation cannot
+  mutate the underlying
+  `remote_receipt.json`
+  files even on
+  partial-failure paths.
+  Scope boundary: the
+  index step does NOT
+  push to S3 / GCS /
+  git-tag (a CI worker
+  can `aws s3 cp` the
+  local
+  `publish/<root>/index/`
+  directory in a
+  follow-on slice); does
+  NOT change the STW-019
+  `testnet-live-proof.sh`
+  or STW-032
+  `testnet-live-publish.sh`
+  or STW-033
+  `testnet-live-publish-s3.sh`
+  runbook (the index is
+  a follow-on *consumer*
+  of the
+  `remote_receipt.json`
+  files the STW-033
+  chain produces, not a
+  refactor); does NOT
+  change the STW-033
+  `PublishRemotePlan` /
+  `PublishedRemoteReceipt`
+  / `S3Object` JSON
+  shape (a manifest
+  drift fails the index
+  step's per-entry
+  pre-index `trainer
+  --verify-remote`
+  check); does NOT
+  introduce a Python /
+  `jq` dependency (the
+  runbook is pure bash +
+  `find` + `sha256sum`).
+  **Closes the v8
+  follow-on the STW-033
+  publish-remote step
+  names as the next
+  slice** (a testnet
+  dashboard needs an
+  aggregator, not N
+  point fetches).
+  Owner files:
+  `crates/autotrain/src/publish_index.rs`
+  (new `IndexedEntry`
+  struct + `PublishIndex`
+  struct + `PublishIndexError`
+  enum + `Display` impl
+  + `publish_index`
+  top-level entry point
+  + `PublishIndex::verify`
+  + `read_publish_index`
+  + new
+  `bucket_uri_as_str_matches_published_strings_v2`
+  / `publish_index_writes_index_json`
+  / `publish_index_refuses_red_remote_receipt`
+  / `publish_index_is_byte_stable_for_unchanged_root`
+  / `publish_index_aggregates_total_bytes_across_entries`
+  / `publish_index_sorted_by_receipt_basename`
+  / `publish_index_io_error_propagates_for_missing_root`
+  / `verify_index_rehashes_every_local_file`
+  / `verify_index_rejects_tampered_entry`
+  / `verify_index_phantom_uri_fails_with_missing_object`
+  lib tests),
+  `crates/autotrain/src/lib.rs`
+  (new `mod publish_index`
+  + `pub use publish_index::*`),
+  `crates/autotrain/src/mode.rs`
+  (new `Mode::PublishIndex`
+  + `Mode::VerifyIndex`
+  arm + `--publish-index`
+  / `--verify-index` argv
+  handling + the index
+  scan call into
+  `publish_index::publish_index`
+  + `--publish-index` /
+  `--verify-index` listed
+  in the `Usage:`
+  eprintln! line +
+  matching
+  `unreachable!()`
+  catch-alls in the
+  post-DB-open match
+  arm),
+  `crates/autotrain/tests/publish_index.rs`
+  (new
+  `publish_index_round_trips_through_real_trainer_binary`
+  / `publish_index_run_exits_two_with_red_remote_receipt`
+  / `publish_index_run_exits_two_with_missing_publish_root`
+  / `verify_index_round_trips_through_real_trainer_binary`
+  integration tests
+  gated as no-DB so they
+  run in
+  `cargo test --workspace`),
+  `crates/autotrain/tests/script_shape.rs`
+  (new
+  `testnet_live_publish_index_script_exists_and_parses`
+  / `testnet_live_publish_index_script_has_publish_index_call`
+  / `testnet_live_publish_index_script_has_verify_index_call`
+  / `testnet_live_publish_index_doc_references_publish_index_cli`
+  shell-shape pins),
+  `scripts/testnet-live-publish-index.sh`
+  (new pure-bash runbook
+  that drives
+  `trainer --publish-index`
+  + `trainer --verify-index`
+  end-to-end as
+  subprocesses, mirrors
+  the STW-019 + STW-032 +
+  STW-033 runbook shape:
+  `set -euo pipefail` +
+  script exists +
+  executable + parses
+  with `bash -n` + refuses
+  to run on a missing
+  publish root with
+  exit 3 + writes a
+  `SUMMARY.txt` headline
+  a CI worker can `cat`),
+  `scripts/testnet-live-publish-index.md`
+  (new runbook doc that
+  explains the index
+  step + the
+  `INDEX.json` +
+  `SUMMARY.txt` layout
+  + references the
+  `--publish-index` +
+  `--verify-index` CLI
+  subcommands).
+  Verification commands:
+  `cargo fmt --check`;
+  `cargo check --workspace`;
+  `cargo test --workspace`;
+  `bash -n scripts/testnet-live-publish-index.sh`;
+  `trainer --publish-index <root>` exits 0 +
+  prints the pinned
+  `live_proof publish_index
+  complete: root=... entries=...
+  total_bytes=...` line +
+  writes a green
+  `INDEX.json`;
+  `trainer --verify-index
+  <index-path>` exits 0 +
+  prints the pinned
+  `live_proof index
+  verification passed:
+  ...` line; the new
+  integration tests
+  pass; the
+  `testnet_live_publish_index_script_*`
+  shape pins pass.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.

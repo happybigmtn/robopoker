@@ -778,3 +778,184 @@ fn testnet_live_publish_s3_script_references_publish_remote_cli() {
         publish_s3_script_path().display()
     );
 }
+
+// ===========================================================================
+// STW-034 publish-index (testnet dashboard aggregator) runbook shape contract
+// ===========================================================================
+//
+// The publish-index runbook
+// (`scripts/testnet-live-publish-index.sh`) is a
+// pure-bash driver that consumes the STW-033
+// `remote_receipt.json` files the publish-remote
+// runbook produced and chains
+// `trainer --publish-index <publish-root>` (the
+// index writer) + `trainer --verify-index
+// <index-path>` (the no-DB no-rebuild re-verifier)
+// as a sequence of subprocesses.
+//
+// The companion STW-034 tests below pin the
+// file-on-disk / bash-parse / doc-references-CLI
+// surface; the two sub-tests below add the
+// *additional* contracts the companion tests
+// don't pin:
+//
+// 1. `testnet_live_publish_index_script_exists_and_parses` —
+//    the runbook script must be on disk,
+//    executable, and parse with `bash -n` (mirrors
+//    the STW-019 + STW-032 + STW-033 file-on-disk
+//    pins).
+// 2. `testnet_live_publish_index_script_has_publish_index_call` —
+//    the runbook script must shell out to
+//    `trainer --publish-index <publish-root>` (the
+//    index writer the STW-034 chain ships).
+// 3. `testnet_live_publish_index_script_has_verify_index_call` —
+//    the runbook script must shell out to
+//    `trainer --verify-index <index-path>` (the
+//    no-DB no-rebuild re-verifier the STW-034
+//    chain ships).
+// 4. `testnet_live_publish_index_doc_references_publish_index_cli` —
+//    the runbook doc must reference the
+//    `trainer --publish-index` + `trainer
+//    --verify-index` CLI subcommands the runbook
+//    shells out to (a worker reading the doc would
+//    not know how to invoke the indexer without
+//    this mention).
+
+fn publish_index_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-index.sh")
+}
+
+fn publish_index_doc_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-index.md")
+}
+
+#[test]
+fn testnet_live_publish_index_script_exists_and_parses() {
+    // The publish-index runbook script must be on
+    // disk, executable, and parse with `bash -n`. A
+    // regression that drops the file (or breaks the
+    // bash grammar) fails the gate at CI time
+    // before a CI worker can shell out to it.
+    // Mirrors the STW-019 + STW-032 + STW-033
+    // file-on-disk pins.
+    let p = publish_index_script_path();
+    assert!(
+        p.exists(),
+        "STW-034 publish-index runbook script missing at {}; \
+         the testnet dashboard aggregator has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-034 publish-index runbook script at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches a live
+    // index step.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/testnet-live-publish-index.sh");
+    assert!(
+        out.status.success(),
+        "STW-034 publish-index runbook script must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_script_has_publish_index_call() {
+    // The publish-index runbook script must shell
+    // out to `trainer --publish-index <publish-root>`
+    // (the index writer the STW-034 chain ships).
+    // We assert by flag form (`--publish-index`)
+    // because that is the form the operator types
+    // and the form a dashboard scraper greps.
+    // Mirrors the STW-032
+    // `testnet_live_publish_script_references_publish_cli`
+    // pinner.
+    let script = read(&publish_index_script_path());
+    assert!(
+        script.contains("--publish-index"),
+        "STW-034 publish-index runbook script at {} must reference the \
+         `trainer --publish-index <publish-root>` CLI subcommand; a worker reading the \
+         script would not know how to invoke the indexer",
+        publish_index_script_path().display()
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_script_has_verify_index_call() {
+    // The publish-index runbook script must shell
+    // out to `trainer --verify-index <index-path>`
+    // (the no-DB no-rebuild re-verifier the STW-034
+    // chain ships). We assert by flag form
+    // (`--verify-index`) because that is the form
+    // the operator types and the form a dashboard
+    // scraper greps. Mirrors the STW-032
+    // `testnet_live_publish_script_references_verify_bundle_cli`
+    // pinner.
+    let script = read(&publish_index_script_path());
+    assert!(
+        script.contains("--verify-index"),
+        "STW-034 publish-index runbook script at {} must reference the \
+         `trainer --verify-index <index-path>` CLI subcommand; a worker reading the \
+         script would not know how to re-verify the index",
+        publish_index_script_path().display()
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_doc_references_publish_index_cli() {
+    // The publish-index runbook doc must reference
+    // both `trainer --publish-index` (the index
+    // writer) and `trainer --verify-index` (the
+    // no-DB no-rebuild re-verifier) the STW-034
+    // chain ships. A worker reading the doc would
+    // not know how to invoke either CLI arm without
+    // these mentions. Mirrors the STW-032
+    // `testnet_live_publish_doc_references_verify_bundle_cli`
+    // pinner.
+    let doc = read(&publish_index_doc_path());
+    assert!(
+        doc.contains("--publish-index"),
+        "STW-034 publish-index runbook doc at {} must reference the \
+         `trainer --publish-index <publish-root>` CLI subcommand; a worker reading the \
+         doc would not know how to invoke the indexer",
+        publish_index_doc_path().display()
+    );
+    assert!(
+        doc.contains("--verify-index"),
+        "STW-034 publish-index runbook doc at {} must reference the \
+         `trainer --verify-index <index-path>` CLI subcommand; a worker reading the \
+         doc would not know how to re-verify the index",
+        publish_index_doc_path().display()
+    );
+}
