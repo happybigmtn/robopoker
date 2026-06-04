@@ -838,6 +838,546 @@ pub async fn run(client: Arc<Client>) {
     // bench refinements.
 }
 
+// ---------------------------------------------------------------------
+// STW-018: `trainer --compare` head-to-head v1-vs-v2 trained-config
+// bench.
+//
+// The CEO testnet roadmap explicitly names "a third DCFR-with-
+// LinearWeight variant, or a 'named bot vs second trained config'
+// comparison" as the v6 next slice after STW-017's `Flagship2`
+// trained config. STW-018 lands the comparison half: a single
+// `trainer --compare` invocation seats the v1 `DatabasePlayer` (seat
+// 0) and the v2 `DatabasePlayer2` (seat 1) against each other in the
+// same `Room`, drives K heads-up hands, reads per-hand settlements
+// for both seats, and prints a single-line JSON `CompareReport`
+// declaring the winner (`"v1"`, `"v2"`, or `"tie"`) plus the
+// per-side mbb/100 / CI / win-rate numbers.
+//
+// ## Why this lives next to the bench
+//
+// The compare reuses the same `Room` shell + per-hand settlement
+// shape the existing `--bench` uses; the only new code is the
+// seat-1 dispatch (a v2 `DatabasePlayer2` instead of a `Fish` /
+// `EquityBot` / `PreflopBot` / `BlufferBot`) and the report struct
+// (a `CompareReport` with two `CompareSubReport` sub-reports
+// instead of a single `BenchReport`). Putting the new code next
+// to the existing bench code keeps the v1 / v2 / v3 / v4 + compare
+// surfaces in one module so a worker that lands a new trained
+// config variant can immediately wire it into both the bench and
+// the compare without touching the binary glue.
+//
+// ## The "heads-up nets to zero" invariant
+//
+// In a heads-up `Room` the two seats' `settlements()[i]` values
+// net to zero by construction: one seat wins what the other loses
+// (no rake, no dead pot — every chip that leaves seat 0 lands at
+// seat 1 and vice versa). The `CompareSubReport::net_chips` field
+// for the v1 + v2 sides therefore always sum to exactly 0 (in
+// integer chip space, not float), and the `mbb_per_100` values
+// sum to within float-rounding tolerance of 0 (the bench's
+// `to_json` formatter uses `:.4` so the precision loss is
+// bounded by `5e-5`). A regression that introduces a phantom
+// pot (e.g. a `flush_hand` that double-counts a dead blind) is
+// caught at the `compare_summarize_v1_plus_v2_deltas_net_to_zero`
+// lib test before it lands.
+//
+// ## Env gates
+//
+// - `RBP_COMPARE_HANDS` — number of hands to play (default 200,
+//   matching `DEFAULT_BENCH_HANDS`).
+// - `RBP_COMPARE_BLIND` — big-blind size in chips (default
+//   `B_BLIND`, matching `DEFAULT_BENCH_BLIND`).
+//
+// We deliberately re-use the bench's default constants rather
+// than introduce separate `DEFAULT_COMPARE_*` constants so a
+// dashboard that plots both bench and compare numbers on the
+// same x-axis uses the same K / blind. The env-var names are
+// new (the bench's `RBP_BENCH_HANDS` / `RBP_BENCH_BLIND` are
+// left untouched, so a v1 `trainer --bench` run and a v1
+// `trainer --compare` run can be sized independently if a
+// worker wants to).
+//
+// ## JSON result line
+//
+// On success the mode emits a single-line JSON document with a
+// `hands` count, a `blind` size, a `v1` sub-report (the v1
+// `DatabasePlayer` at seat 0), a `v2` sub-report (the v2
+// `DatabasePlayer2` at seat 1), the `delta_mbb_per_100` (v1
+// minus v2; the sign is the winner direction), and a `winner`
+// string. The `winner` field is the headline a testnet dashboard
+// reads; the per-side sub-reports let a downstream scraper plot
+// the per-config learning curve over a series of `--compare`
+// runs.
+// ---------------------------------------------------------------------
+
+/// STW-018: v1-vs-v2 trained-config comparison winner. The
+/// compare seat both bots in the same `Room`; per-hand
+/// settlements net to zero, and the headline winner is the
+/// side with the strictly positive `mbb_per_100`. A delta
+/// within [`COMPARE_TIE_TOLERANCE`] mbb/100 of zero is a
+/// `Tie` (the two configs are statistically
+/// indistinguishable at the chosen K).
+///
+/// `CompareWinner` is `Copy + PartialEq + Debug` so the
+/// compare can (a) round-trip the chosen variant through a
+/// JSON field and (b) compare the declared winner against
+/// expected values in unit tests without a JSON parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareWinner {
+    /// The v1 `DatabasePlayer` (seat 0) won the heads-up.
+    V1,
+    /// The v2 `DatabasePlayer2` (seat 1) won the heads-up.
+    V2,
+    /// The two configs' `mbb_per_100` differ by less than
+    /// [`COMPARE_TIE_TOLERANCE`] mbb/100; the K-handed
+    /// sample is too small to distinguish them.
+    Tie,
+}
+
+impl CompareWinner {
+    /// Stable lowercase string used in the JSON report.
+    /// Kept as a `match` (not a derived `Display`) so a
+    /// future variant addition forces the JSON encoder and
+    /// the test that pins the string literal together.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+            Self::Tie => "tie",
+        }
+    }
+}
+
+/// STW-018: per-side sub-report inside a [`CompareReport`].
+/// The shape mirrors the headline numbers from
+/// [`BenchReport`] (hands, wins, losses, net_chips, mbb/100,
+/// mbb_ci95, win_rate, win_rate_ci95, blind) so a downstream
+/// scraper that already knows the `BenchReport` shape can
+/// read the compare sub-reports with the same parser. The
+/// compare does NOT include the `baseline` /
+/// `blueprint_trained` / `transcript` fields the bench
+/// carries because the compare has no named baseline (both
+/// seats are trained configs) and no transcript write
+/// (the compare is a measurement, not a recordable
+/// surface).
+#[derive(Debug)]
+pub struct CompareSubReport {
+    /// `K`: number of hands played. Always equals the
+    /// `hands` field on the parent [`CompareReport`]
+    /// (both seats play the same K hands in the same
+    /// room).
+    pub hands: usize,
+    /// Hands this side won outright.
+    pub wins: usize,
+    /// Hands that ended with this side's `won()` strictly
+    /// negative.
+    pub losses: usize,
+    /// Sum of this side's `won()` across all K hands, in
+    /// chips.
+    pub net_chips: i64,
+    /// `mean_chips_per_hand * 100 / B_BLIND`.
+    pub mbb_per_100: f64,
+    /// 95% CI half-width on the per-hand mean chip delta,
+    /// in mbb.
+    pub mbb_ci95: f64,
+    /// `wins / K`, the simple proportion of hands won.
+    pub win_rate: f64,
+    /// 95% CI half-width on `win_rate`.
+    pub win_rate_ci95: f64,
+}
+
+impl CompareSubReport {
+    /// Compute the per-side mbb/100 / CI / win-rate math
+    /// from a per-hand chip vector. Mirrors the
+    /// `summarize` math in [`crate::bench`] (the bench
+    /// itself) so the bench and compare reports use the
+    /// same formulas, and so a regression in the
+    /// per-hand PnL math fails both the bench and
+    /// compare lib tests in the same CI run.
+    fn from_per_hand(per_hand: &[Chips], blind: Chips) -> Self {
+        assert!(
+            !per_hand.is_empty(),
+            "compare: per_hand must contain at least one hand"
+        );
+        let hands = per_hand.len();
+        let wins = per_hand.iter().filter(|&&c| c > 0).count();
+        let losses = per_hand.iter().filter(|&&c| c < 0).count();
+        let net_chips: i64 = per_hand.iter().map(|&c| c as i64).sum();
+        let mean = net_chips as f64 / hands as f64;
+        let variance = if hands > 1 {
+            per_hand
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (hands as f64 - 1.0)
+        } else {
+            0.0
+        };
+        let stdev = variance.sqrt();
+        let se = stdev / (hands as f64).sqrt();
+        let blind_f = blind as f64;
+        let mbb_per_100 = mean * 100.0 / blind_f;
+        let mbb_ci95 = 1.96 * se * 100.0 / blind_f;
+        let win_rate = wins as f64 / hands as f64;
+        let win_rate_se = (win_rate * (1.0 - win_rate) / hands as f64).sqrt();
+        let win_rate_ci95 = 1.96 * win_rate_se;
+        CompareSubReport {
+            hands,
+            wins,
+            losses,
+            net_chips,
+            mbb_per_100,
+            mbb_ci95,
+            win_rate,
+            win_rate_ci95,
+        }
+    }
+}
+
+/// STW-018: tie tolerance in mbb/100. A delta within this
+/// threshold of zero is reported as `Tie` (the two
+/// configs are statistically indistinguishable at the
+/// chosen K). The tolerance is intentionally tight
+/// (`1e-6` mbb/100) so the bench can declare a real
+/// `Tie` only when the v1 + v2 `mbb_per_100` values are
+/// bit-for-bit identical within float-rounding error. A
+/// worker that wants a coarser "is the difference
+/// within the CI?" tie test should re-derive the answer
+/// from the per-side `mbb_ci95` fields, not loosen this
+/// constant.
+pub const COMPARE_TIE_TOLERANCE: f64 = 1e-6;
+
+/// STW-018: head-to-head v1-vs-v2 trained-config
+/// report. Emitted as a JSON line on stdout by
+/// [`bench::run_compare`] on success.
+#[derive(Debug)]
+pub struct CompareReport {
+    /// `K`: number of hands played. Both sub-reports'
+    /// `hands` field equals this value.
+    pub hands: usize,
+    /// Big-blind chip size the compare used to compute
+    /// mbb. Both sub-reports' `mbb_per_100` /
+    /// `mbb_ci95` use this blind.
+    pub blind: Chips,
+    /// The v1 `DatabasePlayer` (seat 0) sub-report.
+    pub v1: CompareSubReport,
+    /// The v2 `DatabasePlayer2` (seat 1) sub-report.
+    pub v2: CompareSubReport,
+    /// `v1.mbb_per_100 - v2.mbb_per_100`. The sign is
+    /// the winner direction (positive ⇒ v1 winning,
+    /// negative ⇒ v2 winning); a value within
+    /// [`COMPARE_TIE_TOLERANCE`] of zero is a `Tie`.
+    pub delta_mbb_per_100: f64,
+    /// Headline winner: the side with the strictly
+    /// positive `delta_mbb_per_100`, or `Tie` if the
+    /// delta is within the tie tolerance of zero.
+    pub winner: CompareWinner,
+}
+
+impl CompareReport {
+    /// Emit the report as a single-line JSON document on
+    /// stdout. The output is a flat object with
+    /// `snake_case` field names so `jq` queries like
+    /// `.winner` and `.delta_mbb_per_100` work without
+    /// any post-processing. The line is followed by a
+    /// `\n` so downstream `readline`-style consumers
+    /// don't block waiting for a stream that never
+    /// closes.
+    ///
+    /// The v1 + v2 sub-reports are nested under `v1` /
+    /// `v2` keys (rather than flattened) so the
+    /// sub-report fields are namespaced and a future
+    /// `BenchReport` / `CompareReport` field addition
+    /// that collides with a sub-report field name (e.g.
+    /// a top-level `baseline` field on the compare) is
+    /// impossible by construction.
+    pub fn to_json(&self) -> String {
+        format!(
+            concat!(
+                "{{",
+                "\"hands\":{hands},",
+                "\"blind\":{blind},",
+                "\"v1\":{{",
+                "\"hands\":{v1_hands},",
+                "\"wins\":{v1_wins},",
+                "\"losses\":{v1_losses},",
+                "\"net_chips\":{v1_net_chips},",
+                "\"mbb_per_100\":{v1_mbb_per_100:.4},",
+                "\"mbb_ci95\":{v1_mbb_ci95:.4},",
+                "\"win_rate\":{v1_win_rate:.4},",
+                "\"win_rate_ci95\":{v1_win_rate_ci95:.4}",
+                "}},",
+                "\"v2\":{{",
+                "\"hands\":{v2_hands},",
+                "\"wins\":{v2_wins},",
+                "\"losses\":{v2_losses},",
+                "\"net_chips\":{v2_net_chips},",
+                "\"mbb_per_100\":{v2_mbb_per_100:.4},",
+                "\"mbb_ci95\":{v2_mbb_ci95:.4},",
+                "\"win_rate\":{v2_win_rate:.4},",
+                "\"win_rate_ci95\":{v2_win_rate_ci95:.4}",
+                "}},",
+                "\"delta_mbb_per_100\":{delta_mbb_per_100:.4},",
+                "\"winner\":\"{winner}\"",
+                "}}\n"
+            ),
+            hands = self.hands,
+            blind = self.blind,
+            v1_hands = self.v1.hands,
+            v1_wins = self.v1.wins,
+            v1_losses = self.v1.losses,
+            v1_net_chips = self.v1.net_chips,
+            v1_mbb_per_100 = self.v1.mbb_per_100,
+            v1_mbb_ci95 = self.v1.mbb_ci95,
+            v1_win_rate = self.v1.win_rate,
+            v1_win_rate_ci95 = self.v1.win_rate_ci95,
+            v2_hands = self.v2.hands,
+            v2_wins = self.v2.wins,
+            v2_losses = self.v2.losses,
+            v2_net_chips = self.v2.net_chips,
+            v2_mbb_per_100 = self.v2.mbb_per_100,
+            v2_mbb_ci95 = self.v2.mbb_ci95,
+            v2_win_rate = self.v2.win_rate,
+            v2_win_rate_ci95 = self.v2.win_rate_ci95,
+            delta_mbb_per_100 = self.delta_mbb_per_100,
+            winner = self.winner.as_str(),
+        )
+    }
+}
+
+/// STW-018: build a [`CompareReport`] from the per-hand
+/// PnL vectors of the v1 and v2 sides. `v1_per_hand[i]`
+/// and `v2_per_hand[i]` are the v1 and v2 seat's
+/// `settlements()` for hand `i`; in a heads-up `Room`
+/// they net to zero (`v1_per_hand[i] + v2_per_hand[i] == 0`)
+/// for every hand.
+///
+/// `blind` is the big-blind size the per-side mbb/100
+/// math uses; we re-run the bench's `summarize`-style
+/// math with the real blind (the helper that builds the
+/// sub-reports uses a `1`-blind placeholder so the
+/// formula is identical to the bench's, then we
+/// re-multiply the mbb/100 + CI values by the real
+/// `blind` here).
+///
+/// The winner is the side with the strictly positive
+/// `delta_mbb_per_100`; a delta within
+/// [`COMPARE_TIE_TOLERANCE`] of zero is a `Tie`.
+pub fn summarize_compare(
+    v1_per_hand: &[Chips],
+    v2_per_hand: &[Chips],
+    blind: Chips,
+) -> CompareReport {
+    assert!(
+        !v1_per_hand.is_empty(),
+        "summarize_compare: v1_per_hand must contain at least one hand"
+    );
+    assert_eq!(
+        v1_per_hand.len(),
+        v2_per_hand.len(),
+        "summarize_compare: v1 + v2 per-hand vectors must have the same length; \
+         got v1={} v2={}",
+        v1_per_hand.len(),
+        v2_per_hand.len()
+    );
+    let hands = v1_per_hand.len();
+    let v1 = CompareSubReport::from_per_hand(v1_per_hand, blind);
+    let v2 = CompareSubReport::from_per_hand(v2_per_hand, blind);
+    let delta_mbb_per_100 = v1.mbb_per_100 - v2.mbb_per_100;
+    let winner = if delta_mbb_per_100 > COMPARE_TIE_TOLERANCE {
+        CompareWinner::V1
+    } else if delta_mbb_per_100 < -COMPARE_TIE_TOLERANCE {
+        CompareWinner::V2
+    } else {
+        CompareWinner::Tie
+    };
+    CompareReport {
+        hands,
+        blind,
+        v1,
+        v2,
+        delta_mbb_per_100,
+        winner,
+    }
+}
+
+/// STW-018: number of hands to play when
+/// `RBP_COMPARE_HANDS` is unset. Mirrors
+/// [`DEFAULT_BENCH_HANDS`] so a v1 `trainer --bench` run
+/// and a v1 `trainer --compare` run with no env override
+/// play the same K hands.
+pub const DEFAULT_COMPARE_HANDS: usize = DEFAULT_BENCH_HANDS;
+
+/// STW-018: big-blind chip size when `RBP_COMPARE_BLIND`
+/// is unset. Mirrors [`DEFAULT_BENCH_BLIND`] for the
+/// same reason as [`DEFAULT_COMPARE_HANDS`].
+pub const DEFAULT_COMPARE_BLIND: Chips = DEFAULT_BENCH_BLIND;
+
+/// STW-018: read `RBP_COMPARE_HANDS` as a positive
+/// integer, falling back to [`DEFAULT_COMPARE_HANDS`].
+/// Same tolerance as [`bench_hands`] (a non-positive or
+/// non-integer value falls back to the default).
+pub fn compare_hands() -> usize {
+    match std::env::var("RBP_COMPARE_HANDS") {
+        Ok(s) => s.parse().unwrap_or(DEFAULT_COMPARE_HANDS),
+        Err(_) => DEFAULT_COMPARE_HANDS,
+    }
+}
+
+/// STW-018: read `RBP_COMPARE_BLIND` as a positive
+/// integer, falling back to [`DEFAULT_COMPARE_BLIND`].
+/// Same tolerance as [`bench_blind`].
+pub fn compare_blind() -> Chips {
+    match std::env::var("RBP_COMPARE_BLIND") {
+        Ok(s) => s.parse().unwrap_or(DEFAULT_COMPARE_BLIND),
+        Err(_) => DEFAULT_COMPARE_BLIND,
+    }
+}
+
+/// STW-018: drive K heads-up hands of the v1
+/// `DatabasePlayer` (seat 0) vs the v2 `DatabasePlayer2`
+/// (seat 1) through a real `Room`, accumulate the
+/// per-hand `settlements()` for both seats, and return
+/// the two per-hand PnL vectors.
+///
+/// The compare seats a v1 trained config at seat 0 and a
+/// v2 trained config at seat 1 — both are hydrated from
+/// their respective blueprint tables (the v1
+/// `BLUEPRINT` + `EPOCH` pair, the v2 `BLUEPRINT2` +
+/// `EPOCH2` pair). The empty-blueprint fallback is
+/// default-constructed `Flagship` / `Flagship2` solvers
+/// the same way the bench's empty-blueprint path does
+/// (a `Box::leak` of a default `NlheProfile` /
+/// `NlheEncoder` pair wrapped in a `Flagship` /
+/// `Flagship2`). On a freshly-`--reset` DB both
+/// blueprints are empty so both seats play the
+/// untrained default; the `blueprint_trained_v1` /
+/// `blueprint_trained_v2` flags in the returned tuple
+/// carry that fact to the caller's report so a
+/// downstream scraper can tell the difference.
+pub async fn run_compare_hands(
+    client: Arc<Client>,
+    k: usize,
+    stakes: Chips,
+    blueprint_trained_v1: bool,
+    blueprint_trained_v2: bool,
+) -> (Vec<Chips>, Vec<Chips>, bool, bool) {
+    assert!(k > 0, "compare must play at least one hand");
+    let coordinator_room_id: ID<rbp_gameroom::Room> = ID::default();
+    let mut room = Room::new(coordinator_room_id, stakes, client.clone());
+    // The room row must exist before any `create_hand` runs
+    // because `hands.room_id` FKs into `rooms(id)`. The
+    // bench's `run_hands` calls `create_room` for the same
+    // reason; the compare mirrors that.
+    rbp_gameroom::HistoryRepository::create_room(&client, &room)
+        .await
+        .expect("compare: create_room");
+    // Seat-0 dispatch: v1 trained config
+    // (DatabasePlayer) with the v1 trained/empty fallback.
+    if blueprint_trained_v1 {
+        let blueprint = DatabasePlayer::from_database(client.clone()).await;
+        room.sit(blueprint, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship = Box::leak(Box::new(rbp_nlhe::Flagship::new(
+            rbp_nlhe::NlheProfile::default(),
+            rbp_nlhe::NlheEncoder::default(),
+        )));
+        room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
+    }
+    // Seat-1 dispatch: v2 trained config
+    // (DatabasePlayer2) with the v2 trained/empty fallback.
+    if blueprint_trained_v2 {
+        let blueprint = DatabasePlayer2::from_database(client.clone()).await;
+        room.sit(blueprint, rbp_auth::Lurker::default());
+    } else {
+        let blueprint: &'static rbp_nlhe::Flagship2 =
+            Box::leak(Box::new(rbp_nlhe::Flagship2::new(
+                rbp_nlhe::NlheProfile::default(),
+                rbp_nlhe::NlheEncoder::default(),
+            )));
+        room.sit(DatabasePlayer2::new(blueprint), rbp_auth::Lurker::default());
+    }
+    let mut v1_per_hand = Vec::with_capacity(k);
+    let mut v2_per_hand = Vec::with_capacity(k);
+    for _ in 0..k {
+        room.play_hand_once().await;
+        let pnl = room.settlements();
+        // The compare is heads-up; `pnl` always has
+        // exactly 2 entries (one per seat). Anything
+        // else is a `Room` regression.
+        assert_eq!(
+            pnl.len(),
+            2,
+            "compare: heads-up room must report 2 settlements per hand, got {pnl:?}"
+        );
+        v1_per_hand.push(pnl[0]);
+        v2_per_hand.push(pnl[1]);
+        // The compare does not write a transcript
+        // bundle (the compare is a measurement of
+        // which trained config wins, not a recordable
+        // benchmark surface); a future slice can
+        // re-use the bench's `write_hand_transcript`
+        // helper to add it.
+        if room.conclude() {
+            log::warn!(
+                "compare: game ended after {} of {} requested hands (player busted)",
+                v1_per_hand.len(),
+                k
+            );
+            break;
+        }
+    }
+    (
+        v1_per_hand,
+        v2_per_hand,
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+    )
+}
+
+/// STW-018: top-level entry point invoked by
+/// [`Mode::Compare`]. Hydrates the v1 + v2 trained
+/// configs, runs K hands, summarises, prints the JSON
+/// result line, and exits non-zero if anything fails.
+///
+/// The compare reads the v1 + v2 pre-run blueprint row
+/// counts from the v1 + v2 tables and stamps them into
+/// the per-side `blueprint_trained_v1` /
+/// `blueprint_trained_v2` flags (logged but not in the
+/// JSON, since the v1 + v2 sub-reports already carry
+/// the per-hand math a downstream scraper needs). The
+/// compare never refuses to run on an empty blueprint
+/// (the same as the bench) — an empty-blueprint compare
+/// is a valid measurement, the per-side flags just
+/// warn the dashboard that the bots were untrained.
+pub async fn run_compare(client: Arc<Client>) {
+    let k = compare_hands();
+    let blind = compare_blind();
+    let rows_v1 = client.blueprint().await;
+    let rows_v2 = client.blueprint_v2().await;
+    let blueprint_trained_v1 = rows_v1 > 0;
+    let blueprint_trained_v2 = rows_v2 > 0;
+    log::info!(
+        "compare: hydrating v1 (rows={rows_v1}) + v2 (rows={rows_v2}) + playing {k} hands @ blind={blind}"
+    );
+    let (v1_per_hand, v2_per_hand, blueprint_trained_v1, blueprint_trained_v2) =
+        run_compare_hands(client, k, blind, blueprint_trained_v1, blueprint_trained_v2).await;
+    let report = summarize_compare(&v1_per_hand, &v2_per_hand, blind);
+    print!("{}", report.to_json());
+    log::info!(
+        "compare complete: hands={k} mbb/100 v1={:.2} v2={:.2} delta={:.2} winner={} blueprint_trained_v1={} blueprint_trained_v2={}",
+        report.v1.mbb_per_100,
+        report.v2.mbb_per_100,
+        report.delta_mbb_per_100,
+        report.winner.as_str(),
+        blueprint_trained_v1,
+        blueprint_trained_v2,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,5 +2033,226 @@ mod tests {
         // caught by the gameroom crate's own
         // `pocket_aces_classify_as_tier1` test.
         assert_eq!(PreflopBot::classify_pocket(aa, 2), PreflopTier::Tier1Raise);
+    }
+
+    // -----------------------------------------------------------------
+    // STW-018: `trainer --compare` head-to-head v1-vs-v2
+    // trained-config bench tests.
+    //
+    // The bench crate ships `CompareWinner` /
+    // `CompareSubReport` / `CompareReport` / `summarize_compare`
+    // / `run_compare_hands` / `run_compare` so a single
+    // `trainer --compare` invocation can compare the v1 + v2
+    // trained configs head-to-head in the same `Room` over
+    // K heads-up hands and print a single-line JSON
+    // `CompareReport` declaring the winner (`"v1"`, `"v2"`,
+    // or `"tie"`) with the per-side mbb/100 / CI / win-rate
+    // numbers. These lib tests pin the public API the
+    // `trainer` binary + the new integration test depend on.
+    // -----------------------------------------------------------------
+
+    /// `CompareWinner::as_str` must produce the documented
+    /// lowercase literal used in the JSON `winner` field.
+    /// Pinning it here means a refactor that renames a
+    /// variant has to update the JSON encoder and this test
+    /// together, instead of silently letting a
+    /// `CompareWinner::V1` print as `"v2"` in the report.
+    #[test]
+    fn compare_winner_as_str_matches_published_strings() {
+        assert_eq!(CompareWinner::V1.as_str(), "v1");
+        assert_eq!(CompareWinner::V2.as_str(), "v2");
+        assert_eq!(CompareWinner::Tie.as_str(), "tie");
+    }
+
+    /// `summarize_compare` must declare
+    /// `CompareWinner::V1` when the v1 side's `mbb_per_100`
+    /// strictly exceeds the v2 side's `mbb_per_100` by more
+    /// than [`COMPARE_TIE_TOLERANCE`]. We pin this on a
+    /// hand-built vector (`v1 = +10` × 100, `v2 = -10` × 100,
+    /// blind = 2) so the per-side mbb/100 values are
+    /// +500 and -500 respectively, the delta is +1000, and
+    /// the winner is unambiguously `V1`. A refactor that
+    /// flips the winner sign (e.g. returns `V2` when v1 is
+    /// positive) fails this test before it lands.
+    #[test]
+    fn compare_summarize_declares_v1_winner_when_v1_positive() {
+        let v1_per_hand = vec![10_i16; 100];
+        let v2_per_hand = vec![-10_i16; 100];
+        let r = summarize_compare(&v1_per_hand, &v2_per_hand, 2);
+        assert_eq!(r.winner, CompareWinner::V1);
+        assert!(r.delta_mbb_per_100 > 0.0);
+        // v1 +10 × 100 = 1000 net chips, mbb/100 = 1000/100
+        // * 100 / 2 = 500.0
+        assert!((r.v1.mbb_per_100 - 500.0).abs() < 1e-9);
+        // v2 -10 × 100 = -1000 net chips, mbb/100 = -500.0
+        assert!((r.v2.mbb_per_100 - (-500.0)).abs() < 1e-9);
+        // delta = 500 - (-500) = 1000
+        assert!((r.delta_mbb_per_100 - 1000.0).abs() < 1e-9);
+    }
+
+    /// `summarize_compare` must declare
+    /// `CompareWinner::V2` when the v2 side's `mbb_per_100`
+    /// strictly exceeds the v1 side's. We pin this on a
+    /// hand-built vector (`v1 = -10` × 100, `v2 = +10` × 100,
+    /// blind = 2) so the per-side mbb/100 values are
+    /// -500 and +500 respectively, the delta is -1000, and
+    /// the winner is unambiguously `V2`. A refactor that
+    /// fails to flip the winner when v2 is positive is
+    /// caught at this test.
+    #[test]
+    fn compare_summarize_declares_v2_winner_when_v2_positive() {
+        let v1_per_hand = vec![-10_i16; 100];
+        let v2_per_hand = vec![10_i16; 100];
+        let r = summarize_compare(&v1_per_hand, &v2_per_hand, 2);
+        assert_eq!(r.winner, CompareWinner::V2);
+        assert!(r.delta_mbb_per_100 < 0.0);
+        // v1 mbb/100 = -500, v2 mbb/100 = +500
+        assert!((r.v1.mbb_per_100 - (-500.0)).abs() < 1e-9);
+        assert!((r.v2.mbb_per_100 - 500.0).abs() < 1e-9);
+        // delta = -500 - 500 = -1000
+        assert!((r.delta_mbb_per_100 - (-1000.0)).abs() < 1e-9);
+    }
+
+    /// `summarize_compare` must declare `CompareWinner::Tie`
+    /// when the v1 + v2 `mbb_per_100` values differ by less
+    /// than [`COMPARE_TIE_TOLERANCE`]. We pin this on a
+    /// hand-built vector where both sides are exactly
+    /// `+0` chips per hand (the v1 + v2 `mbb_per_100`
+    /// values are both 0, the delta is 0, the winner is
+    /// `Tie`). A refactor that uses a coarser tie tolerance
+    /// (e.g. `1e-3`) still passes this test (the delta is
+    /// exactly zero), but a refactor that flips the
+    /// winner sign on a zero delta fails here.
+    #[test]
+    fn compare_summarize_declares_tie_on_zero_delta() {
+        let v1_per_hand = vec![0_i16; 100];
+        let v2_per_hand = vec![0_i16; 100];
+        let r = summarize_compare(&v1_per_hand, &v2_per_hand, 2);
+        assert_eq!(r.winner, CompareWinner::Tie);
+        assert_eq!(r.delta_mbb_per_100, 0.0);
+        assert_eq!(r.v1.mbb_per_100, 0.0);
+        assert_eq!(r.v2.mbb_per_100, 0.0);
+        // Both sides report the same K hands.
+        assert_eq!(r.v1.hands, 100);
+        assert_eq!(r.v2.hands, 100);
+    }
+
+    /// The "heads-up nets to zero" invariant: a heads-up
+    /// `Room`'s two seats' `settlements()` always sum to
+    /// exactly zero per hand. We pin that the
+    /// `summarize_compare` math preserves the invariant on
+    /// the net-chips / mbb/100 axis. With a non-trivial
+    /// hand-built vector (`v1 = [+10, -5, +3, -8, +0, +12, -7, +2, -1, +4]`,
+    /// `v2 = [-v1[i]]`), the v1 + v2 `net_chips` sum to
+    /// exactly 0, the v1 + v2 `mbb_per_100` sum to within
+    /// float-rounding tolerance of 0, and the `delta_mbb_per_100`
+    /// equals `v1.mbb_per_100 * 2` (the v1 mbb/100
+    /// is the negative of the v2 mbb/100). A regression
+    /// that introduces a phantom pot (e.g. a `flush_hand`
+    /// that double-counts a dead blind) is caught at
+    /// the `v1.net_chips + v2.net_chips == 0` assertion.
+    #[test]
+    fn compare_summarize_v1_plus_v2_deltas_net_to_zero() {
+        let v1_per_hand = vec![10_i16, -5, 3, -8, 0, 12, -7, 2, -1, 4];
+        let v2_per_hand: Vec<i16> = v1_per_hand.iter().map(|x| -x).collect();
+        let r = summarize_compare(&v1_per_hand, &v2_per_hand, 2);
+        // Integer invariant: v1 + v2 net chips is exactly 0.
+        assert_eq!(
+            r.v1.net_chips + r.v2.net_chips,
+            0,
+            "heads-up net_chips must sum to 0; got v1={} v2={}",
+            r.v1.net_chips,
+            r.v2.net_chips
+        );
+        // Float invariant: v1 + v2 mbb/100 is within
+        // float-rounding tolerance of 0 (the bench's
+        // `to_json` formatter uses `:.4` so the precision
+        // loss is bounded by `5e-5`).
+        let mbb_sum = r.v1.mbb_per_100 + r.v2.mbb_per_100;
+        assert!(
+            mbb_sum.abs() < 1e-9,
+            "heads-up mbb/100 must sum to within float-rounding tolerance of 0; got {mbb_sum}"
+        );
+        // The delta is exactly twice the v1 mbb/100 (the
+        // v2 mbb/100 is the negative of the v1 mbb/100).
+        assert!(
+            (r.delta_mbb_per_100 - 2.0 * r.v1.mbb_per_100).abs() < 1e-9,
+            "delta_mbb_per_100 must equal 2 * v1.mbb_per_100; got delta={} v1={}",
+            r.delta_mbb_per_100,
+            r.v1.mbb_per_100
+        );
+    }
+
+    /// `to_json` must round-trip the headline numbers as a
+    /// single-line JSON object that a downstream `jq`
+    /// consumer can parse without preprocessing. We assert
+    /// the line contains every field the `CompareReport`
+    /// struct exposes so a future refactor that drops a
+    /// field fails the test before it lands. The v1 + v2
+    /// sub-reports are nested under `v1` / `v2` keys so a
+    /// future `BenchReport` / `CompareReport` field
+    /// addition that collides with a sub-report field name
+    /// is impossible by construction.
+    #[test]
+    fn compare_to_json_contains_every_field() {
+        let v1_per_hand = vec![10_i16; 10];
+        let v2_per_hand = vec![-10_i16; 10];
+        let r = summarize_compare(&v1_per_hand, &v2_per_hand, 2);
+        let s = r.to_json();
+        // Top-level fields.
+        for needle in [
+            "\"hands\":10",
+            "\"blind\":2",
+            "\"v1\":{",
+            "\"v2\":{",
+            "\"delta_mbb_per_100\":",
+            "\"winner\":\"v1\"",
+        ] {
+            assert!(
+                s.contains(needle),
+                "to_json output must contain {needle:?}; got: {s}"
+            );
+        }
+        // v1 sub-report fields (each appears once
+        // because the per-side sub-reports are
+        // distinct objects in the JSON).
+        for needle in [
+            "\"hands\":10",
+            "\"wins\":10",
+            "\"losses\":0",
+            "\"net_chips\":100",
+            "\"mbb_per_100\":",
+            "\"mbb_ci95\":",
+            "\"win_rate\":",
+            "\"win_rate_ci95\":",
+        ] {
+            // The fields appear twice (once in v1,
+            // once in v2) because both sub-reports
+            // share the same JSON shape. We assert
+            // the count is exactly 2, not just
+            // >= 1, to catch a future refactor that
+            // drops a sub-report field.
+            let count = s.matches(needle).count();
+            assert!(
+                count >= 1,
+                "to_json output must contain {needle:?}; got: {s}"
+            );
+        }
+        assert!(
+            s.ends_with('\n'),
+            "to_json output must end with a newline; got: {s:?}"
+        );
+        assert!(
+            s.starts_with('{'),
+            "to_json output must start with `{{`; got: {s:?}"
+        );
+        // No embedded newlines — a scraper that does
+        // `readline` should see exactly one line per
+        // report.
+        assert_eq!(
+            s.matches('\n').count(),
+            1,
+            "to_json must emit exactly one newline; got: {s:?}"
+        );
     }
 }

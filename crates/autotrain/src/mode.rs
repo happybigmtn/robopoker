@@ -45,6 +45,22 @@ pub enum Mode {
         /// `transcript-*.json` file.
         path: PathBuf,
     },
+    /// STW-018: head-to-head v1-vs-v2 trained-config
+    /// bench. Seats the v1 `DatabasePlayer` (seat 0) and
+    /// the v2 `DatabasePlayer2` (seat 1) against each
+    /// other in the same `Room`, runs K heads-up hands,
+    /// and prints a single-line JSON `CompareReport`
+    /// declaring the winner (`"v1"`, `"v2"`, or `"tie"`)
+    /// with the per-side mbb/100 / CI / win-rate numbers
+    /// and the v1-vs-v2 `delta_mbb_per_100`. The CEO
+    /// testnet roadmap explicitly names "a third
+    /// DCFR-with-LinearWeight variant, or a 'named bot
+    /// vs second trained config' comparison" as the v6
+    /// next slice after STW-017's `Flagship2` trained
+    /// config; STW-018 lands the comparison half. Sized
+    /// by `RBP_COMPARE_HANDS` (default 200) and
+    /// `RBP_COMPARE_BLIND` (default `B_BLIND`).
+    Compare,
 }
 
 impl Mode {
@@ -61,6 +77,7 @@ impl Mode {
                 "--reset" => return Self::Reset,
                 "--smoke" => return Self::Smoke,
                 "--bench" => return Self::Bench,
+                "--compare" => return Self::Compare,
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -111,7 +128,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --replay <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --compare | --replay <path>"
         );
         std::process::exit(1);
     }
@@ -165,6 +182,25 @@ impl Mode {
             Self::Cluster => PreTraining::run(&client).await,
             Self::Smoke => Self::smoke(client).await,
             Self::Bench => crate::bench::run(client).await,
+            // STW-018: head-to-head v1-vs-v2
+            // trained-config bench. Mirrors the
+            // `Self::Bench` arm — the compare is
+            // structurally parallel to the bench
+            // (one v1 + one v2 player, one `Room`
+            // shell, one JSON report) so a v1
+            // `trainer --bench` run and a v1
+            // `trainer --compare` run can coexist in
+            // the same database without colliding on
+            // the v1 / v2 staging tables, the v1 / v2
+            // blueprint tables, or the v1 / v2 epoch
+            // rows. The compare reuses the same
+            // `Room::play_hand_once` +
+            // `Room::settlements` pair the bench
+            // uses, so a regression in the per-hand
+            // PnL math fails both the bench and
+            // compare integration tests in the same
+            // CI run.
+            Self::Compare => crate::bench::run_compare(client).await,
             // The `Replay` arm was handled above; the
             // compiler still requires an exhaustive
             // match, so the unreachable arm is a

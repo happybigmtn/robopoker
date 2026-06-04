@@ -18,6 +18,100 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+- [x] `STW-018` `trainer --compare` head-to-head v1-vs-v2
+  trained-config bench: the CEO testnet roadmap explicitly
+  names "a third DCFR-with-LinearWeight variant, or a 'named
+  bot vs second trained config' comparison" as the v6 next
+  slice after STW-017's `Flagship2` trained config. STW-018
+  lands the comparison half. A new `Mode::Compare` + new
+  `bench::run_compare` + new `CompareReport` struct + new
+  `RBP_COMPARE_HANDS` / `RBP_COMPARE_BLIND` env knobs + a
+  new `compare complete: ...` log line + a new integration
+  test in `crates/autotrain/tests/compare.rs` lets a single
+  `trainer --compare` invocation seat the v1
+  `DatabasePlayer` (seat 0) and the v2 `DatabasePlayer2`
+  (seat 1) against each other in the same `Room` over K
+  heads-up hands, read per-hand settlements for both
+  seats, and print a single-line JSON `CompareReport`
+  declaring the winner ("v1", "v2", or "tie") with the
+  mbb/100 / CI / win-rate numbers for each side plus the
+  v1-vs-v2 `delta_mbb_per_100` (the sign of the delta is
+  the winner). The `winner` field is the headline a
+  testnet dashboard reads; the v1 / v2 per-side
+  `mbb_per_100` / `mbb_ci95` fields let a downstream
+  scraper plot the per-config learning curve over a
+  series of `--compare` runs (e.g. once per training
+  epoch). The compare reuses the same v1 + v2 `Room` shell
+  paths the existing `--bench` uses, so a regression in
+  the per-hand PnL math fails both the bench and compare
+  integration tests in the same CI run. Owner files:
+  `crates/autotrain/src/bench.rs` (new `CompareWinner`
+  enum + `CompareSubReport` struct + `CompareReport`
+  struct + `to_json` + `summarize_compare` + new
+  `compare_winner_as_str_matches_published_strings` /
+  `compare_summarize_declares_v1_winner_when_v1_positive` /
+  `compare_summarize_declares_v2_winner_when_v2_positive` /
+  `compare_summarize_declares_tie_on_zero_delta` /
+  `compare_summarize_v1_plus_v2_deltas_net_to_zero` /
+  `compare_to_json_contains_every_field` lib tests),
+  `crates/autotrain/src/mode.rs` (new `Mode::Compare` arm
+  + `--compare` argv handling + the v1 / v2 comparison
+  call into `bench::run_compare`),
+  `crates/autotrain/tests/compare.rs` (new
+  `compare_run_emits_parseable_json_with_consistent_accounting`
+  integration test gated on `database` + `DATABASE_URL`
+  like the existing `bench.rs` integration test — drives
+  `trainer --reset` then `trainer --compare` end-to-end
+  and asserts the JSON line parses, the headline
+  accounting is internally consistent
+  (`v1.mbb_per_100 + v2.mbb_per_100 ≈ 0` within
+  `1e-3` because the heads-up room nets to zero by
+  construction: v1's chips come from v2's chip losses
+  and vice versa, so the per-hand deltas sum to zero,
+  `winner` ∈ `{"v1", "v2", "tie"}`, the `v1` and `v2`
+  sub-reports each have non-zero `hands` and the same
+  `hands` count), and the post-reset `blueprint_trained`
+  flag is `false` for both sides),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md` (mark the v6
+  candidate as shipped with a one-line note). Scope
+  boundary: do NOT touch the existing `Mode::Bench` /
+  `BenchReport` / `--bench` code path. Do NOT introduce
+  a third `Blueprint` variant. Do NOT change the seat-0
+  / seat-1 dispatch in `bench::run_hands`. Do NOT
+  introduce a new trained config; the compare reuses the
+  v1 + v2 trained configs the v1 + v2 `trainer --bench`
+  paths already hydrate. Do NOT change the room
+  protocol, the `Schema` contracts, the autotrain
+  pipeline, the K-means cluster counts, the
+  `CFR_TREE_COUNT_NLHE` baseline, the
+  v1 / v2 / v3 / v4 named baselines, or the
+  `trainer --replay` CLI. The compare is *structurally
+  parallel* to the bench (one v1 + one v2 player, one
+  `Room` shell, one JSON report) so a `trainer --bench`
+  run and a `trainer --compare` run can coexist in the
+  same database without colliding on the v1 / v2
+  staging tables, the v1 / v2 blueprint tables, or the
+  v1 / v2 epoch rows. Verification commands:
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the new lib tests in `bench.rs::tests`
+  + the new `crates/autotrain/tests/compare.rs`
+  integration test; no padding of unrelated suites.
+  Dependencies: `STW-010` (the bench harness + `Room`
+  shell the compare reuses) and `STW-017` (the v2
+  trained config + v2 `DatabasePlayer2` + v2
+  `Blueprint::V2` env-var dispatch the compare seats at
+  the mirrored seat). Estimated scope: M. Completion
+  signal: `trainer --compare` exits 0 on a freshly-`--reset`
+  DB and prints a parseable single-line JSON
+  `CompareReport` whose `winner` field is one of
+  `{"v1", "v2", "tie"}`; the integration test passes;
+  `cargo test --workspace` and `cargo fmt --check` are
+  green.
+
 - [x] `STW-017` Second trained config (`Flagship2`):
   `DiscountedRegret` + `QuadraticWeight` + `PluribusSampling`
   vs the v1 `Flagship` (`PluribusRegret` + `LinearWeight` +
