@@ -211,6 +211,89 @@ context.
   `cargo fmt --check` are green.
 
 - [x] `STW-010` Head-to-head bench harness for trained `DatabasePlayer` vs `Fish`.
+
+- [x] `STW-012` v3 named baseline (`PreflopBot`): preflop-tier aware rule bot.
+  Owner files: `crates/gameroom/src/players/preflopbot.rs` (new),
+  `crates/gameroom/src/players/mod.rs`,
+  `crates/autotrain/src/bench.rs` (extend `Baseline` enum + JSON),
+  `crates/autotrain/tests/bench.rs` (extend integration test),
+  `crates/gameroom/tests/hand_roundtrip.rs` (no change),
+  `IMPLEMENTATION_PLAN.md`, `genesis/plans/000-ceo-testnet-roadmap.md`.
+  Scope boundary: add a v3 *named* rule-based baseline that beats
+  `EquityBot` (v2) on a hand-by-hand basis by using a real preflop
+  hand-tier table (pairs 88+, broadways, suited connectors) on
+  the preflop street, and falling through to the same Monte Carlo
+  equity + threshold table as `EquityBot` on later streets. Wire
+  it as a new `Baseline::Preflop` variant in the bench harness so a
+  downstream scraper can group reports by `baseline`. Do NOT
+  introduce a new solver, do NOT touch `EquityBot` or `Fish`, do
+  NOT change the autotrain pipeline.
+  Acceptance criteria:
+  (a) `crates/gameroom/src/players/preflopbot.rs` exists with
+      `PreflopBot` (a unit struct, `Default` impl, async `Player`
+      impl) and a pure `PreflopBot::classify_pocket(pocket, blind)`
+      helper that returns a `PreflopTier` enum
+      (`Tier1Raise | Tier2Call | Tier3Fold`) based on the
+      preflop hand-rank rules documented in the module.
+  (b) The `Player::decide` impl:
+      - on `Street::Pref` (no public board), calls
+        `classify_pocket` and picks the highest-priority legal
+        action matching the tier: Tier1 → prefer the *smallest*
+        preflop raise (don't min-rely on Shove); Tier2 → call
+        (or check if no bet); Tier3 → fold (or check if no bet);
+      - on later streets, calls `Observation::simulate(256)` and
+        delegates to the same `EquityBot::choose` threshold
+        table.
+  (c) `crates/gameroom/src/players/mod.rs` exports `PreflopBot`
+      and re-exports it from `rbp_gameroom`.
+  (d) `crates/autotrain/src/bench.rs`:
+      - adds `Baseline::Preflop` to the `Baseline` enum,
+      - extends `Baseline::as_str` with `"preflop"`,
+      - extends `Baseline::from_env` to parse `"preflop"`,
+      - wires `Baseline::Preflop` into the `run_hands` match so
+        seat 1 seats a `PreflopBot`,
+      - stamps the variant into `BenchReport.baseline` (the
+        existing `summarize` call already takes a `Baseline`
+        argument),
+      - adds a `preflop_tier_starts_with_top_pair` lib test that
+        pins `classify_pocket` for `Hand::of(Ace)+Hand::of(Ace)`,
+        `Hand::of(7)+Hand::of(7)`, and
+        `Hand::of(2)+Hand::of(7, off-suit)` so a refactor that
+        drops a tier fails before it lands,
+      - adds a `preflopbot_prefers_smallest_legal_raise` lib test
+        that drives `PreflopBot::choose` with a known legal set
+        and confirms the smallest preflop raise (not shove) is
+        chosen for Tier1.
+  (e) `crates/autotrain/tests/bench.rs` integration test
+      (gated on `database` + `DATABASE_URL` like the existing
+      STW-010 test) extends the JSON parse to assert the
+      `baseline` field is `"preflop"` when run with
+      `RBP_BENCH_BASELINE=preflop`.
+  (f) `genesis/plans/000-ceo-testnet-roadmap.md` gets a one-line
+      note marking the "stronger named baseline" item as shipped
+      (STW-012) and pointing to the v3 (`PreflopBot`) as the
+      next-iteration target if a v4 is needed.
+  Verification commands:
+  `cargo test -p rbp-gameroom --tests --lib`,
+  `cargo test -p rbp-gameroom --features database --tests --lib`,
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the new `preflop_tier_starts_with_top_pair`
+  and `preflopbot_prefers_smallest_legal_raise` lib tests in
+  `bench.rs::tests` + the extended integration test in (e);
+  no padding of unrelated suites.
+  Dependencies: STW-011 (the v2 `EquityBot` baseline provides
+  the postflop threshold table that `PreflopBot` re-uses for
+  later streets).
+  Estimated scope: S.
+  Completion signal: `trainer --bench` with
+  `RBP_BENCH_BASELINE=preflop` exits 0 on a freshly-`--reset`
+  DB and prints a parseable single-line JSON `BenchReport`
+  whose `baseline` field is `"preflop"`; the new lib tests
+  pass; `cargo test --workspace` and `cargo fmt --check` are
+  green.
   Owner files: `crates/autotrain/src/{bench,mode,lib}.rs`,
   `crates/autotrain/Cargo.toml`, `crates/gameroom/src/room.rs`,
   `crates/autotrain/tests/bench.rs`, `IMPLEMENTATION_PLAN.md`,

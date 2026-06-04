@@ -129,6 +129,11 @@ struct ParsedBench {
     win_rate_ci95: f64,
     blind: i16,
     blueprint_trained: bool,
+    /// The `baseline` field is a *string* in the JSON
+    /// (`"fish"`, `"equity"`, or `"preflop"`), not a number or
+    /// bool, so the parser keeps it as `String` and the
+    /// per-test asserts downcast to the right literal.
+    baseline: String,
 }
 
 fn parse_bench_line(line: &str) -> Option<ParsedBench> {
@@ -147,10 +152,12 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
     let mut win_rate_ci95: Option<f64> = None;
     let mut blind: Option<i16> = None;
     let mut blueprint_trained: Option<bool> = None;
+    let mut baseline: Option<String> = None;
     // Split on top-level commas. The bench JSON is a flat
-    // object of `key:number` / `key:bool` pairs, none of which
-    // contain commas, so a naive `,` split is sufficient and
-    // keeps the parser independent of any JSON crate.
+    // object of `key:number` / `key:bool` / `key:string`
+    // pairs, none of which contain commas, so a naive `,`
+    // split is sufficient and keeps the parser independent of
+    // any JSON crate.
     for kv in body.split(',') {
         let (k, v) = kv.split_once(':')?;
         let key = k.trim().trim_matches('"');
@@ -168,6 +175,11 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
             "blueprint_trained" => {
                 blueprint_trained = Some(matches!(raw, "true"));
             }
+            "baseline" => {
+                // Strip the surrounding double quotes the JSON
+                // encoder adds around the string value.
+                baseline = Some(raw.trim_matches('"').to_string());
+            }
             _ => return None,
         }
     }
@@ -182,6 +194,7 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
         win_rate_ci95: win_rate_ci95?,
         blind: blind?,
         blueprint_trained: blueprint_trained?,
+        baseline: baseline?,
     })
 }
 
@@ -304,5 +317,80 @@ fn bench_run_emits_parseable_json_with_consistent_accounting() {
         !parsed.blueprint_trained,
         "bench: blueprint_trained must be false after --reset; got {}",
         parsed.blueprint_trained
+    );
+
+    // (v) Default `RBP_BENCH_BASELINE` is `Fish`; the bench
+    // doesn't pass any env override for this run, so the
+    // `baseline` JSON field must be the v1 default literal
+    // `"fish"`. The v2 (`equity`) and v3 (`preflop`) variants
+    // get their own integration tests below so a regression
+    // that breaks the v1 default contract is caught at this
+    // assertion, not lost in a multi-baseline test.
+    assert_eq!(
+        parsed.baseline, "fish",
+        "bench: default baseline must be `fish` when RBP_BENCH_BASELINE is unset; got {:?}",
+        parsed.baseline
+    );
+}
+
+/// STW-012: the v3 `PreflopBot` named baseline must round-trip
+/// through the bench harness's `baseline` JSON field. The
+/// default-baseline test above pins the v1 default (`fish`);
+/// this test pins the v3 (`preflop`) override so a regression
+/// that drops the variant from `Baseline::as_str`,
+/// `Baseline::from_env`, or the seat-1 dispatch fails the
+/// integration test, not a downstream dashboard. Mirrors the
+/// shape of `bench_run_emits_parseable_json_with_consistent_accounting`
+/// (same `--reset` + small bench) but with
+/// `RBP_BENCH_BASELINE=preflop` set in the env extra. The
+/// `blueprint_trained` assertion is intentionally omitted
+/// here (we re-use the empty blueprint left by the previous
+/// test) so this test does not depend on the order of
+/// execution inside the same test process.
+#[test]
+fn bench_run_preflop_baseline_round_trips_through_json() {
+    if !database_url_set() {
+        return;
+    }
+    let (stdout, stderr, code) = run_trainer(
+        &["--bench"],
+        &[
+            ("RBP_BENCH_HANDS", "20"),
+            ("RBP_BENCH_BLIND", "2"),
+            ("RBP_BENCH_BASELINE", "preflop"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "trainer --bench with RBP_BENCH_BASELINE=preflop must exit 0.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('{') && l.trim_end().ends_with('}'))
+        .unwrap_or_else(|| {
+            panic!(
+                "trainer --bench (preflop) must print a single-line JSON report on stdout.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+            )
+        });
+    let parsed = parse_bench_line(line).unwrap_or_else(|| {
+        panic!(
+            "trainer --bench (preflop) stdout must be a parseable \
+             BenchReport JSON; got: {line:?}"
+        )
+    });
+    assert_eq!(
+        parsed.baseline, "preflop",
+        "bench: baseline field must be `preflop` when RBP_BENCH_BASELINE=preflop; got {:?}",
+        parsed.baseline
+    );
+    assert_eq!(
+        parsed.hands, 20,
+        "bench (preflop): hands field must equal RBP_BENCH_HANDS; got {}",
+        parsed.hands
+    );
+    assert_eq!(
+        parsed.blind, 2,
+        "bench (preflop): blind field must equal RBP_BENCH_BLIND; got {}",
+        parsed.blind
     );
 }

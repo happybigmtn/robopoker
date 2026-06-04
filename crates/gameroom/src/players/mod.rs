@@ -17,6 +17,7 @@ mod equitybot;
 mod fish;
 #[cfg(feature = "cli")]
 mod human;
+mod preflopbot;
 mod realtime;
 mod zerotemp;
 
@@ -26,5 +27,6 @@ pub use equitybot::*;
 pub use fish::*;
 #[cfg(feature = "cli")]
 pub use human::*;
+pub use preflopbot::*;
 pub use realtime::*;
 pub use zerotemp::*;

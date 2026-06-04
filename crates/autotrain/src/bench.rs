@@ -74,6 +74,7 @@ use rbp_database::Check;
 use rbp_gameroom::DatabasePlayer;
 use rbp_gameroom::EquityBot;
 use rbp_gameroom::Fish;
+use rbp_gameroom::PreflopBot;
 use rbp_gameroom::Room;
 use std::sync::Arc;
 use tokio_postgres::Client;
@@ -87,9 +88,14 @@ use tokio_postgres::Client;
 /// (STW-010). [`Baseline::Fish`] is the v1 random bot that the
 /// bench has always used; [`Baseline::Equity`] seats the
 /// `EquityBot` named baseline (Monte Carlo equity + a small
-/// threshold table on `Action` legality), so the bench result
-/// can claim "trained bot beats a *named* rule-based baseline"
-/// rather than just "beats uniform random".
+/// threshold table on `Action` legality); [`Baseline::Preflop`]
+/// seats the v3 `PreflopBot` (preflop hand-tier table + the
+/// same postflop threshold table as `EquityBot`). A trained
+/// blueprint is expected to beat all three; a downstream
+/// scraper can group reports by `baseline` to produce a
+/// "trained bot vs fish", "trained bot vs equity-bot", and
+/// "trained bot vs preflop-bot" curve from the same
+/// `BenchReport` stream.
 ///
 /// `Baseline` is `Copy + PartialEq + Debug` so the bench can
 /// (a) round-trip the chosen variant through a JSON field and
@@ -105,6 +111,13 @@ pub enum Baseline {
     /// legal action that matches a 0.50 call / 0.65 raise
     /// threshold table. Defined in `rbp_gameroom::EquityBot`.
     Equity,
+    /// Preflop-tier aware rule-based named baseline:
+    /// classifies the pocket cards into a Tier1/Tier2/Tier3
+    /// preflop hand category and picks the smallest legal
+    /// raise / call / fold respectively, then delegates to
+    /// the same `EquityBot::choose` postflop threshold table
+    /// on later streets. Defined in `rbp_gameroom::PreflopBot`.
+    Preflop,
 }
 
 impl Baseline {
@@ -118,6 +131,7 @@ impl Baseline {
         match self {
             Self::Fish => "fish",
             Self::Equity => "equity",
+            Self::Preflop => "preflop",
         }
     }
     /// Parse a baseline name from the `RBP_BENCH_BASELINE` env
@@ -130,6 +144,7 @@ impl Baseline {
         match std::env::var("RBP_BENCH_BASELINE").ok().as_deref() {
             Some("fish") => Self::Fish,
             Some("equity") => Self::Equity,
+            Some("preflop") => Self::Preflop,
             _ => DEFAULT_BENCH_BASELINE,
         }
     }
@@ -406,14 +421,15 @@ pub async fn run_hands(
         )));
         room.sit(DatabasePlayer::new(blueprint), rbp_auth::Lurker::default());
     }
-    // Seat-1 baseline dispatch. Both branches are synchronous
-    // `Player` constructors (no DB round-trip), so the bench
-    // picks the seat-1 bot at hand-setup time. A future
-    // database-backed baseline would slot in here as a third
-    // arm of the `match`.
+    // Seat-1 baseline dispatch. All three branches are
+    // synchronous `Player` constructors (no DB round-trip),
+    // so the bench picks the seat-1 bot at hand-setup time.
+    // A future database-backed baseline would slot in here
+    // as a fourth arm of the `match`.
     match baseline {
         Baseline::Fish => room.sit(Fish, rbp_auth::Lurker::default()),
         Baseline::Equity => room.sit(EquityBot, rbp_auth::Lurker::default()),
+        Baseline::Preflop => room.sit(PreflopBot, rbp_auth::Lurker::default()),
     }
     let mut per_hand = Vec::with_capacity(k);
     for _ in 0..k {
@@ -672,11 +688,12 @@ mod tests {
     fn baseline_as_str_matches_published_strings() {
         assert_eq!(Baseline::Fish.as_str(), "fish");
         assert_eq!(Baseline::Equity.as_str(), "equity");
+        assert_eq!(Baseline::Preflop.as_str(), "preflop");
     }
 
     /// `Baseline::from_env` honours `RBP_BENCH_BASELINE` for
-    /// known values (`fish`, `equity`) and falls back to
-    /// `DEFAULT_BENCH_BASELINE` for missing/unset/unknown
+    /// known values (`fish`, `equity`, `preflop`) and falls back
+    /// to `DEFAULT_BENCH_BASELINE` for missing/unset/unknown
     /// values. Same save/restore discipline as
     /// `bench_hands_env_override_round_trip`.
     #[test]
@@ -695,6 +712,10 @@ mod tests {
         }
         assert_eq!(Baseline::from_env(), Baseline::Equity);
         unsafe {
+            std::env::set_var("RBP_BENCH_BASELINE", "preflop");
+        }
+        assert_eq!(Baseline::from_env(), Baseline::Preflop);
+        unsafe {
             std::env::set_var("RBP_BENCH_BASELINE", "not-a-baseline");
         }
         assert_eq!(Baseline::from_env(), DEFAULT_BENCH_BASELINE);
@@ -712,9 +733,9 @@ mod tests {
     /// `summarize` must stamp the caller-supplied `Baseline`
     /// straight into the `BenchReport` so a downstream scraper
     /// can group reports by baseline without re-parsing the
-    /// raw `per_hand` vector. This test pins both the v1
-    /// default (`Fish`) and the v2 named baseline (`Equity`)
-    /// paths in one go.
+    /// raw `per_hand` vector. This test pins the v1 default
+    /// (`Fish`), the v2 named baseline (`Equity`), and the v3
+    /// preflop-tier baseline (`Preflop`) paths in one go.
     #[test]
     fn summarize_stamps_baseline_into_report() {
         let per_hand = vec![0_i16; 4];
@@ -724,6 +745,9 @@ mod tests {
         let r_equity = summarize(&per_hand, 2, Baseline::Equity);
         assert_eq!(r_equity.baseline, Baseline::Equity);
         assert!(r_equity.to_json().contains("\"baseline\":\"equity\""));
+        let r_preflop = summarize(&per_hand, 2, Baseline::Preflop);
+        assert_eq!(r_preflop.baseline, Baseline::Preflop);
+        assert!(r_preflop.to_json().contains("\"baseline\":\"preflop\""));
     }
 
     /// `DEFAULT_BENCH_BASELINE` must be `Baseline::Fish` to
@@ -735,5 +759,97 @@ mod tests {
     #[test]
     fn default_bench_baseline_is_fish() {
         assert_eq!(DEFAULT_BENCH_BASELINE, Baseline::Fish);
+    }
+
+    // -----------------------------------------------------------------
+    // STW-012: preflop-tier aware baseline tests.
+    //
+    // The bench crate ships `Baseline::Preflop` and seats a
+    // `rbp_gameroom::PreflopBot` at seat 1 when the variant is
+    // selected. These two lib tests pin the public `PreflopBot`
+    // API that the bench depends on: the preflop hand-tier table
+    // (one Tier1, one Tier2, one Tier3 example so a refactor that
+    // drops a tier fails before it lands) and the
+    // smallest-legal-raise dispatch (a real preflop open is
+    // 2-3bb, not a 100bb shove). The detailed unit-by-hand tests
+    // live in `rbp_gameroom::preflopbot`; these two tests
+    // re-assert the bench's *contract* with `PreflopBot` from the
+    // bench crate's side, so a future refactor that breaks the
+    // contract (e.g. changes `classify_pocket` to return
+    // `Tier3Fold` for AA, or changes `decide_preflop` to shove
+    // on Tier1) fails the bench crate's tests too.
+    // -----------------------------------------------------------------
+
+    use rbp_gameroom::PreflopBot;
+    use rbp_gameroom::PreflopTier;
+
+    /// `PreflopBot::classify_pocket` must still classify
+    /// pocket Aces (Tier 1), small pairs (Tier 2), and
+    /// 72o (Tier 3) the way the gameroom crate's own tests
+    /// do. A refactor that drops a tier (e.g. returns
+    /// `Tier2Call` for AA) fails the bench crate too.
+    #[test]
+    fn preflop_tier_starts_with_top_pair() {
+        let aa: rbp_cards::Hand = {
+            let cards: Vec<rbp_cards::Card> = vec![
+                rbp_cards::Card::from((rbp_cards::Rank::Ace, rbp_cards::Suit::C)),
+                rbp_cards::Card::from((rbp_cards::Rank::Ace, rbp_cards::Suit::D)),
+            ];
+            rbp_cards::Hand::from(cards)
+        };
+        let seven_seven: rbp_cards::Hand = {
+            let cards: Vec<rbp_cards::Card> = vec![
+                rbp_cards::Card::from((rbp_cards::Rank::Seven, rbp_cards::Suit::C)),
+                rbp_cards::Card::from((rbp_cards::Rank::Seven, rbp_cards::Suit::H)),
+            ];
+            rbp_cards::Hand::from(cards)
+        };
+        let seven_two_offsuit: rbp_cards::Hand = {
+            let cards: Vec<rbp_cards::Card> = vec![
+                rbp_cards::Card::from((rbp_cards::Rank::Seven, rbp_cards::Suit::C)),
+                rbp_cards::Card::from((rbp_cards::Rank::Two, rbp_cards::Suit::D)),
+            ];
+            rbp_cards::Hand::from(cards)
+        };
+        assert_eq!(
+            PreflopBot::classify_pocket(aa, 2),
+            PreflopTier::Tier1Raise,
+            "AA must classify as Tier 1 (raise) for the preflop baseline"
+        );
+        assert_eq!(
+            PreflopBot::classify_pocket(seven_seven, 2),
+            PreflopTier::Tier2Call,
+            "77 must classify as Tier 2 (call) for the preflop baseline"
+        );
+        assert_eq!(
+            PreflopBot::classify_pocket(seven_two_offsuit, 2),
+            PreflopTier::Tier3Fold,
+            "72o must classify as Tier 3 (fold) for the preflop baseline"
+        );
+    }
+
+    /// `PreflopBot::decide_preflop` with a Tier 1 hand and a
+    /// full preflop legal set (Shove 100, Raise 8, Raise 4,
+    /// Raise 2, Call 2, Check, Fold) must pick the *smallest*
+    /// preflop raise (2bb open), not a 100bb shove. A real
+    /// preflop open sizes 2-3bb, and the bench relies on
+    /// `PreflopBot` not min-raise/relying on Shove at Tier 1.
+    #[test]
+    fn preflopbot_prefers_smallest_legal_raise() {
+        let legal = vec![
+            rbp_gameplay::Action::Shove(100),
+            rbp_gameplay::Action::Raise(8),
+            rbp_gameplay::Action::Raise(4),
+            rbp_gameplay::Action::Raise(2),
+            rbp_gameplay::Action::Call(2),
+            rbp_gameplay::Action::Check,
+            rbp_gameplay::Action::Fold,
+        ];
+        let chosen = PreflopBot::decide_preflop(&legal, PreflopTier::Tier1Raise);
+        assert_eq!(
+            chosen,
+            rbp_gameplay::Action::Raise(2),
+            "PreflopBot Tier 1 must pick the smallest legal raise (2bb open), not Shove(100); got {chosen:?}"
+        );
     }
 }
