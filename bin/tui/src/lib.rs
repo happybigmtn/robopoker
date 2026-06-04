@@ -549,7 +549,7 @@ impl PreviewLog {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Control {
     pub id: &'static str,
     pub key: &'static str,
@@ -574,12 +574,26 @@ pub struct Viewport {
     pub height: u16,
 }
 
+/// A single QA check result. The `id` is a stable dotted slug a
+/// downstream testnet dashboard can grep on (e.g. `tui.chrome.brand`).
+/// The `label` is a human-readable description. `passed` is the
+/// boolean outcome. `detail` is a one-line context the operator
+/// can read to understand what the check actually saw.
+#[derive(Clone, Debug, Serialize)]
+pub struct QaCheck {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub passed: bool,
+    pub detail: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct QaReport {
     pub verdict: &'static str,
     pub assertions: Vec<&'static str>,
     pub frame_hash: u64,
     pub controls: usize,
+    pub checks: Vec<QaCheck>,
 }
 
 #[derive(Debug, Serialize)]
@@ -603,19 +617,37 @@ impl HeadlessReport {
             source: "seeded local random-policy preview + rbp-cards evaluator",
             posture: "read-only; no server, database, training, wagering, or network path",
         };
+
+        // The QA gate is a real computed gate (STW-021): each check
+        // actually runs against the rendered frame / controls / app
+        // state, and the top-level `verdict` is the AND of every
+        // check's `passed` field. The backward-compat `assertions`
+        // field is repurposed to a `Vec<&'static str>` of the
+        // *failing* check ids so the existing receipt shape stays
+        // stable: a fully green run still has `assertions: []`.
+        let checks = vec![
+            check_chrome_branding(&frame),
+            check_chrome_players(&frame),
+            check_chrome_posture(&frame),
+            check_viewport_bounds(app, width, height),
+            check_controls_unique(&controls),
+            check_controls_keys_unique(&controls),
+            check_controls_count(&controls),
+            check_cards_evaluator(app),
+            check_help_toggle(&controls),
+        ];
+        let verdict = compute_verdict(&checks);
+        let assertions: Vec<&'static str> = checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| check.id)
+            .collect();
         let qa = QaReport {
-            verdict: "passed",
-            assertions: vec![
-                "renders table-first poker surface",
-                "starts before showdown and advances one beat per operator input",
-                "exports stable controls",
-                "surfaces read-only posture",
-                "includes keyboard help",
-                "uses real rbp-cards hand evaluation",
-                "interactive transitions are wired through tachyonfx",
-            ],
+            verdict,
+            assertions,
             frame_hash: hash_frame(&frame),
             controls: controls.len(),
+            checks,
         };
 
         Self {
@@ -624,6 +656,242 @@ impl HeadlessReport {
             frame,
             qa,
         }
+    }
+}
+
+/// Compute the top-level QA `verdict`: `"passed"` when every check
+/// passed, `"failed"` if any single check failed. A testnet
+/// dashboard can grep `tui.qa.json` for the `verdict` field to gate
+/// a release on this output.
+#[must_use]
+pub fn compute_verdict(checks: &[QaCheck]) -> &'static str {
+    if checks.iter().all(|check| check.passed) {
+        "passed"
+    } else {
+        "failed"
+    }
+}
+
+fn check_chrome_branding(frame: &str) -> QaCheck {
+    let id = "tui.chrome.brand";
+    let label = "frame contains the ROBOPOKER brand chrome";
+    let passed = frame.contains("ROBOPOKER");
+    let detail = if passed {
+        "ROBOPOKER header present".to_owned()
+    } else {
+        "ROBOPOKER header missing from the rendered frame".to_owned()
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_chrome_players(frame: &str) -> QaCheck {
+    let id = "tui.chrome.players";
+    let label = "frame names both the hero and the fish seats";
+    let has_hero = frame.contains("YOU");
+    let has_fish = frame.contains("FISH");
+    let passed = has_hero && has_fish;
+    let detail = match (has_hero, has_fish) {
+        (true, true) => "both YOU and FISH seat labels present".to_owned(),
+        (false, true) => "FISH label present, YOU label missing".to_owned(),
+        (true, false) => "YOU label present, FISH label missing".to_owned(),
+        (false, false) => "neither YOU nor FISH seat label present".to_owned(),
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_chrome_posture(frame: &str) -> QaCheck {
+    let id = "tui.chrome.posture";
+    let label = "frame surfaces the read-only offline posture";
+    let has_offline = frame.contains("offline");
+    let has_read_only = frame.contains("read-only");
+    let passed = has_offline && has_read_only;
+    let detail = match (has_offline, has_read_only) {
+        (true, true) => "offline + read-only posture markers both present".to_owned(),
+        (false, true) => "read-only marker present, offline marker missing".to_owned(),
+        (true, false) => "offline marker present, read-only marker missing".to_owned(),
+        (false, false) => "neither offline nor read-only posture marker present".to_owned(),
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_viewport_bounds(app: &App, width: u16, height: u16) -> QaCheck {
+    let id = "tui.viewport.bounds";
+    let label = "rendered lines fit inside the requested viewport";
+    let lines = render_lines(app, width, height);
+    let row_count = lines.len() as u16;
+    let row_within = row_count <= height;
+    let col_within = lines
+        .iter()
+        .all(|line| line.chars().count() <= width as usize);
+    let passed = row_within && col_within;
+    let detail = if passed {
+        format!("{row_count} rows of ≤{width} cols fits inside {height}-row viewport")
+    } else {
+        let over_cols: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let count = line.chars().count();
+                if count > width as usize {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !row_within {
+            format!("row count {row_count} exceeds viewport height {height}")
+        } else {
+            format!(
+                "{} line(s) exceed viewport width {width} (first overflowing line: {:?})",
+                over_cols.len(),
+                over_cols.first().copied()
+            )
+        }
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_controls_unique(controls: &[Control]) -> QaCheck {
+    let id = "tui.controls.ids_unique";
+    let label = "every control id is unique";
+    let total = controls.len();
+    let mut sorted = controls.to_vec();
+    sorted.sort_by_key(|c| c.id);
+    let unique = sorted.windows(2).all(|pair| pair[0].id != pair[1].id);
+    let passed = total > 0 && unique;
+    let detail = if passed {
+        format!("{total} control id(s) are all unique")
+    } else if total == 0 {
+        "controls() returned an empty vector".to_owned()
+    } else {
+        let mut sorted = controls.to_vec();
+        sorted.sort_by_key(|c| c.id);
+        let dup = sorted
+            .windows(2)
+            .find(|pair| pair[0].id == pair[1].id)
+            .map(|pair| pair[0].id)
+            .unwrap_or("<unknown>");
+        format!("duplicate control id detected: {dup}")
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_controls_keys_unique(controls: &[Control]) -> QaCheck {
+    let id = "tui.controls.keys_unique";
+    let label = "every control key is unique";
+    let total = controls.len();
+    let mut sorted = controls.to_vec();
+    sorted.sort_by_key(|c| c.key);
+    let unique = sorted.windows(2).all(|pair| pair[0].key != pair[1].key);
+    let passed = total > 0 && unique;
+    let detail = if passed {
+        format!("{total} control key(s) are all unique")
+    } else {
+        let mut sorted = controls.to_vec();
+        sorted.sort_by_key(|c| c.key);
+        let dup = sorted
+            .windows(2)
+            .find(|pair| pair[0].key == pair[1].key)
+            .map(|pair| pair[0].key)
+            .unwrap_or("<unknown>");
+        format!("duplicate control key detected: {dup}")
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_controls_count(controls: &[Control]) -> QaCheck {
+    let id = "tui.controls.count";
+    let label = "controls() returns a non-empty vector of enabled entries";
+    let count = controls.len();
+    let all_enabled = controls.iter().all(|c| c.enabled);
+    let passed = count > 0 && all_enabled;
+    let detail = if passed {
+        format!("{count} control(s), all enabled")
+    } else if count == 0 {
+        "controls() returned an empty vector".to_owned()
+    } else {
+        let disabled = controls.iter().filter(|c| !c.enabled).count();
+        format!("{disabled} of {count} control(s) are disabled")
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_cards_evaluator(app: &App) -> QaCheck {
+    let id = "tui.cards.evaluator";
+    let label = "the hero / fish hand evaluator returned a real rbp-cards strength";
+    let winner = app.preview.winner;
+    let has_known_winner = matches!(winner, "Hero" | "Fish" | "Split");
+    let hero_strength = app.preview.hero.strength.as_str();
+    let fish_strength = app.preview.opponent.strength.as_str();
+    let strengths_populated = !hero_strength.is_empty() && !fish_strength.is_empty();
+    let passed = has_known_winner && strengths_populated;
+    let detail = if passed {
+        format!("winner={winner} hero={hero_strength} fish={fish_strength}")
+    } else if !has_known_winner {
+        format!("winner {winner:?} is not one of {{Hero, Fish, Split}}")
+    } else {
+        format!(
+            "evaluator returned an empty strength: hero={hero_strength:?} fish={fish_strength:?}"
+        )
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
+    }
+}
+
+fn check_help_toggle(controls: &[Control]) -> QaCheck {
+    let id = "tui.controls.help";
+    let label = "a keyboard help toggle is exposed in the controls list";
+    let passed = controls.iter().any(|c| c.id == "help.toggle");
+    let detail = if passed {
+        "help.toggle control is exposed".to_owned()
+    } else {
+        "no help.toggle control is in the controls list".to_owned()
+    };
+    QaCheck {
+        id,
+        label,
+        passed,
+        detail,
     }
 }
 
@@ -1507,8 +1775,9 @@ fn human_strength(strength: &Strength) -> String {
 }
 
 fn receipt_markdown(app: &App, report: &HeadlessReport) -> String {
-    format!(
-        "# robopoker TUI QA Receipt\n\n- verdict: `{}`\n- viewport: `{}x{}`\n- frame hash: `{}`\n- focus: `{:?}`\n- seed: `{}`\n- winner: `{}`\n- posture: `{}`\n\nArtifacts in this directory are generated by `robopoker-tui --headless`.\n",
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# robopoker TUI QA Receipt\n\n- verdict: `{}`\n- viewport: `{}x{}`\n- frame hash: `{}`\n- focus: `{:?}`\n- seed: `{}`\n- winner: `{}`\n- posture: `{}`\n- checks: `{} total, {} failed`\n",
         report.qa.verdict,
         report.surface.viewport.width,
         report.surface.viewport.height,
@@ -1516,8 +1785,23 @@ fn receipt_markdown(app: &App, report: &HeadlessReport) -> String {
         app.focus,
         app.preview.seed,
         app.preview.winner,
-        report.surface.posture
-    )
+        report.surface.posture,
+        report.qa.checks.len(),
+        report.qa.assertions.len(),
+    ));
+    out.push_str("\n## QA Checks\n\n");
+    out.push_str(
+        "Each line below is `QA-CHECK <id> <passed|failed> <detail>` so a testnet\ndashboard can `grep '^QA-CHECK tui\\.' receipts/.../tui.receipt.md` to detect a\nregression without parsing JSON.\n\n",
+    );
+    for check in &report.qa.checks {
+        let state = if check.passed { "passed" } else { "failed" };
+        out.push_str(&format!(
+            "- QA-CHECK {} {} — {}\n",
+            check.id, state, check.detail
+        ));
+    }
+    out.push_str("\nArtifacts in this directory are generated by `robopoker-tui --headless`.\n");
+    out
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -2027,6 +2311,208 @@ mod tests {
         assert!(plain.contains("ROBOPOKER"));
         assert!(plain.contains("FISH"));
         assert!(plain.contains("YOU"));
+    }
+
+    // ---- STW-021: headless QA report is a real gate ----
+
+    /// Green-path gate: every check passes for the default app and
+    /// the top-level verdict is `"passed"`. The `assertions` field
+    /// (the backward-compat surface the existing
+    /// `headless_artifacts_are_machine_readable` test grep'd on) is
+    /// empty for a fully green run.
+    #[test]
+    fn qa_gate_passes_for_default_app() {
+        let app = App::default();
+        let report = HeadlessReport::capture(&app, 96, 28);
+
+        assert_eq!(report.qa.verdict, "passed");
+        assert!(
+            report.qa.assertions.is_empty(),
+            "a green run should have no failing-check ids in qa.assertions, got {:?}",
+            report.qa.assertions
+        );
+        assert!(
+            !report.qa.checks.is_empty(),
+            "the QA report should expose a per-check breakdown"
+        );
+        for check in &report.qa.checks {
+            assert!(
+                check.passed,
+                "check {} unexpectedly failed: {}",
+                check.id, check.detail
+            );
+        }
+    }
+
+    /// All expected check ids are present in the report. A future
+    /// refactor that drops a check (or renames a check id without
+    /// updating the dashboard's grep pattern) fails this test.
+    #[test]
+    fn qa_gate_includes_every_expected_check_id() {
+        let app = App::default();
+        let report = HeadlessReport::capture(&app, 96, 28);
+        let expected = [
+            "tui.chrome.brand",
+            "tui.chrome.players",
+            "tui.chrome.posture",
+            "tui.viewport.bounds",
+            "tui.controls.ids_unique",
+            "tui.controls.keys_unique",
+            "tui.controls.count",
+            "tui.cards.evaluator",
+            "tui.controls.help",
+        ];
+        let present: Vec<&'static str> = report.qa.checks.iter().map(|c| c.id).collect();
+        for needle in expected {
+            assert!(
+                present.contains(&needle),
+                "expected check id `{needle}` missing from report.qa.checks (got {present:?})"
+            );
+        }
+    }
+
+    /// `compute_verdict` is the pure AND of every check's `passed`
+    /// field. A red check flips the verdict to `"failed"` regardless
+    /// of the other checks' state.
+    #[test]
+    fn compute_verdict_flips_to_failed_on_any_check_failure() {
+        let green = vec![QaCheck {
+            id: "demo.ok",
+            label: "always-ok",
+            passed: true,
+            detail: "demo".to_owned(),
+        }];
+        assert_eq!(compute_verdict(&green), "passed");
+
+        let mixed = vec![
+            QaCheck {
+                id: "demo.ok",
+                label: "always-ok",
+                passed: true,
+                detail: "demo".to_owned(),
+            },
+            QaCheck {
+                id: "demo.bad",
+                label: "always-failing",
+                passed: false,
+                detail: "demo".to_owned(),
+            },
+        ];
+        assert_eq!(compute_verdict(&mixed), "failed");
+    }
+
+    /// The `tui.chrome.brand` check fires when the frame loses its
+    /// `ROBOPOKER` header. The check is the smallest direct trigger
+    /// we can hand-craft (it does not depend on the app state or
+    /// controls); the `assertions` field then contains the failing
+    /// check id, the top-level verdict flips to `"failed"`, and the
+    /// receipt markdown shows a `QA-CHECK tui.chrome.brand failed`
+    /// line.
+    #[test]
+    fn qa_gate_flips_to_failed_when_chrome_brand_missing() {
+        let broken = check_chrome_branding(
+            "this is some text without the brand header, and no FISH or YOU either",
+        );
+        assert_eq!(broken.id, "tui.chrome.brand");
+        assert!(!broken.passed);
+        assert!(broken.detail.contains("ROBOPOKER"));
+
+        let one_failing = vec![broken];
+        let report_for_one_failing = HeadlessReport {
+            surface: SurfaceMeta {
+                app_id: "robopoker-tui",
+                schema_version: SURFACE_SCHEMA_VERSION,
+                viewport: Viewport {
+                    width: 80,
+                    height: 24,
+                },
+                theme: "black-chrome-minimal",
+                source: "test",
+                posture: "read-only",
+            },
+            controls: vec![],
+            frame: String::new(),
+            qa: QaReport {
+                verdict: compute_verdict(&one_failing),
+                assertions: one_failing
+                    .iter()
+                    .filter(|c| !c.passed)
+                    .map(|c| c.id)
+                    .collect(),
+                frame_hash: 0,
+                controls: 0,
+                checks: one_failing.clone(),
+            },
+        };
+        assert_eq!(report_for_one_failing.qa.verdict, "failed");
+        assert_eq!(
+            report_for_one_failing.qa.assertions,
+            vec!["tui.chrome.brand"],
+            "the failing check id should land in qa.assertions"
+        );
+
+        // The receipt markdown exposes the per-check `id` and
+        // `passed` state in a `## QA Checks` section so a testnet
+        // dashboard can grep the receipt without parsing JSON. The
+        // prefix `QA-CHECK tui.` is the contract the dashboard
+        // scrapes.
+        let rendered = receipt_markdown_for_test(&App::default(), &report_for_one_failing);
+        assert!(rendered.contains("verdict: `failed`"));
+        assert!(rendered.contains("- QA-CHECK tui.chrome.brand failed"));
+        assert!(rendered.contains("## QA Checks"));
+    }
+
+    /// Receipt markdown lists every check with a `QA-CHECK <id>
+    /// <passed|failed>` line a dashboard can grep on. This is the
+    /// end-to-end contract for the headless receipt shape.
+    #[test]
+    fn receipt_markdown_lists_every_check_as_qa_check_line() {
+        let app = App::default();
+        let report = HeadlessReport::capture(&app, 96, 28);
+        let rendered = receipt_markdown_for_test(&app, &report);
+
+        assert!(rendered.contains("verdict: `passed`"));
+        assert!(rendered.contains("## QA Checks"));
+        for check in &report.qa.checks {
+            let line = format!("- QA-CHECK {} passed", check.id);
+            assert!(
+                rendered.contains(&line),
+                "expected `{line}` in tui.receipt.md:\n{rendered}"
+            );
+        }
+    }
+
+    /// `controls()` is the public surface a testnet dashboard
+    /// scrapes. The unique-id + unique-key + count + help-toggle
+    /// checks guard against a refactor that adds a control without
+    /// wiring it through the QA gate. Each is a unit test on the
+    /// check fn, not on the full capture, so a regression points
+    /// straight at the check.
+    #[test]
+    fn per_check_guards_match_published_controls_surface() {
+        let controls = controls();
+        let ids_check = check_controls_unique(&controls);
+        let keys_check = check_controls_keys_unique(&controls);
+        let count_check = check_controls_count(&controls);
+        let help_check = check_help_toggle(&controls);
+
+        assert!(ids_check.passed, "ids check: {}", ids_check.detail);
+        assert!(keys_check.passed, "keys check: {}", keys_check.detail);
+        assert!(count_check.passed, "count check: {}", count_check.detail);
+        assert!(help_check.passed, "help check: {}", help_check.detail);
+        assert_eq!(ids_check.id, "tui.controls.ids_unique");
+        assert_eq!(keys_check.id, "tui.controls.keys_unique");
+        assert_eq!(count_check.id, "tui.controls.count");
+        assert_eq!(help_check.id, "tui.controls.help");
+    }
+
+    /// Test-only wrapper over the private `receipt_markdown` so the
+    /// lib tests can inspect the per-check breakdown a testnet
+    /// dashboard would scrape. Kept here (not in the production
+    /// module) so the public surface of `bin/tui` does not grow a
+    /// `receipt_markdown` re-export the dashboard doesn't need.
+    fn receipt_markdown_for_test(app: &App, report: &HeadlessReport) -> String {
+        super::receipt_markdown(app, report)
     }
 
     fn strip_ansi_for_test(value: &str) -> String {

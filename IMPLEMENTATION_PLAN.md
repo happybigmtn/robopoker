@@ -1283,12 +1283,94 @@ parallel test proof`.
 
 ## Active items (worker-ready)
 
-The most recent slice in the active queue is below. It is shipped
-(committed on `main`); the next open slice will be promoted from
-`genesis/plans/` or the next `auto steward --report-only` pass before
-a worker claims a new card. If neither surfaces a P0 / SEC /
-mainnet-blocking item, the next claimable slice is whatever the
-planner's `PROMOTIONS.md` ranks highest.
+The most recent shipped slice is `STW-020` (workspace parallel
+proof runbook). The CEO roadmap's `## Immediate P0` list is
+**stale** — all five P0 rows (`P0-schema` / `P0-hand-roundtrip` /
+`P0-smoke` / `P0-bench` / `P0-auth`) are SHIPPED per the prose
+on lines 5-18 of `genesis/plans/000-ceo-testnet-roadmap.md` and
+the `steward/DRIFT.md` table. The next open P0 / mainnet-blocking
+item is `bin/tui`, the read-only Ratatui dashboard the README
+documents as a public surface and `steward/DRIFT.md` flags as an
+**ORPHAN** (live code, no STW row). The slice below promotes
+the TUI's headless QA report from a static "always-passed"
+string into a real gate with a per-check breakdown a CI worker
+can grep when an invariant breaks.
+
+- [ ] `STW-021` `robopoker-tui --headless` QA report becomes a
+  real gate. Today the headless mode writes a `tui.qa.json`
+  whose `verdict` is the literal string `"passed"` and whose
+  `assertions` is a static `Vec<&'static str>` — the QA report
+  always says pass regardless of what the surface actually
+  contains, so a CI worker that depends on the headless mode
+  for visual regression has no real signal. STW-021 turns the
+  `QaReport` into a real computed gate: (a) a new
+  `QaCheck { id, label, passed, detail }` struct holds the
+  per-check outcome; (b) the `HeadlessReport::capture` path
+  runs every check (chrome strings present, viewport bounds
+  honoured, controls have unique ids + keys, the `controls`
+  count matches the actual `controls()` vector length, the
+  hand-evaluation surface is wired to `rbp-cards`, the
+  read-only posture is intact) and records the boolean
+  outcome + a one-line `detail` per check; (c) the top-level
+  `verdict` is the *AND* of every check's `passed` field
+  (i.e. `verdict = "passed"` only when every check passed;
+  any single failure flips the verdict to `"failed"`); (d)
+  `receipt_markdown` shows the per-check `id` and `passed`
+  state in a `## QA Checks` section so a testnet dashboard
+  can `grep '^QA-CHECK tui\\..* ' receipts/.../tui.receipt.md`
+  to detect a regression without parsing JSON; (e) the
+  `QaReport.assertions` field is repurposed to a
+  `Vec<&'static str>` of the *failing* check ids (so the
+  existing receipt shape stays backward-compatible: a fully
+  green run has `assertions: []`; a failing run lists the ids
+  of the checks that failed). The TUI is read-only — no
+  server, database, training, wagering, or network path is
+  touched. Owner files: `bin/tui/src/lib.rs` (new `QaCheck`
+  struct + check fns + `verdict` recompute + `receipt_markdown`
+  QA Checks section), `bin/tui/src/main.rs` (no change — the
+  headless dispatch is unchanged), `IMPLEMENTATION_PLAN.md`
+  (this row), `genesis/plans/000-ceo-testnet-roadmap.md`
+  (one-line note: TUI headless QA promoted from string to
+  real gate as STW-021). Scope boundary: do NOT change the
+  public `HeadlessReport` field set (the testnet dashboard
+  scrapes `surface` / `controls` / `frame` / `qa` /
+  `verdict` / `controls` / `frame_hash`); do NOT add a
+  third-party assertion library; do NOT introduce a
+  dependency on `serde_yaml` / `toml` / `assert-json-diff`
+  for the receipt format; do NOT change the interactive
+  (`--headless=false`) loop; do NOT change the `tachyonfx`
+  motion layer; do NOT change the `rbp-cards` integration
+  path; do NOT change the `tui.qa.json` schema-version
+  wiring (the existing `tui.surface.json` `schema_version`
+  is a separate, stable field). Verification commands:
+  `cargo test -p robopoker-tui --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt --check`,
+  `cargo run -p robopoker-tui -- --headless --export-dir
+  .auto/tui-stw021 --seed 49363` (smoke the headless
+  capture against the promoted gate and confirm the
+  produced `tui.qa.json` has a per-check `id` array and a
+  computed `verdict`). Required tests: the new lib tests in
+  `bin/tui/src/lib.rs::tests` (a green-path test that
+  asserts every check's `passed` is `true` and the
+  top-level `verdict` is `"passed"`, a red-path test that
+  drives `HeadlessReport::capture` against a fixture that
+  breaks the chrome-contains-ROBOPOKER check and asserts
+  the top-level `verdict` flips to `"failed"` and the
+  failing check id is in `qa.assertions` and the receipt
+  markdown, and a per-check test that asserts every
+  expected check id is in the report so a future
+  refactor that drops a check fails CI). Dependencies:
+  none. Estimated scope: S. Completion signal:
+  `cargo run -p robopoker-tui -- --headless --export-dir
+  .auto/tui-stw021` writes a `tui.qa.json` whose `verdict`
+  is `"passed"` and whose `checks` array has one entry
+  per invariant; the red-path test passes; the
+  `tui.receipt.md` includes the new `## QA Checks` section
+  with one `QA-CHECK tui.<id> passed|failed` line per
+  check; `cargo test --workspace` and `cargo fmt --check`
+  are green; the workspace is one coherent commit with
+  no orphan code.
 
 - [x] `STW-019` testnet live launch proof runbook + receipt bundle:
   the HAZARDS table classifies `testnet-live-proof` as
