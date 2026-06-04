@@ -58,16 +58,26 @@ if [ "${SKIP_BUILD}" != "1" ]; then
   fi
 fi
 
-# The recursive integration test
+# The recursive integration tests
 # (crates/autotrain/tests/workspace_parallel_proof.rs::
-#  `runbook_run_exits_zero_with_single_clean_workspace_run`)
-# spawns this very script. If we don't filter it out, the script
-# re-runs cargo test --workspace which re-runs the test which
-# re-spawns the script → infinite recursion. Skip by test-name;
-# the test name is a stable contract (covered by the same
+#  `runbook_run_exits_zero_with_single_clean_workspace_run`
+#  and
+#  crates/autotrain/tests/workspace_parallel_proof_three.rs::
+#  `run_three_consecutive_clean_gameplay_lib_test_runs`
+#  / `script_drives_three_consecutive_runs_in_default_mode`
+#  / `summary_headline_format_contains_runs_and_failures`)
+# spawn this very script (or the cargo test invocations the
+# script drives). If we don't filter them out, the script
+# re-runs cargo test --workspace which re-runs the tests
+# which re-spawn the script or its cargo invocations
+# → infinite recursion. Skip by test-name; the test names
+# are stable contracts (covered by the same
 # `crates/autotrain/tests/workspace_parallel_proof.rs` shape
-# test) so the filter survives future refactors.
-RECURSIVE_SKIP='--skip=runbook_run_exits_zero_with_single_clean_workspace_run'
+# test and the STW-030
+# `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+# `summary_headline_format_contains_runs_and_failures`
+# shape test) so the filter survives future refactors.
+RECURSIVE_SKIP='--skip=runbook_run_exits_zero_with_single_clean_workspace_run --skip=run_three_consecutive_clean_gameplay_lib_test_runs --skip=script_drives_three_consecutive_runs_in_default_mode --skip=summary_headline_format_contains_runs_and_failures'
 
 failures=0
 for run in $(seq 1 "${RUNS}"); do

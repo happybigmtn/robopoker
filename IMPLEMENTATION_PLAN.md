@@ -18,6 +18,166 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+- [x] `STW-030` `verification:workspace-parallel` mainnet-block
+  hinge close-out: the `steward/HINGES.md` rank #2 hinge
+  (also listed in `steward/HAZARDS.md` as a mainnet-block
+  hazard) calls for "three consecutive
+  `cargo test --workspace -- --test-threads=4` runs
+  pass, or a minimal deterministic fix lands with
+  a regression test/proof." The historical flake
+  at `crates/gameplay/src/game.rs:1397`
+  (`bust_prevents_next`) was closed in two layers:
+  STW-005 relaxed the `bust_prevents_next` assertion
+  to pot-conservation (the only invariant that holds
+  on every legal board, not just the
+  winner-takes-all boards), and STW-020 added the
+  64-seed `bust_prevents_next_deterministic` lib
+  test that threads a seeded `StdRng` through a new
+  `Deck::deal_with` injection seam so the heads-up
+  all-in showdown is bit-exactly reproducible. What
+  remained open was *mechanical CI evidence* that the
+  fix is not just present but *always green* in the
+  `cargo test --workspace -- --test-threads=4`
+  concurrency regime the script's `RECURSIVE_SKIP`
+  filter is meant to keep stable. STW-030 lands a
+  new no-DB integration test
+  `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+  with three sub-tests: (a) the *in-CI* 3-consecutive
+  proof `run_three_consecutive_clean_gameplay_lib_test_runs`
+  drives `cargo test -p rbp-gameplay --lib --
+  --test-threads=4` three consecutive times (the
+  gameplay crate is the crate the historical flake
+  lived in, so a 3-consecutive green of *just*
+  gameplay is the cheapest always-CI proof that the
+  fix is live and the flake is dead) and asserts
+  every run exits 0, prints `test result: ok. 111
+  passed`, and the three `passed` counts are
+  identical; (b) the *companion-script* pin
+  `script_drives_three_consecutive_runs_in_default_mode`
+  drives the existing
+  `scripts/workspace-parallel-proof.sh` runbook with
+  `RBP_WORKSPACE_PARALLEL_RUNS=1` (the CI-bounded
+  mode, mirroring the sibling
+  `runbook_run_exits_zero_with_single_clean_workspace_run`
+  design in `workspace_parallel_proof.rs`) and
+  asserts the script exits 0 and prints
+  `workspace parallel proof complete: runs=1
+  failures=0`; (c) the static `SUMMARY.txt`
+  printf-format pin
+  `summary_headline_format_contains_runs_and_failures`
+  greps the runbook script for the ordered
+  `runs=${RUNS}` / `failures=${failures}` pair
+  contract. The new `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET=1`
+  env knob lets an operator mute the per-run
+  `stdout` echo without changing the
+  exit-code contract. The accompanying
+  `scripts/workspace-parallel-proof.sh` remains
+  the canonical 3-consecutive *full-workspace*
+  proof (operator / nightly path); STW-030 adds
+  the cheap in-CI proof so a future regression in
+  `bust_prevents_next` or any gameplay lib test
+  fails `cargo test --workspace` on a single
+  failed run of the new
+  `run_three_consecutive_clean_gameplay_lib_test_runs`
+  test, *without* requiring a nightly run of the
+  shell script. The test is no-DB, runs in
+  `cargo test --workspace` (alongside the existing
+  `workspace_parallel_proof.rs` and
+  `plan_staleness.rs` integration tests), and
+  the 3-consecutive gameplay proof sub-test
+  exits in under 2 s on a clean checkout. Owner
+  files:
+  `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+  (new file with the three sub-tests + the
+  `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET`
+  env knob),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the `verification:workspace-parallel`
+  P0-row as closed with a one-line note in the
+  P0 retirement list). Scope boundary: do NOT
+  touch the existing
+  `scripts/workspace-parallel-proof.sh` script
+  (the canonical 3-consecutive *full-workspace*
+  proof stays the operator / nightly path); do
+  NOT touch the
+  `crates/autotrain/tests/workspace_parallel_proof.rs`
+  shape contract (the existing 4 sub-tests stay
+  as-is, the new test is a sibling, not a
+  replacement); do NOT touch the
+  `bust_prevents_next` /
+  `bust_prevents_next_conserves_pot_across_boards` /
+  `bust_prevents_next_deterministic` lib tests
+  (STW-005 / STW-020 are the actual fix; STW-030
+  is the in-CI regression-proof for the fix);
+  do NOT change the `--test-threads=4` /
+  `--skip=runbook_run_exits_zero_with_single_clean_workspace_run`
+  concurrency contract the script and the
+  existing integration test pin; do NOT touch
+  any STW-001 / STW-007 / STW-011 / STW-015
+  operator-decision items; do NOT change the
+  room protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means cluster
+  counts, the v1 / v2 / v3 trained configs, the
+  `CFR_TREE_COUNT_NLHE` baseline, the
+  v1 / v2 / v3 / v4 named baselines, or any
+  `trainer --*` CLI. STW-030 is the
+  *mechanical proof* that the
+  `verification:workspace-parallel` hinge is
+  closed in CI (not just in a one-shot operator
+  invocation), so a future regression in the
+  showdown PnL math or any gameplay lib test
+  cannot silently pass locally and only flake
+  under `cargo test --workspace --
+  --test-threads=4`. Verification commands:
+  `cargo test -p rbp-autotrain --test
+  workspace_parallel_proof_three` (the 3 new
+  sub-tests pass), `cargo test --workspace
+  --no-run && cargo test --workspace --
+  --test-threads=4
+  --skip=runbook_run_exits_zero_with_single_clean_workspace_run
+  --skip=run_three_consecutive_clean_gameplay_lib_test_runs`
+  (3 consecutive green runs as a
+  smoke-check, exit 0), `cargo test --workspace
+  -- --test-threads=4` (full workspace
+  green), `cargo check --workspace`,
+  `cargo fmt --check`. Required tests: 3 new
+  lib tests in
+  `crates/autotrain/tests/workspace_parallel_proof_three.rs`
+  (`run_three_consecutive_clean_gameplay_lib_test_runs` /
+  `script_drives_three_consecutive_runs_in_default_mode` /
+  `summary_headline_format_contains_runs_and_failures`).
+  Dependencies: `STW-020` (the
+  `bust_prevents_next_deterministic` 64-seed
+  regression test whose existence makes
+  STW-030's "the flake is dead" claim
+  defensible) and `STW-005` (the relaxed
+  pot-conservation assertion in
+  `bust_prevents_next` that the
+  64-seed regression test pins). Estimated
+  scope: S. Completion signal:
+  `cargo test -p rbp-autotrain --test
+  workspace_parallel_proof_three` is green
+  with 3 new sub-tests passing;
+  `cargo test --workspace -- --test-threads=4`
+  exits 0; the new
+  `run_three_consecutive_clean_gameplay_lib_test_runs`
+  test is wired into the workspace test
+  invocation (a future `cargo test
+  --workspace` run that does *not* skip it
+  will exercise it in the in-CI 4-thread
+  concurrency regime); a CI dashboard can
+  `grep ^QA-CHECK verification.workspace_parallel`
+  the new test's `passed = true` /
+  `detail = "3/3 consecutive gameplay lib runs
+  green"` line in the same shape the
+  `tui.qa.json` gate uses; the
+  `verification:workspace-parallel` hinge can
+  be retired from `steward/HINGES.md` /
+  `steward/HAZARDS.md` /
+  `steward/DRIFT.md` by the next
+  `auto steward --report-only` pass.
+
 - [x] `STW-029` Third trained config (`Flagship3` =
   `DiscountedRegret` + `LinearWeight` +
   `PluribusSampling`): the "third
