@@ -129,6 +129,55 @@ pub enum Mode {
         /// testnet-live-proof-fixture/`) produced.
         path: PathBuf,
     },
+    /// STW-032: turn a `receipts/testnet-live-proof-<UTC-ISO>/`
+    /// directory the STW-019 runbook produced into a
+    /// deterministic, content-addressed portable
+    /// publish bundle. Mirrors `Self::VerifyReceipt`:
+    /// read-only + bypasses the DB open, calls the
+    /// `crate::publish::publish_receipt` handler, and
+    /// prints a one-line
+    /// `live_proof publish complete: bundle=...
+    /// sha256=... bytes=...` headline a dashboard
+    /// scraper can `grep ^live_proof publish
+    /// complete:` the log. The handler refuses to
+    /// publish a red receipt (calls
+    /// `LiveProofReceipt::read_and_verify` as a
+    /// pre-tar gate). The `path` is the
+    /// `receipts/testnet-live-proof-<UTC-ISO>/`
+    /// directory the runbook produced; a bare
+    /// `--publish` with no path is the "missing
+    /// path arg" error the handler converts into a
+    /// one-line usage + exit 2.
+    Publish {
+        /// Absolute or CWD-relative path to a
+        /// `receipts/testnet-live-proof-<UTC-ISO>/`
+        /// directory the runbook produced.
+        path: PathBuf,
+    },
+    /// STW-032: re-verify a published bundle (the
+    /// tarball + manifest + sha256 the
+    /// `trainer --publish` arm wrote). Mirrors
+    /// `Self::VerifyReceipt`: read-only + bypasses
+    /// the DB open, calls the
+    /// `crate::verify_bundle::run` handler, and
+    /// prints a one-line
+    /// `live_proof bundle verification passed: ...`
+    /// / `live_proof bundle verification failed: ...`
+    /// line a dashboard scraper can
+    /// `grep ^live_proof bundle verification` the
+    /// log. The handler re-hashes the tarball + every
+    /// file inside it, asserts every digest matches
+    /// the manifest, and rejects the bundle with a
+    /// typed `PublishError` on a mismatch. The `path`
+    /// is the publish directory containing
+    /// `bundle.tar.gz` + `manifest.json` +
+    /// `bundle.sha256`.
+    VerifyBundle {
+        /// Absolute or CWD-relative path to a
+        /// publish directory the
+        /// `trainer --publish` arm wrote.
+        path: PathBuf,
+    },
 }
 
 impl Mode {
@@ -164,6 +213,41 @@ impl Mode {
                             path: PathBuf::from(p),
                         },
                         None => Self::VerifyReceipt {
+                            path: PathBuf::new(),
+                        },
+                    };
+                }
+                "--publish" => {
+                    // STW-032: the publish arm's value
+                    // is the next argv. A bare
+                    // `--publish` with no value returns
+                    // `Self::Publish` with an empty
+                    // `PathBuf`; the dispatch arm in
+                    // `run()` prints a one-line usage
+                    // and exits 2.
+                    return match iter.next() {
+                        Some(p) => Self::Publish {
+                            path: PathBuf::from(p),
+                        },
+                        None => Self::Publish {
+                            path: PathBuf::new(),
+                        },
+                    };
+                }
+                "--verify-bundle" => {
+                    // STW-032: the verify-bundle
+                    // arm's value is the next argv.
+                    // A bare `--verify-bundle` with
+                    // no value returns
+                    // `Self::VerifyBundle` with an
+                    // empty `PathBuf`; the dispatch
+                    // arm in `run()` prints a
+                    // one-line usage and exits 2.
+                    return match iter.next() {
+                        Some(p) => Self::VerifyBundle {
+                            path: PathBuf::from(p),
+                        },
+                        None => Self::VerifyBundle {
                             path: PathBuf::new(),
                         },
                     };
@@ -218,7 +302,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path>"
         );
         std::process::exit(1);
     }
@@ -265,6 +349,103 @@ impl Mode {
                 std::process::exit(2);
             }
             match crate::verify_receipt::run(&path) {
+                Ok(s) => {
+                    print!("{s}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // STW-032: also bypass the DB open for
+        // `Publish`. The publisher is read-only
+        // with respect to the receipt (it copies
+        // the receipt into a staging tempdir, then
+        // tars + sha256s the copy). An empty
+        // `PathBuf` is the missing-path-arg error
+        // the mode is contractually required to
+        // convert into exit 2.
+        //
+        // The publish step writes the bundle to a
+        // sibling `publish/<basename>/` directory
+        // next to the receipt, not to the receipt
+        // itself (a publish step that mutates the
+        // receipt would corrupt the runbook's
+        // output on partial-failure paths). The
+        // `trainer_git_sha` is read from the
+        // `RBP_TRAINER_GIT_SHA` env var the
+        // companion `scripts/testnet-live-publish.sh`
+        // runbook sets from `git rev-parse HEAD` —
+        // the trainer is a single static binary
+        // and has no good way to read its own
+        // build-time git SHA without an extra
+        // build script. The fallback `<unknown>`
+        // sentinel keeps the manifest byte-stable
+        // for the integration test that runs the
+        // trainer without the env knob set.
+        if let Self::Publish { path } = Self::from_args() {
+            if path.as_os_str().is_empty() {
+                eprintln!("Usage: trainer --publish <receipt-dir>");
+                std::process::exit(2);
+            }
+            // Compute the output dir as
+            // `<parent>/publish/<basename>/` so the
+            // publish step never writes inside the
+            // receipt (the receipt is the
+            // runbook's read-only artifact; the
+            // publish is a follow-on consumer of
+            // it, not a refactor of it).
+            let basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("testnet-live-proof-receipt")
+                .to_string();
+            let parent = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let output_dir = parent.join("publish").join(&basename);
+            let trainer_git_sha =
+                std::env::var("RBP_TRAINER_GIT_SHA").unwrap_or_else(|_| "<unknown>".to_string());
+            match crate::publish::publish_receipt(
+                &path,
+                &output_dir,
+                "STW-032 v1",
+                &trainer_git_sha,
+            ) {
+                Ok(out) => {
+                    println!(
+                        "{} bundle={} sha256={} bytes={} files={} basename={}",
+                        crate::publish::STW032_PUBLISH_HEADLINE_PREFIX,
+                        out.bundle_path.display(),
+                        out.bundle_sha256,
+                        out.total_bytes,
+                        out.file_count,
+                        out.receipt_basename,
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // STW-032: also bypass the DB open for
+        // `VerifyBundle`. The verifier is read-only
+        // (no `DB_URL` / `tokio_postgres::Client`
+        // use); an empty `PathBuf` is the
+        // missing-path-arg error the mode is
+        // contractually required to convert into
+        // exit 2.
+        if let Self::VerifyBundle { path } = Self::from_args() {
+            if path.as_os_str().is_empty() {
+                eprintln!("Usage: trainer --verify-bundle <path>");
+                std::process::exit(2);
+            }
+            match crate::verify_bundle::run(&path) {
                 Ok(s) => {
                     print!("{s}");
                     std::process::exit(0);
@@ -351,18 +532,28 @@ impl Mode {
             // compare3 integration tests in the
             // same CI run.
             Self::Compare3 => crate::bench::run_compare3(client).await,
-            // The `Replay` and `VerifyReceipt` arms are
-            // handled above; the compiler still requires
-            // an exhaustive match, so the unreachable
-            // arms are defensive `unreachable!()`s with
-            // messages a future refactor will hit if the
-            // early `if let`s are ever removed.
+            // The `Replay` / `VerifyReceipt` /
+            // `Publish` / `VerifyBundle` arms are
+            // handled above; the compiler still
+            // requires an exhaustive match, so the
+            // unreachable arms are defensive
+            // `unreachable!()`s with messages a
+            // future refactor will hit if the early
+            // `if let`s are ever removed.
             Self::Replay { .. } => unreachable!(
                 "Mode::Replay is dispatched before the DB open; the `Self::Replay {{ .. }}` \
                  arm here is the compiler-required exhaustive-match catch-all"
             ),
             Self::VerifyReceipt { .. } => unreachable!(
                 "Mode::VerifyReceipt is dispatched before the DB open; the `Self::VerifyReceipt {{ .. }}` \
+                 arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::Publish { .. } => unreachable!(
+                "Mode::Publish is dispatched before the DB open; the `Self::Publish {{ .. }}` \
+                 arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::VerifyBundle { .. } => unreachable!(
+                "Mode::VerifyBundle is dispatched before the DB open; the `Self::VerifyBundle {{ .. }}` \
                  arm here is the compiler-required exhaustive-match catch-all"
             ),
         }

@@ -52,3 +52,11 @@ futures         = "0.3"
 log             = "0.4"
 num_cpus        = "1.16"
 rand            = { version = "0.9.1", features = ["small_rng"] }
+# STW-032 publish: deterministic tar.gz + sha256
+# + flate2 (gzip). The `tar` / `flate2` / `sha2`
+# crates are already vendored in the Cargo.lock via
+# the auth crate's `sha2` dep; adding them here is
+# the same `0.x` major version.
+sha2            = "0.10"
+flate2          = "1.0"
+tar             = "0.4"

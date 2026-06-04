@@ -458,3 +458,177 @@ fn extract_heredoc_body(script: &str, tag: &str) -> Option<String> {
     }
     None
 }
+
+// ===========================================================================
+// STW-032 publish runbook shape contract
+// ===========================================================================
+//
+// The publish runbook (`scripts/testnet-live-publish.sh`) is a
+// pure-bash driver that consumes the receipt the STW-019
+// runbook produced and writes a deterministic, content-addressed
+// portable bundle. The four sub-tests below pin the runbook's
+// static surface (the same no-DB shape-pinning pattern the
+// STW-019 runbook uses):
+//
+// 1. `testnet_live_publish_script_exists_and_parses` — the
+//    publish runbook is on disk, is executable, and parses
+//    with `bash -n` (catches a syntax regression at CI time).
+// 2. `testnet_live_publish_doc_references_verify_bundle_cli` —
+//    the runbook doc references the
+//    `trainer --verify-bundle <path>` CLI subcommand the
+//    publish step shells out to (a worker reading the doc
+//    would not know how to re-verify the bundle).
+// 3. `testnet_live_publish_doc_references_every_chain_step` —
+//    the runbook doc names every chain step the
+//    `crates/autotrain/tests/publish.rs` integration test
+//    covers (`--verify-receipt`, `--publish`).
+// 4. `testnet_live_publish_script_has_verify_receipt_pre_publish_gate` —
+//    the runbook script must shell out to
+//    `trainer --verify-receipt <receipt>` before the publish
+//    step (the "refuse to publish a red receipt" gate the
+//    receipt verifier is the source of truth for).
+
+fn publish_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish.sh")
+}
+
+fn publish_runbook_doc_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish.md")
+}
+
+#[test]
+fn testnet_live_publish_script_exists_and_parses() {
+    // The publish runbook script must be on disk,
+    // executable, and parse with `bash -n`. A
+    // regression that drops the file (or breaks the
+    // bash grammar) fails the gate at CI time before
+    // a CI worker can shell out to it.
+    let p = publish_script_path();
+    assert!(
+        p.exists(),
+        "STW-032 publish runbook script missing at {}; \
+         the testnet live launch publish surface has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-032 publish runbook script at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches a live
+    // publish step.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/testnet-live-publish.sh");
+    assert!(
+        out.status.success(),
+        "STW-032 publish runbook script must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn testnet_live_publish_doc_references_verify_bundle_cli() {
+    // The publish runbook doc must reference the
+    // `trainer --verify-bundle <path>` CLI subcommand
+    // STW-032 ships. A worker reading the doc would
+    // not know how to re-verify the bundle without
+    // this mention. We assert by flag form
+    // (`--verify-bundle`) because that is the form
+    // the operator types and the form a dashboard
+    // scraper greps.
+    let doc = read(&publish_runbook_doc_path());
+    assert!(
+        doc.contains("--verify-bundle"),
+        "STW-032 publish runbook doc at {} must reference the \
+         `trainer --verify-bundle <path>` CLI subcommand; a worker reading the \
+         doc would not know how to re-verify the bundle",
+        publish_runbook_doc_path().display()
+    );
+}
+
+#[test]
+fn testnet_live_publish_doc_references_every_chain_step() {
+    // The publish runbook doc must name every
+    // chain step the publish integration test
+    // (`crates/autotrain/tests/publish.rs`)
+    // covers: `--verify-receipt` (the pre-publish
+    // gate that refuses to publish a red receipt)
+    // and `--publish` (the bundle writer).
+    let doc = read(&publish_runbook_doc_path());
+    let required_steps = ["--verify-receipt", "--publish"];
+    let mut missing: Vec<&str> = Vec::new();
+    for step in &required_steps {
+        if !doc.contains(step) {
+            missing.push(step);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "STW-032 publish runbook doc at {} must reference every chain step the \
+         publish integration test covers. Missing from doc: {missing:?}",
+        publish_runbook_doc_path().display()
+    );
+}
+
+#[test]
+fn testnet_live_publish_script_has_verify_receipt_pre_publish_gate() {
+    // The publish runbook script must shell out
+    // to `trainer --verify-receipt <receipt>`
+    // BEFORE the `trainer --publish <receipt>`
+    // call. The "refuse to publish a red
+    // receipt" gate the receipt verifier is the
+    // source of truth for: a publish of a red
+    // receipt is a hard error, not a warning.
+    // We assert by ordered substring scan: the
+    // `--verify-receipt` flag must appear
+    // before the `--publish` flag in the script
+    // source, mirroring the runtime call
+    // order.
+    let script = read(&publish_script_path());
+    let verify_idx = script.find("--verify-receipt").unwrap_or_else(|| {
+        panic!(
+            "STW-032 publish runbook must shell out to `trainer --verify-receipt <receipt>` \
+             as a pre-publish gate; the --verify-receipt flag is missing from the script"
+        )
+    });
+    let publish_idx = script.find("--publish").unwrap_or_else(|| {
+        panic!(
+            "STW-032 publish runbook must shell out to `trainer --publish <receipt>`; \
+             the --publish flag is missing from the script"
+        )
+    });
+    assert!(
+        verify_idx < publish_idx,
+        "STW-032 publish runbook must call `--verify-receipt` BEFORE `--publish`; \
+         a script that publishes before verifying is the inverse of the refuse-to-publish-red-receipt gate"
+    );
+}

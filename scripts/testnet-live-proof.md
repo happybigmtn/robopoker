@@ -230,8 +230,16 @@ and the integration test
 - It does **not** require Docker. A worker that already has
   `cargo` + `bash` + a `DATABASE_URL` can run the proof as-is.
 - It does **not** push to a remote registry. The receipt directory
-  is local; pushing it to a testnet dashboard bucket is the next
-  slice (`testnet-live-publish`).
+  is local. The v7 follow-on (`testnet-live-publish`) — **shipped
+  as STW-032** — turns the receipt into a deterministic,
+  content-addressed portable bundle
+  (`publish/testnet-live-proof-<UTC-ISO>/{bundle.tar.gz, bundle.sha256, manifest.json, SUMMARY.txt}`)
+  a CI worker can `aws s3 cp` / `gsutil cp` into a testnet
+  dashboard bucket. See
+  [`scripts/testnet-live-publish.md`](testnet-live-publish.md)
+  for the publish runbook and
+  [`scripts/testnet-live-publish.sh`](testnet-live-publish.sh)
+  for the bash driver.
 
 ## Pinning the runbook's shape
 

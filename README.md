@@ -241,6 +241,52 @@ the shell-shape pinner (`cargo test -p rbp-autotrain --test
 script_shape`) that catches a runbook regression without needing a
 live database.
 
+## Testnet publish bundle
+
+A v7 follow-on the runbook names as the "next slice" turns the
+local receipt into a portable bundle a third party (a testnet
+dashboard bucket, a CI auditor, a release-gate script) can fetch
++ re-verify without re-running the chain:
+
+```bash
+bash scripts/testnet-live-publish.sh \
+    receipts/testnet-live-proof-20260604T050000Z/
+```
+
+The runbook chains `trainer --verify-receipt <receipt>` (a
+pre-publish gate that refuses to publish a red receipt) and
+`trainer --publish <receipt>` (a deterministic, content-addressed
+bundle writer) as subprocesses, and drops a
+`publish/testnet-live-proof-<UTC-ISO>/` directory:
+
+```
+publish/testnet-live-proof-20260604T050000Z/
+  bundle.tar.gz       # deterministic tar.gz of the receipt
+  bundle.sha256       # single-line sha256 of the tarball
+  manifest.json       # per-file sha256 + metadata
+  SUMMARY.txt         # the one-line publish headline
+```
+
+A downstream auditor can re-verify the bundle with a single
+static `trainer` binary (no Postgres required):
+
+```bash
+trainer --verify-bundle publish/testnet-live-proof-20260604T050000Z/
+# live_proof bundle verification passed: bundle=bundle.tar.gz files=24 bytes=18967 sha256=...
+```
+
+The publish step is **read-only** with respect to the receipt
+(it copies the receipt into a fresh `staging/` tempdir before
+tarring) and does **not** push to a remote registry — the
+operator (or a CI worker) can `aws s3 cp` /
+`gsutil cp` the local `publish/<basename>/` directory into a
+testnet dashboard bucket in a follow-on slice. The committed
+no-DB reference bundle at
+[`crates/autotrain/tests/fixtures/publish-fixture/`](crates/autotrain/tests/fixtures/publish-fixture/)
+is re-verified on every `cargo test --workspace` run. See
+[`scripts/testnet-live-publish.md`](scripts/testnet-live-publish.md)
+for the full runbook.
+
 ## Workspace parallel test proof
 
 The full `cargo test --workspace -- --test-threads=4` chain is

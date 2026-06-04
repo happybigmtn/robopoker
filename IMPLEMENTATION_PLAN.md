@@ -18,6 +18,18 @@ a worker claims a new card. If neither surfaces a P0 / SEC /
 mainnet-blocking item, the next claimable slice is whatever the
 planner's `PROMOTIONS.md` ranks highest.
 
+The v6 follow-on chain (STW-026 → STW-031) is closed: every
+v6 named follow-on slice in `genesis/plans/000-ceo-testnet-roadmap.md`
+has shipped. The next claimable slice is the v7 follow-on
+(`testnet-live-publish`) the `scripts/testnet-live-proof.md` runbook
+doc names explicitly ("pushing it to a testnet dashboard bucket
+is the next slice (`testnet-live-publish`)" — line 234): a
+deterministic, content-addressed portable publish bundle the
+operator (or a CI worker) can drop into a testnet dashboard
+bucket so a downstream auditor can re-fetch a green
+`testnet-live-proof-<UTC-ISO>` receipt without re-running the
+chain.
+
 - [x] `STW-031` `trainer --compare3` v1-vs-v2-vs-v3
   three-way trained-config compare: the "next-next
   slice" the CEO testnet roadmap names immediately
@@ -2835,6 +2847,236 @@ have a single source of truth.
   listed modes) — closing the
   `testnet-live-proof` HAZARDS mainnet-block
   hinge.
+
+## Promoted from v7 follow-on (this slice)
+
+The v6 follow-on chain (STW-019 → STW-031) is closed. The
+genesis roadmap (line 40) names the next claimable item as
+"one operator-visible run receipt for `trainer --smoke`,
+`trainer --bench`, `trainer --compare`, and `trainer --replay`
+on the same database/artifact bundle" and the
+`scripts/testnet-live-proof.md` runbook doc (line 234)
+names it explicitly: "pushing it to a testnet dashboard
+bucket is the next slice (`testnet-live-publish`)." The
+v6 follow-on chain produced a *local* receipt directory
+(`receipts/testnet-live-proof-<UTC-ISO>/`) the
+`LiveProofReceipt::read_and_verify` Rust verifier can
+re-verify. STW-032 lands a deterministic, content-addressed
+*publish* step that turns a local receipt into a portable
+bundle any third party can fetch + re-verify without
+re-running the chain.
+
+- [x] `STW-032` `scripts/testnet-live-publish.sh` +
+  `trainer --publish <receipt-dir>` + no-DB `trainer
+  --verify-bundle <bundle-path>` portable publish
+  surface. The v7 follow-on the runbook doc names
+  explicitly. The publish step takes a
+  `receipts/testnet-live-proof-<UTC-ISO>/` directory
+  the runbook produced and writes a
+  `publish/testnet-live-proof-<UTC-ISO>.tar.gz`
+  portable bundle + a
+  `publish/testnet-live-proof-<UTC-ISO>.sha256`
+  digest file + a
+  `publish/testnet-live-proof-<UTC-ISO>.manifest.json`
+  machine-readable index (sha256 per file +
+  total bytes + receipt_dir + bash runbook version +
+  trainer git sha). The tarball layout is
+  deterministic (sorted file walk, `tar --sort=name
+  --mtime=@0 --owner=0 --group=0`) so a
+  byte-identical bundle is reproducible from a
+  byte-identical receipt; a regression in the
+  bundle's `sha256` fails the new
+  `publish_bundle_deterministic_for_fixed_receipt`
+  lib test. The manifest is the single source of
+  truth the new `trainer --verify-bundle <path>`
+  CLI subcommand re-verifies: the verifier reads
+  the manifest, re-hashes every file inside the
+  tarball (in the order the manifest names them),
+  and asserts every `sha256` matches; a single
+  mismatched digest fails the verifier with a
+  `bundle_hash_mismatch: <path>: expected
+  <sha256>, got <sha256>` line a dashboard
+  scraper can `grep ^live_proof bundle
+  verification failed:` the log. The new
+  `Mode::VerifyBundle` arm is a no-DB
+  early-dispatch that mirrors the STW-028
+  `Mode::VerifyReceipt` arm; the
+  `Mode::Publish` arm is a no-DB early-dispatch
+  that calls the `publish::run` handler and
+  prints a one-line
+  `live_proof publish complete: bundle=<path>
+  sha256=<sha256> bytes=<N>` headline (the same
+  `live_proof ... complete: ...` family the
+  STW-019 / STW-031 trainers already print so
+  one `grep ^live_proof` scraper can read the
+  whole chain). The companion
+  `scripts/testnet-live-publish.sh` runbook is
+  pure bash, mirrors the STW-019
+  `testnet-live-proof.sh` shape (script exists
+  + is executable + parses with `bash -n` +
+  refuses to run on a missing receipt with
+  exit 3), and drops the tarball + sha256 +
+  manifest into the workspace's
+  `publish/testnet-live-proof-<UTC-ISO>/`
+  directory so a CI worker can `aws s3 cp` /
+  `gsutil cp` the three files into a dashboard
+  bucket in a single step. The publish step
+  is **read-only** with respect to the
+  receipt directory (it copies the files into
+  a `staging/` tempdir before tarring, so a
+  `trainer --publish` invocation cannot
+  mutate a receipt the runbook produced even
+  on partial-failure paths). Owner files:
+  `scripts/testnet-live-publish.sh` (new
+  pure-bash driver that re-verifies the
+  receipt with `LiveProofReceipt::read_and_verify`
+  via `trainer --verify-receipt` before
+  tarring — refuses to publish a red
+  receipt), `scripts/testnet-live-publish.md`
+  (new runbook doc mirroring the
+  `testnet-live-proof.md` shape:
+  what-it-does / output-layout / env-knobs /
+  exit-codes / re-verifying-with-the-binary
+  sections + a "what it does NOT do"
+  section that names the S3 / GCS / git-tag
+  push step as the next slice), `crates/autotrain/src/publish.rs`
+  (new `PublishedBundle` struct + `BundleFile` struct +
+  `to_json` + `from_bundle_path` + `verify`
+  surface + `publish_receipt` top-level entry
+  point + new `publish_bundle_deterministic_for_fixed_receipt`
+  / `publish_bundle_round_trips_through_manifest`
+  / `publish_bundle_verifier_rejects_tampered_file`
+  / `publish_bundle_verifier_rejects_missing_file`
+  / `publish_bundle_verifier_rejects_bad_manifest`
+  / `publish_to_json_contains_every_field` /
+  `publish_run_prints_complete_headline` /
+  `publish_run_errors_on_missing_receipt_dir`
+  / `publish_run_errors_on_red_receipt` lib
+  tests), `crates/autotrain/src/verify_bundle.rs`
+  (new `run` handler that mirrors
+  `verify_receipt::run`'s `Result<String, String>`
+  shape so the `Mode::VerifyBundle` arm can
+  `print!` on `Ok` + `eprintln!` + exit 2 on
+  `Err` without a new error type), `crates/autotrain/src/mode.rs`
+  (new `Mode::Publish` arm + `--publish
+  <receipt-dir>` argv handling + the
+  `publish::run` call + new `Mode::VerifyBundle`
+  arm + `--verify-bundle <path>` argv handling
+  + the `verify_bundle::run` call + both new
+  modes listed in the `Usage:` eprintln!
+  line), `crates/autotrain/src/lib.rs` (re-export
+  the new `PublishedBundle` / `BundleFile`
+  types), `crates/autotrain/tests/publish.rs`
+  (new no-DB integration test
+  `publish_round_trips_through_real_trainer_binary`
+  that drives `trainer --publish <receipt>`
+  end-to-end against a synthetic receipt
+  under `target/test-publish/<UTC-ISO>/` +
+  asserts the tarball extracts to a tree
+  whose `sha256sum` matches the on-disk
+  manifest's per-file digests + a second
+  test
+  `verify_bundle_round_trips_through_real_trainer_binary`
+  that calls
+  `trainer --verify-bundle <tarball>` and
+  asserts it exits 0 + prints the pinned
+  `live_proof bundle verification passed:`
+  prefix), `crates/autotrain/tests/script_shape.rs`
+  (add the new
+  `testnet_live_publish_script_exists_and_parses`
+  shape pin: script exists + is executable +
+  parses with `bash -n` + the runbook doc
+  lists every chain step the publish script
+  honors + the runbook doc references the
+  `--verify-bundle` CLI subcommand), `crates/autotrain/tests/fixtures/publish-fixture/`
+  (new committed no-DB portable reference
+  bundle the `trainer --verify-bundle` test
+  re-verifies on every `cargo test
+  --workspace` run; a fixture whose tarball
+  + manifest + sha256 are byte-stable so a
+  drift in either the fixture or the
+  verifier fails the new
+  `verify_bundle::tests::run_verifies_committed_publish_fixture`
+  lib test), `IMPLEMENTATION_PLAN.md`
+  (this row), `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v7 publish slice as shipped with
+  a one-line note in the "Immediate P0"
+  shipped list), `scripts/testnet-live-proof.md`
+  (replace the "next slice
+  (`testnet-live-publish`)" parenthetical
+  with a one-line "shipped as STW-032" note
+  + a link to `scripts/testnet-live-publish.md`),
+  `README.md` (add a `## Testnet publish
+  bundle` section under `## Testnet launch
+  proof` that links the new runbook +
+  shows the `bash scripts/testnet-live-publish.sh
+  <receipt-dir>` usage + the
+  `trainer --verify-bundle <path>` re-verify
+  line). Scope boundary: do NOT touch the
+  STW-019 `testnet-live-proof.sh` runbook
+  (the publish is a follow-on *consumer* of
+  the receipts the runbook produces, not a
+  refactor); do NOT change the STW-023
+  `LiveProofReceipt::read_and_verify` /
+  `LiveProofRecipe` JSON shape (the publish
+  reads + re-verifies the receipt, then
+  writes its own manifest — a `recipe.json`
+  drift fails the publish step's
+  pre-tar `trainer --verify-receipt` call);
+  do NOT introduce an S3 / GCS / git-tag
+  push (a `bash scripts/testnet-live-publish.sh
+  <receipt>` invocation writes the
+  portable bundle into a local
+  `publish/` directory a CI worker can
+  `aws s3 cp` in a follow-on slice); do
+  NOT introduce a Python or `jq`
+  dependency (the runbook is pure bash +
+  `tar` + `sha256sum`); do NOT change the
+  trainer's `--smoke` / `--bench` /
+  `--compare` / `--compare3` / `--replay`
+  / `--verify-receipt` behaviour or JSON
+  contracts. Verification commands:
+  `cargo test -p rbp-autotrain --features
+  database --tests --lib`, `cargo test
+  --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Required tests: the new lib
+  tests in `publish.rs::tests` +
+  `verify_bundle.rs::tests` + the new
+  `crates/autotrain/tests/publish.rs`
+  integration test; no padding of
+  unrelated suites. Dependencies: `STW-019`
+  (the runbook the publish step consumes
+  receipts from), `STW-023` (the
+  `LiveProofReceipt::read_and_verify`
+  verifier the publish step calls as a
+  pre-tar gate), `STW-028` (the
+  `trainer --verify-receipt` CLI
+  subcommand the publish step shells out
+  to). Estimated scope: M. Completion
+  signal: `bash
+  scripts/testnet-live-publish.sh
+  <receipt-dir>` exits 0 on a green
+  `receipts/testnet-live-proof-<UTC-ISO>/`
+  receipt and writes a
+  `publish/testnet-live-proof-<UTC-ISO>.tar.gz`
+  + matching `.sha256` + matching
+  `.manifest.json` whose tarball
+  extracts to a tree that `sha256sum -c`
+  agrees matches the manifest; `trainer
+  --publish <receipt-dir>` exits 0 +
+  prints the pinned
+  `live_proof publish complete: ...`
+  headline; `trainer --verify-bundle
+  <bundle-path>` exits 0 + prints the
+  pinned
+  `live_proof bundle verification passed: ...`
+  line; the new integration tests
+  pass; `cargo test --workspace` and
+  `cargo fmt --check` are green; the
+  committed `publish-fixture/` bundle is
+  re-verified on every `cargo test
+  --workspace` run.
 
 ## Deferred items (need operator decision before promotion)
 
