@@ -1670,6 +1670,93 @@ fn deploy_dashboard_cloudflare_wrangler_toml_has_no_secrets() {
     );
 }
 
+#[test]
+fn deploy_dashboard_cloudflare_script_exports_rbp_dashboard_deployed_url() {
+    // The STW-054 runbook must `export
+    // RBP_DASHBOARD_DEPLOYED_URL=<pages_url>` AFTER
+    // the `wrangler pages deploy` call succeeds AND
+    // the runbook reads the URL `wrangler` printed
+    // to stdout. The export stamps the resolved
+    // Pages URL back into the env knob the STW-058
+    // `serve_static_index` handler reads, so a
+    // *subsequent* `wrangler pages deploy`
+    // invocation (or a follow-on `cargo run -p
+    // rbp-dashboard` smoke) is sourced from the
+    // same env knob the dashboard reads. The
+    // `replace_in_readme` sed step + the dashboard's
+    // meta line + the `deploy.json` `pages_url`
+    // field are all driven from the same
+    // `pages_url` variable; the export closes the
+    // loop. We assert by *string presence* of the
+    // literal `export RBP_DASHBOARD_DEPLOYED_URL=`
+    // substring so a future regression that drops
+    // the export (or renames the env knob the
+    // runbook stamps) fails the pin at CI time
+    // before a Cloudflare Pages deploy. Mirrors the
+    // STW-058
+    // `dashboard_router_reads_rbp_dashboard_deployed_url`
+    // env-knob-read pin (this is the *write* side;
+    // STW-058 is the *read* side).
+    let script = read(&deploy_dashboard_cloudflare_script_path());
+    assert!(
+        script.contains("export RBP_DASHBOARD_DEPLOYED_URL="),
+        "STW-059 STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must \
+         `export RBP_DASHBOARD_DEPLOYED_URL=<pages_url>` AFTER the `wrangler pages \
+         deploy` call succeeds AND the runbook reads the URL `wrangler` printed to \
+         stdout; a runbook that reads the URL but does NOT stamp it back into the env \
+         knob forces a downstream `cargo run -p rbp-dashboard` smoke to read a \
+         stale `RBP_DASHBOARD_DEPLOYED_URL=<project>.pages.dev/` default, breaking the \
+         single-source-of-truth pattern the STW-058 `serve_static_index` handler \
+         reads",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+    // (b) The export must be ordered AFTER the
+    // `wrangler pages deploy` call site (the URL
+    // the export stamps is the URL wrangler printed
+    // — exporting before the deploy would stamp an
+    // empty / placeholder URL). A future regression
+    // that re-orders the export above the
+    // `wrangler pages deploy` call site (e.g. a
+    // "declare-then-deploy" refactor) fails this
+    // pin. We assert by *string index* ordering
+    // (the deploy call site must appear in the
+    // script source BEFORE the export line).
+    let deploy_idx = script
+        .find("wrangler pages deploy")
+        .expect("STW-054 deploy call site must be present in the script");
+    let export_idx = script
+        .find("export RBP_DASHBOARD_DEPLOYED_URL=")
+        .expect("STW-059 export must be present in the script");
+    assert!(
+        deploy_idx < export_idx,
+        "STW-059 `export RBP_DASHBOARD_DEPLOYED_URL=` line must appear AFTER the \
+         `wrangler pages deploy` call site in the runbook source; exporting before \
+         the deploy would stamp an empty / pre-deploy URL into the env knob (got \
+         export at offset {export_idx} before deploy at offset {deploy_idx})"
+    );
+    // (c) The runbook must also print the export
+    // line to stdout so a CI worker scraping the
+    // runbook's stdout can confirm the stamp
+    // landed (the `export` builtin writes to the
+    // calling process env but does NOT print, so
+    // the explicit `echo` is the observation
+    // surface the STW-059 hand-test contract
+    // depends on). A regression that drops the
+    // `echo` line (or renames the prefix) silently
+    // breaks the `prints export
+    // RBP_DASHBOARD_DEPLOYED_URL=<url> to stdout`
+    // hand-test contract.
+    assert!(
+        script.contains("echo \"export RBP_DASHBOARD_DEPLOYED_URL="),
+        "STW-059 STW-054 runbook must `echo \"export RBP_DASHBOARD_DEPLOYED_URL=...\"` \
+        to stdout so a CI worker scraping the runbook's stdout can confirm the \
+        stamp landed (the `export` builtin does not print); a runbook that exports \
+        the knob but does NOT echo it leaves no stdout-side observation surface for \
+        a CI dashboard to scrape at {}",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+}
+
 // --- STW-037 operator-runnable 3-consecutive full-workspace
 //     proof runbook shape pins -----------------------------
 //

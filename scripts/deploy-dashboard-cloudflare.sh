@@ -336,6 +336,39 @@ if [[ -z "$PAGES_URL" ]]; then
     # `pages_url=<url>` line.
     PAGES_URL="${RBP_DASHBOARD_DEPLOYED_URL:-https://${PAGES_PROJECT}.pages.dev/}"
 fi
+# STW-059: stamp the resolved `pages_url` back into
+# the `RBP_DASHBOARD_DEPLOYED_URL` env knob so a
+# *subsequent* `wrangler pages deploy` invocation
+# (e.g. a follow-on Pages re-deploy) OR a follow-on
+# `cargo run -p rbp-dashboard` smoke test is sourced
+# from the same env knob the STW-058
+# `serve_static_index` handler reads. The
+# `replace_in_readme` sed step + the dashboard's
+# meta line + the `deploy.json` `pages_url` field
+# are all driven from the same `pages_url` variable;
+# the export closes the loop between the `wrangler
+# pages deploy` stdout URL and the
+# `serve_static_index` env-knob read. The export is
+# a *runbook* change only — it does NOT change the
+# `RBP_DASHBOARD_DEPLOYED_URL` env knob semantics
+# the STW-058 handler reads (the env-knob read shape
+# is unchanged; the runbook now writes the knob
+# back with the URL wrangler just printed so a
+# downstream subprocess picks it up).
+export RBP_DASHBOARD_DEPLOYED_URL="$PAGES_URL"
+# Also print the export line to stdout so a CI
+# worker that scrapes the runbook's stdout can
+# confirm the stamp landed (the `export` builtin
+# writes to the calling process env but does NOT
+# print, so the explicit `echo` is the
+# observation surface the STW-059 hand-test
+# `RBP_DASHBOARD_CF_API_TOKEN=<dummy>
+#  RBP_DASHBOARD_CF_ACCOUNT_ID=<dummy>
+#  PUBLISH_ROOT=/tmp/fake
+#  scripts/deploy-dashboard-cloudflare.sh`
+# `prints export RBP_DASHBOARD_DEPLOYED_URL=<url>
+#  to stdout` contract depends on).
+echo "export RBP_DASHBOARD_DEPLOYED_URL=$PAGES_URL"
 rm -f "$PUBLISH_ROOT/.wrangler-deploy.stdout" "$PUBLISH_ROOT/.wrangler-deploy.stderr"
 
 # --- file/byte counts for the headline + the deploy.json manifest ------

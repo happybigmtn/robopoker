@@ -9879,7 +9879,7 @@ deliverables, ordered by leverage:
   operator-visible signal the deploy
   succeeded with the expected URL).**
 
-- [ ] **[P0] `STW-059` The STW-054 deploy
+- [x] **[P0] `STW-059` The STW-054 deploy
   runbook stamps `RBP_DASHBOARD_DEPLOYED_URL`
   into the wrangler deploy environment
   before the deploy, not after.** A
@@ -9967,6 +9967,10 @@ deliverables, ordered by leverage:
   meta line + README + `deploy.json`
   all agree on the URL, with no
   hand-editing of any file).**
+  **Shipped this wave on the
+  `feat(deploy): STW-059 stamp
+  RBP_DASHBOARD_DEPLOYED_URL on
+  Pages deploy` commit (2026-06-04).**
 
 - [ ] **[P1] `STW-060` The
   `crates/dashboard/tests/fixtures/INDEX.json`
