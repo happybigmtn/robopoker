@@ -368,5 +368,91 @@ async fn real_index_shadows_demo_data() {
         StatusCode::NOT_FOUND,
         "GET /bench/compare3-fixture with a matching INDEX entry must run the live bench path (404), not the demo-data fallback (200); got {status}"
     );
+    // STW-052: the inverse contract — the
+    // empty-state paragraph is *hidden* when
+    // the env knob is the default (`=0` or
+    // unset) AND a real `INDEX.json` reports
+    // `entry_count > 0`. The static
+    // `index.html` ships a `<p
+    // class="empty-state">` element with the
+    // `display: none` CSS default; the JS
+    // conditionally adds the `visible`
+    // class on `index.entry_count === 0`.
+    // A populated live `INDEX.json` (this
+    // test's `entry_count: 1` shadow
+    // index) means the JS would NOT flip
+    // the `visible` class, so the served
+    // HTML carries the `<p
+    // class="empty-state">` element
+    // (default-off CSS keeps it
+    // invisible) but NOT the
+    // `class="empty-state visible"`
+    // `visible`-suffixed form. A future
+    // regression that re-engages the
+    // empty-state render on a populated
+    // `INDEX.json` (a visitor would see
+    // the "no receipts yet" message
+    // despite the published index)
+    // fails this assertion at the same
+    // step a downstream dashboard
+    // scraper would silently break.
+    let (status, body) = get(app.clone(), "/").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET / must return 200 against a real INDEX.json; got {status}"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    // The static `index.html` ships the
+    // empty-state `<p>` element (the JS
+    // shows it on `entry_count === 0`).
+    // The default `display: none` CSS
+    // keeps it invisible on a populated
+    // live `INDEX.json` — the inverse
+    // contract the spec names.
+    assert!(
+        body_str.contains("class=\"empty-state\""),
+        "GET / body must contain the empty-state <p> element (the JS shows it on entry_count===0); got:\n{body_str}"
+    );
+    // The inverse pin: the `visible` class
+    // must NOT be present in the served
+    // HTML on a populated live `INDEX.json`
+    // (the JS would only add it on
+    // `entry_count === 0`; the populated
+    // shadow index the test owns reports
+    // `entry_count: 1`). A regression that
+    // re-engages the empty-state render on
+    // a populated index fails this
+    // assertion.
+    assert!(
+        !body_str.contains("class=\"empty-state visible\""),
+        "GET / body must NOT contain the empty-state `visible` class on a populated live INDEX.json (the JS only adds it on entry_count===0); got:\n{body_str}"
+    );
+    // The `RBP_DASHBOARD_EMPTY_STATE=0`
+    // (or unset) knob keeps the
+    // `/api/index` route on the live-data
+    // path — a populated live `INDEX.json`
+    // returns the real entries, not the
+    // empty-state short-circuit. The body
+    // must parse as a typed `PublishIndex`
+    // with the same `entry_count: 1` the
+    // shadow index wrote.
+    let (status, body) = get(app.clone(), "/api/index").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /api/index must return 200 against a real INDEX.json (default-off knob); got {status}"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    let parsed: rbp_autotrain::PublishIndex =
+        serde_json::from_str(body_str).expect("GET /api/index body must parse as PublishIndex");
+    assert_eq!(
+        parsed.entry_count, 1,
+        "default-off knob must return the live INDEX.json the shadow index wrote (entry_count: 1); got: {parsed:?}"
+    );
+    assert!(
+        !parsed.entries.is_empty(),
+        "default-off knob must return a populated entries[] vec; got: {parsed:?}"
+    );
     let _ = std::fs::remove_dir_all(&tmpdir);
 }

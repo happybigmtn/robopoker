@@ -91,6 +91,31 @@
     .index-table__link { display: inline-block; margin-right: 12px; }
     .placeholder { color: var(--muted); }
     .empty { color: var(--muted); padding: 24px; text-align: center; }
+    /*
+      STW-052: the dashboard's true empty-state
+      paragraph. The page's JS shows the
+      `<p class="empty-state">` element below
+      when `index.entry_count === 0`; the
+      `display: none` default keeps the
+      paragraph hidden on a populated live
+      `INDEX.json`. The 4-line CSS block
+      styles the paragraph as a centered
+      monospace block in the existing
+      dark-theme palette (a stranger who lands
+      on the URL and sees a literal `<p>`
+      block on a near-empty page reads the
+      friendly "no receipts yet" message the
+      `render_empty_state_paragraph` emitter
+      produces).
+    */
+    p.empty-state {
+      display: none;
+      color: var(--muted);
+      padding: 32px 24px;
+      text-align: center;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    p.empty-state.visible { display: block; }
     article.bench-card {
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -111,6 +136,23 @@
     <p class="subtitle">Public, reproducible NLHE benchmark. Receipts the <code>trainer --publish-index</code> aggregator writes land here.</p>
     <p class="meta" id="meta">loading <code>/api/index</code>...</p>
     <div id="index-table"></div>
+    <!--
+      STW-052: the dashboard's true empty-state
+      paragraph. The element is `display: none`
+      by default (the page hides it on a
+      populated live `INDEX.json`); the JS
+      below flips the `visible` class on when
+      `index.entry_count === 0`. The paragraph
+      embeds the three publish-chain runbook
+      commands an operator runs to populate a
+      fresh checkout (proof → publish-index →
+      publish-index-s3). A visitor who lands
+      on the URL with no live index sees a
+      friendly "no receipts yet" message
+      instead of the demo-data table the
+      pre-STW-052 router served.
+    -->
+    <p class="empty-state" id="empty-state">No receipts yet. Run <code>scripts/testnet-live-proof.sh</code> + <code>scripts/testnet-live-publish-index.sh</code> + <code>scripts/testnet-live-publish-index-s3.sh</code> to populate.</p>
     <!--
       STW-042: a first-time visitor with an empty
       `INDEX.json` sees the "No receipts in this
@@ -142,6 +184,7 @@
     (function () {
       var meta = document.getElementById('meta');
       var tableHost = document.getElementById('index-table');
+      var emptyState = document.getElementById('empty-state');
       function el(tag, props, children) {
         var e = document.createElement(tag);
         if (props) for (var k in props) {
@@ -277,6 +320,40 @@
             ? index.created_at_utc
             : '(created_at_utc not stamped — re-run with RBP_PUBLISH_INDEX_UTC set)';
           meta.textContent = 'index: ' + publishRoot + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + createdAt;
+          // STW-052: the empty-state paragraph
+          // is hidden by default; the JS flips
+          // the `visible` class on when the
+          // `INDEX.json` reports `entry_count
+          // === 0`. The `entry_count` field
+          // the trainer's `PublishIndex`
+          // aggregator stamps is the same
+          // field the `getEntryCount` JS read
+          // used before, so a populated live
+          // `INDEX.json` (entry_count > 0)
+          // never shows the friendly
+          // paragraph. The class flip is the
+          // only DOM change — the paragraph
+          // text is a static block a JS
+          // disable / a future testnet
+          // visitor with `JS off` would not
+          // see (the `display: none` default
+          // keeps it invisible to screen
+          // readers too).
+          if (emptyState) {
+            if ((index.entry_count || 0) === 0) {
+              emptyState.className = emptyState.className + ' visible';
+            } else {
+              // Defensive: a populated live
+              // `INDEX.json` must NOT show
+              // the empty-state paragraph
+              // (the `display: none` default
+              // is the source of truth; this
+              // branch strips any `visible`
+              // class a future regression
+              // might leak).
+              emptyState.className = emptyState.className.replace(/\s*visible/g, '');
+            }
+          }
           tableHost.appendChild(renderTable(index));
         })
         .catch(function (e) {

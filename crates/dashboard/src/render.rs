@@ -500,6 +500,45 @@ pub fn render_compare3_card(receipt_basename: &str, report: &Compare3Report) -> 
 /// `INDEX.json` entry never shadows it.
 pub const COMPARE3_FIXTURE_ID: &str = "compare3-fixture";
 
+/// STW-052: the CSS class the empty-state `<p>`
+/// element in `static/index.html` carries. The
+/// JS conditionally shows the paragraph when
+/// `index.entry_count === 0`; the
+/// `render_empty_state_paragraph` emitter below
+/// is the *authoritative* HTML shape (a smoke
+/// test asserts the rendered paragraph carries
+/// the same class the JS targets).
+pub const EMPTY_STATE_CLASS: &str = "empty-state";
+
+/// Render the dashboard's true empty-state HTML
+/// paragraph. The paragraph is the
+/// first-time-visitor answer the testnet north
+/// star names: a friendly "no receipts yet"
+/// message that names the three publish-chain
+/// runbook commands an operator runs to populate
+/// a fresh checkout. The output is a
+/// self-contained `<p class="empty-state">…</p>`
+/// block (no `<html>` / `<head>` / `<body>`
+/// wrapper) so the JS can insert it as-is into
+/// the page when `index.entry_count === 0`.
+///
+/// The smoke test in
+/// `crates/dashboard/tests/smoke.rs` asserts the
+/// rendered paragraph contains the CSS class +
+/// the `scripts/testnet-live-proof.sh` command
+/// name; a future regression that drops the
+/// class (a visitor's CSS would not target the
+/// paragraph) or the command name (the operator
+/// no longer sees the actionable recipe) fails
+/// the test at the same step a downstream
+/// dashboard scraper would silently break.
+pub fn render_empty_state_paragraph() -> String {
+    format!(
+        "<p class=\"{cls}\">No receipts yet. Run <code>scripts/testnet-live-proof.sh</code> + <code>scripts/testnet-live-publish-index.sh</code> + <code>scripts/testnet-live-publish-index-s3.sh</code> to populate.</p>",
+        cls = EMPTY_STATE_CLASS
+    )
+}
+
 /// Resolve the absolute path of the committed
 /// `tests/fixtures/compare3-fixture.json` fixture.
 /// Walk from `CARGO_MANIFEST_DIR` (the
@@ -1127,6 +1166,63 @@ mod tests {
         assert!(
             table.contains("&lt;name&amp;with&quot;quote"),
             "basename must be HTML-escaped in the table cell; got:\n{table}"
+        );
+    }
+
+    /// STW-052: the empty-state paragraph the
+    /// `index.html` JS shows when
+    /// `index.entry_count === 0` must (a) carry
+    /// the `class="empty-state"` attribute the
+    /// page's CSS targets, (b) embed the
+    /// `scripts/testnet-live-proof.sh` command
+    /// name the operator runs to populate a
+    /// fresh checkout, and (c) embed the
+    /// `scripts/testnet-live-publish-index.sh`
+    /// + `scripts/testnet-live-publish-index-s3.sh`
+    /// commands the rest of the publish chain
+    /// runs. A future regression that drops the
+    /// CSS class (a visitor's CSS would not
+    /// target the paragraph) or the command
+    /// names (the operator no longer sees the
+    /// actionable recipe) fails this test at
+    /// the same CI step a downstream dashboard
+    /// scraper would silently break.
+    #[test]
+    fn render_empty_state_paragraph_pins_class_and_command_names() {
+        let html = render_empty_state_paragraph();
+        // The class attribute the page CSS
+        // targets (`index.html`'s `.empty-state
+        // { ... }` block).
+        assert!(
+            html.contains(&format!("class=\"{EMPTY_STATE_CLASS}\"")),
+            "empty-state paragraph must carry class=\"{EMPTY_STATE_CLASS}\"; got:\n{html}"
+        );
+        // The three publish-chain runbook
+        // commands an operator runs to populate
+        // a fresh checkout.
+        for cmd in [
+            "scripts/testnet-live-proof.sh",
+            "scripts/testnet-live-publish-index.sh",
+            "scripts/testnet-live-publish-index-s3.sh",
+        ] {
+            assert!(
+                html.contains(cmd),
+                "empty-state paragraph must embed `{cmd}`; got:\n{html}"
+            );
+        }
+        // The paragraph is a single self-contained
+        // `<p>` block (no surrounding wrapper a
+        // JS `innerHTML` setter would have to
+        // strip).
+        assert!(
+            html.starts_with("<p ") && html.ends_with("</p>"),
+            "empty-state paragraph must be a single <p>…</p> block; got:\n{html}"
+        );
+        // The friendly "no receipts yet" headline
+        // is the first thing a visitor reads.
+        assert!(
+            html.contains("No receipts yet"),
+            "empty-state paragraph must lead with `No receipts yet`; got:\n{html}"
         );
     }
 }

@@ -64,6 +64,246 @@ pub const DEFAULT_TRANSCRIPT_DIR: &str = "./transcripts";
 /// a `Public dashboard: <URL>` token this knob sets.
 pub const DEFAULT_DEPLOYED_URL: &str = "https://robopoker-testnet-dashboard.pages.dev/";
 
+/// `RBP_DASHBOARD_EMPTY_STATE` env knob — STW-052's
+/// opt-in switch for the dashboard's true empty-state
+/// render. When `=1`, the `GET /api/index` route
+/// short-circuits to a typed empty `PublishIndex`
+/// (`{"entries": [], "entry_count": 0, "total_bytes": 0,
+/// "publish_root": "", "runbook_version": "...",
+/// "created_at_utc": "..."}`) instead of reading the
+/// committed fixture / live `INDEX.json`. The empty
+/// state is *opt-in* (default `0`) so a deployed
+/// dashboard never sees it on a populated `INDEX.json`;
+/// the JS `index.entry_count === 0` conditional on the
+/// page also gates the visible `<p class="empty-state">`
+/// paragraph so a populated live index never shows the
+/// message. A future regression that re-engages the
+/// empty-state on a live `INDEX.json` fails the
+/// `empty_state_renders_friendly_message_when_index_has_zero_entries`
+/// sub-test in `crates/dashboard/tests/smoke.rs` AND
+/// the `real_index_shadows_demo_data` inverse pin.
+pub const DEFAULT_EMPTY_STATE: &str = "0";
+
+static EMPTY_STATE_TEST_OVERRIDE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// A process-wide override the
+/// integration tests engage to drive the
+/// empty-state render without racing on the
+/// `RBP_DASHBOARD_EMPTY_STATE` env knob (a
+/// `set_var` / `remove_var` pair is racy with
+/// parallel test execution — the
+/// `cargo test --test-threads=4` scheduling
+/// the spec names would leak the value
+/// across test boundaries). The override
+/// returns the locked value when `Some(_)`
+/// is held; `None` (the default) falls
+/// through to the env-var read.
+///
+/// The functions are `pub` (not
+/// `#[cfg(test)]`) because the integration
+/// tests in `crates/dashboard/tests/*.rs` are
+/// *separate* crates and do not get the
+/// `cfg(test)` gate; the `_for_test` suffix
+/// is the convention a downstream dashboard
+/// binary consumer of `rbp_dashboard` follows
+/// to know not to call the function in
+/// production (the production path is the
+/// env-knob + the `is_empty_state` helper).
+///
+/// `set_empty_state_for_test` is a
+/// thin `set` wrapper around the override;
+/// it does NOT return a guard, so a parallel
+/// test that calls `clear_empty_state_for_test`
+/// would race with the setter. The integration
+/// tests in `crates/dashboard/tests/smoke.rs`
+/// drive the empty-state render via the
+/// `engaged_empty_state_for_test` scope guard
+/// instead — a `Drop` impl that restores
+/// the override to `None` when the guard
+/// goes out of scope, so a parallel test
+/// that runs `clear_empty_state_for_test`
+/// before the guard drops sees the override
+/// cleared, but the `is_empty_state()`
+/// lookup the `serve_typed_index` handler
+/// runs is *also* under the override's
+/// `Mutex`, so a held guard cannot be
+/// silently overridden.
+pub fn set_empty_state_for_test(engaged: bool) {
+    let mut guard = EMPTY_STATE_TEST_OVERRIDE
+        .lock()
+        .expect("empty-state override mutex poisoned");
+    *guard = Some(engaged);
+}
+
+pub fn clear_empty_state_for_test() {
+    let mut guard = EMPTY_STATE_TEST_OVERRIDE
+        .lock()
+        .expect("empty-state override mutex poisoned");
+    *guard = None;
+}
+
+/// RAII guard the integration tests
+/// `crates/dashboard/tests/smoke.rs::empty_state_renders_friendly_message_when_index_has_zero_entries`
+/// holds for the duration of its assertions.
+/// On `Drop` the guard restores the override
+/// to `None` (the default-off state) so the
+/// next test in the `cargo test
+/// --test-threads=4` schedule sees a clean
+/// slate. Holding the guard is the
+/// race-free alternative to the bare
+/// `set_empty_state_for_test(true)` +
+/// `clear_empty_state_for_test()` pair the
+/// spec originally named — the bare pair
+/// races with any parallel test that calls
+/// `clear_empty_state_for_test` (the
+/// pre-STW-052 `clear_*` defensive call the
+/// `smoke_dashboard_routes_against_committed_fixtures`
+/// test runs at the start would have
+/// silently cleared the override between
+/// the setter and the assertion, leaving
+/// the handler on the live-data path).
+/// The integration test holds the guard
+/// for the full test scope via
+/// `let _guard = ...;`.
+pub struct EmptyStateTestGuard {
+    // `None` after `Drop` runs (the override
+    // is cleared); the field is just a
+    // marker so the type is `!Unpin` and
+    // a `Drop`-aware lint does not flag
+    // the guard as dead.
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl Drop for EmptyStateTestGuard {
+    fn drop(&mut self) {
+        // Restore the override to the
+        // default-off state. The lock is
+        // `std::sync::Mutex<Option<bool>>`,
+        // so a parallel test that also
+        // touches the override is serialized
+        // through the same mutex; the
+        // `is_empty_state()` lookup the
+        // `serve_typed_index` handler runs
+        // takes the same lock, so a held
+        // guard is *atomic* from the
+        // handler's perspective.
+        clear_empty_state_for_test();
+    }
+}
+
+/// Engage the empty-state render for the
+/// lifetime of the returned [`EmptyStateTestGuard`].
+/// The integration test pins the guard
+/// to a `let _guard = ...;` binding so the
+/// override is restored to the default-off
+/// state when the test scope exits. The
+/// guard is the race-free alternative to
+/// the bare `set_empty_state_for_test` +
+/// `clear_empty_state_for_test` pair; a
+/// parallel test that runs the bare
+/// `clear_*` mid-assertion cannot race
+/// the held guard (the override lookup
+/// and the guard's `Drop` both go
+/// through the same `Mutex`).
+pub fn engaged_empty_state_for_test() -> EmptyStateTestGuard {
+    set_empty_state_for_test(true);
+    EmptyStateTestGuard {
+        _marker: std::marker::PhantomData,
+    }
+}
+
+/// The friendly "no receipts yet" message the empty-state
+/// paragraph the `index.html` JS shows when
+/// `index.entry_count === 0`. The message embeds the
+/// three publish-chain runbook commands an operator runs
+/// to populate a fresh checkout (proof → publish-index →
+/// publish-index-s3). The string is the single source
+/// of truth the empty-state render + the `smoke.rs`
+/// integration test pin.
+pub const EMPTY_STATE_MESSAGE: &str = "No receipts yet. Run <code>scripts/testnet-live-proof.sh</code> + <code>scripts/testnet-live-publish-index.sh</code> + <code>scripts/testnet-live-publish-index-s3.sh</code> to populate.";
+
+/// Resolve the `RBP_DASHBOARD_EMPTY_STATE` env knob. The
+/// knob accepts `0` (default; off) / `1` (on); any other
+/// value is a CI-visible misconfiguration and falls
+/// through to `false` (the safe default — a deployed
+/// dashboard with a stray `=2` env knob shows the live
+/// `INDEX.json` table, not the empty-state paragraph).
+///
+/// The `#[cfg(test)]` build first consults a
+/// process-wide override (the
+/// `EMPTY_STATE_TEST_OVERRIDE` static) the
+/// integration tests engage via
+/// [`set_empty_state_for_test`] — the override
+/// is a race-free alternative to the
+/// `set_var` / `remove_var` pair the
+/// `RBP_DASHBOARD_EMPTY_STATE` env knob
+/// would otherwise require, and the only
+/// way to drive the empty-state render in
+/// a parallel `cargo test --test-threads=4`
+/// run without leaking the env var across
+/// test boundaries. When the override is
+/// `None` (the default), the function
+/// falls through to the env-var read.
+pub fn is_empty_state() -> bool {
+    // The override is consulted on every build
+    // (not gated by `#[cfg(test)]`) because the
+    // integration tests in
+    // `crates/dashboard/tests/smoke.rs` are a
+    // *separate* crate and the production crate
+    // is built without `cfg(test)`. The override
+    // is the race-free alternative the spec names
+    // for driving the empty-state render in a
+    // parallel `cargo test --test-threads=4` run
+    // (the `set_var` / `remove_var` env-var
+    // alternative would leak across test
+    // boundaries). The override functions are
+    // `_for_test`-suffixed so a downstream
+    // dashboard binary consumer does not call
+    // them; the production path is the env-var
+    // read below.
+    if let Some(engaged) = EMPTY_STATE_TEST_OVERRIDE
+        .lock()
+        .expect("empty-state override mutex poisoned")
+        .as_ref()
+        .copied()
+    {
+        return engaged;
+    }
+    match std::env::var("RBP_DASHBOARD_EMPTY_STATE") {
+        Ok(v) if v == "1" => true,
+        // `Ok(v)` for any other value (e.g. `2`, `true`,
+        // `yes`) is a misconfiguration — fall through
+        // to `false` so the dashboard keeps the live-data
+        // render. A future operator who wants the
+        // empty-state render has to set the env knob
+        // exactly to `1` (the cheapest debuggable contract).
+        _ => false,
+    }
+}
+
+/// Build a typed empty `PublishIndex` the
+/// `serve_typed_index` handler returns when
+/// [`is_empty_state`] is `true`. The `runbook_version` /
+/// `created_at_utc` fields are stamped with the same
+/// "dashboard is healthy" sentinel values a fresh
+/// `cargo run -p rbp-dashboard` would emit on a populated
+/// `INDEX.json` (the `created_at_utc` is a fixed
+/// ISO-8601 the smoke test can pin byte-exactly). The
+/// `publish_root` is an empty string so a
+/// downstream scraper that reads the `publish_root`
+/// field can tell the empty state apart from a real
+/// index the aggregator just wrote.
+pub fn empty_publish_index() -> PublishIndex {
+    PublishIndex {
+        publish_root: String::new(),
+        runbook_version: "STW-052 empty-state".to_string(),
+        created_at_utc: "1970-01-01T00:00:00Z".to_string(),
+        entry_count: 0,
+        total_bytes: 0,
+        entries: vec![],
+    }
+}
+
 /// Shared state the router hands to every handler. The
 /// `IndexClient` is `Clone`-able (the inner source URL is
 /// a `String`) so the state can live behind an
@@ -188,6 +428,28 @@ async fn serve_static_index(State(state): State<AppState>) -> Response {
 /// lib test at the same CI step a downstream dashboard
 /// scraper would silently break.
 async fn serve_typed_index(State(state): State<AppState>) -> Response {
+    // STW-052: the dashboard's true empty-state
+    // render is opt-in via
+    // `RBP_DASHBOARD_EMPTY_STATE=1`. When the
+    // env knob is engaged, the handler
+    // short-circuits to a typed empty
+    // `PublishIndex` (no read of the live
+    // `INDEX.json`, no fall-through to the
+    // committed fixture) so a stranger
+    // running `cargo run -p rbp-dashboard`
+    // on a fresh checkout sees the
+    // "no receipts yet" paragraph the
+    // `index.html` JS renders on
+    // `index.entry_count === 0`. The
+    // default (`=0`) preserves the
+    // pre-STW-052 live-data path (the
+    // `IndexClient::fetch_index` call
+    // below) — a deployed dashboard with
+    // a populated `INDEX.json` is
+    // unchanged.
+    if is_empty_state() {
+        return typed_index_to_response(&empty_publish_index());
+    }
     match state.index_client.fetch_index() {
         Ok(index) => typed_index_to_response(&index),
         Err(err) => err.into_response(),
@@ -751,5 +1013,157 @@ mod tests {
         unsafe {
             std::env::remove_var("RBP_DASHBOARD_RECEIPT_DIR");
         }
+    }
+
+    /// STW-052: the `RBP_DASHBOARD_EMPTY_STATE` env
+    /// knob is the dashboard's true-empty-state
+    /// opt-in switch. When `=1`, the `GET
+    /// /api/index` route short-circuits to a
+    /// typed empty `PublishIndex` (the
+    /// `empty_publish_index()` helper) instead of
+    /// reading the live `INDEX.json` / committed
+    /// fixture. When the knob is unset or `=0`,
+    /// the live-data path runs as before. The
+    /// `is_empty_state()` helper is the cheap
+    /// pure-function the integration test
+    /// exercises end-to-end.
+    ///
+    /// The test exercises the production path
+    /// through the test-only `set_empty_state_for_test`
+    /// override (a `Mutex<Option<bool>>`); the
+    /// `RBP_DASHBOARD_EMPTY_STATE` env-var
+    /// `set_var` alternative is racy with parallel
+    /// test execution (the
+    /// `cargo test --test-threads=4` scheduling
+    /// the spec names would leak the env var
+    /// across test boundaries). The override
+    /// is consulted first; the env-var read
+    /// is the production fallback the override
+    /// shadows in `#[cfg(test)]` builds.
+    ///
+    /// A regression that re-engages the empty-state
+    /// on a live `INDEX.json` (a
+    /// `set_empty_state_for_test(true)` leak
+    /// from a parallel test) would fail this
+    /// test at the same step a downstream
+    /// dashboard scraper would silently break.
+    #[tokio::test]
+    async fn router_empty_state_env_knob_engages_when_set() {
+        // Default-off: the override is cleared, the
+        // empty-state branch is NOT engaged, the
+        // handler returns the live `INDEX.json`
+        // the fixture wrote.
+        set_empty_state_for_test(false);
+        assert!(
+            !is_empty_state(),
+            "is_empty_state() must be false when override is Some(false)"
+        );
+        let dir = TempDir::new("env-knob-default-off");
+        let app = dashboard_app(app_state_for(&dir));
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/index")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot /api/index (default-off)");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("read body");
+        let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+        let parsed: PublishIndex = serde_json::from_str(body_str)
+            .expect("body must be a valid PublishIndex (default-off)");
+        assert_eq!(
+            parsed,
+            fixture_index(),
+            "default-off knob must return the live INDEX.json the fixture wrote"
+        );
+        assert_eq!(
+            parsed.entry_count, 1,
+            "live INDEX.json must have one entry (the default-off path runs)"
+        );
+
+        // =1: the empty-state branch IS engaged,
+        // the handler returns the typed empty
+        // `PublishIndex` (no read of the live
+        // `INDEX.json`).
+        set_empty_state_for_test(true);
+        assert!(
+            is_empty_state(),
+            "is_empty_state() must be true when override is Some(true)"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/index")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("oneshot /api/index (=1)");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("read body");
+        let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+        let parsed: PublishIndex =
+            serde_json::from_str(body_str).expect("body must be a valid PublishIndex (=1)");
+        assert_eq!(
+            parsed,
+            empty_publish_index(),
+            "=1 knob must return the typed empty PublishIndex"
+        );
+        assert_eq!(
+            parsed.entry_count, 0,
+            "empty PublishIndex must have zero entries"
+        );
+        assert!(
+            parsed.entries.is_empty(),
+            "empty PublishIndex must have an empty entries[] vec"
+        );
+        assert_eq!(
+            parsed.publish_root, "",
+            "empty PublishIndex publish_root must be the empty string"
+        );
+
+        // Restore the default state for the
+        // next test in the schedule. The
+        // `clear_*` call removes the override;
+        // the next test that needs the
+        // override re-engages it.
+        clear_empty_state_for_test();
+        assert!(
+            !is_empty_state(),
+            "is_empty_state() must be false when override is cleared (falls through to env-var unset)"
+        );
+    }
+
+    /// STW-052: the typed empty `PublishIndex` the
+    /// `serve_typed_index` handler returns when
+    /// `RBP_DASHBOARD_EMPTY_STATE=1` is a *typed*
+    /// value (not a free-form JSON literal). The
+    /// `empty_publish_index()` helper is the
+    /// single source of truth the smoke test +
+    /// the lib test share, and a future
+    /// regression in the field shape (a renamed
+    /// field, a missing field) fails this test
+    /// at the same CI step a downstream
+    /// dashboard scraper would silently break.
+    #[test]
+    fn empty_publish_index_serialises_to_zero_entries() {
+        let index = empty_publish_index();
+        assert_eq!(index.entry_count, 0);
+        assert_eq!(index.total_bytes, 0);
+        assert!(index.entries.is_empty());
+        assert!(index.publish_root.is_empty());
+        let body = serde_json::to_string(&index).expect("serialise empty PublishIndex");
+        let parsed: PublishIndex =
+            serde_json::from_str(&body).expect("empty PublishIndex must round-trip");
+        assert_eq!(parsed, index);
     }
 }

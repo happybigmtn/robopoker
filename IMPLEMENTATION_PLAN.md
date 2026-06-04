@@ -8019,7 +8019,7 @@ is NOT new scope. The new scope is `STW-051` +
   is the actionable alternative the
   empty-state principle names).**
 
-- [ ] **[P0] `STW-052` Wire the dashboard's *true
+- [x] **[P0] `STW-052` Wire the dashboard's *true
   empty state* so a stranger running
   `cargo run -p rbp-dashboard` on a fresh checkout
   with no published root sees a friendly
@@ -8712,3 +8712,943 @@ is NOT new scope. The new scope is `STW-051` +
   is the first-time-visitor
   answer the testnet north
   star names).**
+
+## Next wave - review 2026-06-04 (sixth pass)
+
+The sixth 2026-06-04 three-lens review (kanban task
+`t_689e1445`) re-applies the three lenses to the
+*current* state of `main` at commit `794d735`. The
+fifth-pass wave's four deliverables (STW-051 +
+STW-052 + STW-053 + STW-054) split as follows: the
+`STW-051` close-the-live-`<unknown>`-leakage slice
+shipped on commit `794d735` (the aggregator's
+`STW034_UNKNOWN_UTC` fallback + the dashboard's
+`index.html:316-321` meta-line friendly fallback
++ the `crates/dashboard/tests/fixtures_smoke.rs`
+literal sweep); the `STW-053` queue-cleanup row
+shipped on the same commit (the four prior-wave
+`STW-045` + `STW-046` re-affirmations + the
+morning-wave `STW-039` / `STW-040` / `STW-041` /
+`STW-044` rows are all `RESCOPED 2026-06-04 by
+STW-053` markers in the latest-wave row). The
+`STW-052` true-empty-state row and the `STW-054`
+Cloudflare-Pages-deploy row are still `[ ]` in
+the plan — **and STW-052 is functionally
+shipped on disk**, while STW-054 is the only
+remaining un-deployed piece for a stranger to
+see the dashboard. Inspecting the on-disk state
+under `crates/dashboard/static/index.html:155`
+(the `<p class="empty-state" id="empty-state">No
+receipts yet. Run <code>scripts/testnet-live-proof.sh</code>
++ <code>scripts/testnet-live-publish-index.sh</code>
++ <code>scripts/testnet-live-publish-index-s3.sh</code>
+to populate.</p>` paragraph) +
+`crates/dashboard/static/index.html:342-356` (the
+`emptyState.className = emptyState.className + '
+visible'` flip on `index.entry_count === 0`) +
+`crates/dashboard/tests/smoke.rs:376-407` (the
+`empty_state_renders_friendly_paragraph_when_index_has_no_entries`
+integration test) shows the slice is *complete
+on disk*; the plan row at the fifth-pass wave
+is lying. The `scripts/deploy-dashboard-cloudflare.sh`
+runbook + the `wrangler.toml` + the
+`deploy-dashboard-cloudflare.md` doc the fifth
+pass named do NOT exist on disk (`ls scripts/`
+returns 16 files, none matching
+`deploy-dashboard-cloudflare.sh`; the
+`wrangler.toml` is also absent), so STW-054 is
+the one remaining un-built piece of the v10
+follow-on.
+
+The sixth pass's three lenses on the *current*
+state find **three real findings the five prior
+reviews missed**, all of them small but all
+directly blocking the testnet north star:
+
+1. **The dashboard's per-row cells still render
+   the literal sentinel string `'<missing>'`
+   when `entry.receipt_basename` is missing.**
+   The fifth-pass `STW-051` swept the
+   *meta-line* `'<unknown>'` literal (at
+   `index.html:316-321`) and the
+   `crates/dashboard/tests/fixtures_smoke.rs`
+   demo-constructor literals, but
+   `crates/dashboard/static/index.html:200` still
+   has `var basename = (entry && entry.receipt_basename)
+   || '<missing>';` — the same anti-pattern
+   the fifth pass named. A future regression
+   that drops a basename from a hand-authored
+   `INDEX.json` would render `'<missing>'` to
+   a public visitor. The `crates/dashboard/tests/
+   smoke.rs` integration test does NOT pin the
+   per-row sentinel string today, so a regression
+   in the per-row cell is invisible to CI.
+2. **The deploy runbook has no
+   `live_proof ...` headline contract.** The
+   existing runbook shape (STW-019 + STW-032 +
+   STW-033 + STW-034 + STW-035 + STW-036) every
+   prior slice pinned emits a `live_proof ...`
+   headline in `SUMMARY.txt` a CI dashboard
+   can `grep ^live_proof`. The fifth-pass
+   `STW-054` row does not name a headline
+   contract — a `scripts/deploy-dashboard-cloudflare.sh`
+   runbook that ships without a
+   `live_proof dashboard deploy ...` line
+   breaks the scrape contract the chain
+   establishes.
+3. **The dashboard's `<meta>` line and the
+   README's "Public dashboard:" line are out
+   of sync at deploy time.** The README's
+   `Public dashboard: <https://robopoker-testnet-dashboard.pages.dev/>`
+   line at `README.md:313` is a baked-in
+   placeholder the CEO roadmap names as the
+   first-time-visitor answer the testnet north
+   star delivers. The `crates/dashboard/static/index.html`
+   is a checked-in file with no env-knob
+   interpolation, so the *rendered* dashboard
+   `<meta>` line never reads the actual
+   deployed URL — a real `wrangler pages deploy`
+   to a different Pages project would leave
+   the README + the dashboard both lying
+   about the URL. The Eng-lens fix is the
+   same one the existing `RBP_DASHBOARD_INDEX_URL`
+   env knob uses: a `window.__DASHBOARD_DEPLOYED_URL__`
+   global the `crates/dashboard/src/router.rs::serve_static_index`
+   handler injects on every `GET /`, sourced
+   from the `RBP_DASHBOARD_DEPLOYED_URL` env
+   knob the dashboard already declares
+   (`crates/dashboard/src/router.rs` line 60).
+
+The sixth pass therefore:
+
+(a) **Adds STW-054** (the deploy runbook the
+    fifth pass named but the plan row is still
+    `[ ]` for). Lands
+    `scripts/deploy-dashboard-cloudflare.sh`
+    + a committed `wrangler.toml` (project
+    name only, no `account_id` / no
+    `RBP_DASHBOARD_CF_API_TOKEN` secret) + a
+    `scripts/deploy-dashboard-cloudflare.md`
+    runbook doc that mirrors the existing
+    `scripts/testnet-live-publish-dashboard.md`
+    doc shape. The runbook chains
+    `trainer --verify-index <index-dir>` (the
+    pre-deploy refuse-to-deploy-red-index gate,
+    same as the S3 deploy runbook) → `wrangler
+    pages deploy <dir> --project-name <name>`
+    (the actual deploy) → a one-line
+    reconciliation step that updates the
+    README's `## Public dashboard` URL line
+    + the dashboard's `window.__DASHBOARD_DEPLOYED_URL__`
+    env knob to the URL `wrangler` printed to
+    stdout. Refuses to run with exit 3 on
+    missing `RBP_DASHBOARD_CF_API_TOKEN` (a
+    one-line `deploy-dashboard: missing RBP_DASHBOARD_CF_API_TOKEN
+    env knob` error) and on missing
+    `wrangler` on `$PATH` (a one-line
+    `deploy-dashboard: wrangler not on $PATH`
+    error) — mirrors the dashboard's
+    pre-existing `RBP_DASHBOARD_INDEX_URL`
+    fail-fast contract. Emits a one-line
+    `live_proof dashboard deploy complete:
+    pages_url=<url> files=<N> bytes=<B>`
+    headline in `SUMMARY.txt` (so the existing
+    `grep ^live_proof` scrape contract extends
+    cleanly) and a `pages_url` line in
+    `deploy.json` (the machine-readable
+    manifest the runbook writes alongside
+    `SUMMARY.txt`).
+(b) **Adds STW-055** (close the plan's
+    STW-052 false-`[ ]` row + sweep the
+    per-row `'<missing>'` literal the
+    STW-051 pass missed). Two changes in
+    one slice: (1) the planning-pinning
+    mark-`[x]` of the fifth-pass STW-052
+    row (the on-disk code is shipped, the
+    integration test is green, the plan
+    is lying) — pure markdown, no code.
+    (2) `crates/dashboard/static/index.html:200`
+    — replace the `var basename = (entry &&
+    entry.receipt_basename) || '<missing>';`
+    fallback with the same STW-051 friendly
+    pattern (`(entry && entry.receipt_basename) ||
+    '(basename not stamped — re-run with the
+    STW-034 publish-index chain)'`); add a new
+    `crates/dashboard/tests/smoke.rs` sub-test
+    that drives the dashboard with a
+    hand-authored `INDEX.json` whose
+    `entries[0].receipt_basename` is `null` and
+    asserts the response body does NOT contain
+    the literal string `'<missing>'`. The
+    per-row `'<missing>'` literal is the same
+    anti-pattern the meta-line `'<unknown>'`
+    sweep closed, just on a different code
+    path; a future regression in the per-row
+    cell is now caught at the same CI step.
+(c) **Adds STW-056** (a single planning-pinning
+    row that marks the four open prior-wave
+    rows — STW-039 + STW-040 + STW-041 + STW-044
+    — with `RESCOPED 2026-06-04 by STW-056`
+    markers + folds them into the latest
+    wave's `## Next wave` heading so a future
+    worker scanning the active queue sees
+    only the 6th-pass wave + the v6→v10
+    follow-on chain). Pure markdown, no code.
+    Each `RESCOPED` marker carries a one-line
+    rationale: STW-039 ("the dashboard's
+    static `index.html` already pins the
+    per-row action sequence; the typed
+    `StepLogger` is a nice-to-have with no
+    testnet-visible value") + STW-040 ("the
+    README's `## Quick Start` + `## TUI
+    Preview` + `## Testnet launch proof` +
+    `## Testnet publish bundle` + `##
+    Public dashboard` sections cover the
+    first-time-visitor path; a `## Try it
+    now` section is cosmetic busywork") +
+    STW-041 ("the `STW-022` plan-staleness-gate
+    has implicitly retired the `STW-001`
+    operator-decision deferred row; the
+    close-the-deferred-row task is no-op
+    work") + STW-044 (reaffirmed: the
+    re-scoped 10-lib-test static-grep
+    audit is the right shape; the morning
+    wave's `TrainerError` enum refactor was
+    wrong; STW-044 still ships the re-scoped
+    audit, see row below).
+(d) **Adds STW-044 as a fresh P1** (re-affirms
+    the morning + afternoon + third + fourth
+    + fifth pass's re-scoped shape unchanged:
+    a 10-lib-test static-grep audit that pins
+    the existing per-arm `live_proof ...`
+    error-line text without rewriting any
+    `Mode::*` arm. This is a *re-affirmation*,
+    not new scope — the right "when" is now
+    because the chain is stable and the row
+    has been re-scoped five times without
+    execution).
+(e) **Adds STW-057** (the deploy-step
+    `live_proof dashboard deploy ...`
+    headline contract). A 1-line addition
+    to `scripts/deploy-dashboard-cloudflare.sh`
+    (`printf 'live_proof dashboard deploy complete:
+    pages_url=%s files=%d bytes=%d\n' "$PAGES_URL"
+    "$FILES" "$BYTES" >> "$SUMMARY.txt"`) +
+    a new `deploy_dashboard_cloudflare_script_emits_live_proof_headline`
+    shell-shape pin in `crates/autotrain/tests/script_shape.rs`
+    that `grep ^live_proof dashboard deploy`
+    the runbook's `SUMMARY.txt` after a
+    hand-test invocation. Mirrors the
+    `live_proof publish ...` /
+    `live_proof receipt verification ...` /
+    `live_proof bundle verification ...` /
+    `live_proof index verification ...`
+    scrape contract the prior slices pinned.
+(f) **Adds STW-058** (the dashboard's
+    Pages-specific render surface). A 1-file,
+    5-line fix to `crates/dashboard/src/router.rs::serve_static_index`:
+    the handler reads `RBP_DASHBOARD_DEPLOYED_URL`
+    (defaulting to the README's `https://robopoker-testnet-dashboard.pages.dev/`
+    placeholder) and injects a
+    `<script>window.__DASHBOARD_DEPLOYED_URL__ =
+    "<url>";</script>` line into the served
+    `index.html` bytes before the existing
+    IIFE. The `index.html` JS reads
+    `window.__DASHBOARD_DEPLOYED_URL__` and
+    uses it as the dashboard `<meta>` line's
+    trailing `deployed_at=<url>` fragment, so
+    a re-deploy to a different Pages project
+    updates the rendered dashboard's meta line
+    + the README's "Public dashboard:" line +
+    the `deploy.json` manifest in one source.
+    New `crates/dashboard/tests/smoke.rs`
+    sub-test drives the dashboard with
+    `RBP_DASHBOARD_DEPLOYED_URL` set to
+    `https://example.pages.dev/` and asserts
+    the response body contains the literal
+    string `deployed_at=https://example.pages.dev/`.
+
+Each row below names a single shippable slice
+with named files, verification command(s), and
+a `lens:` tag tracing the finding it closes.
+Rows are P0/P1 ordered; the top row is the
+highest single-shipment leverage. The
+`STW-044` row is a re-affirmation, not new
+scope. The new scope is `STW-054` + `STW-055`
++ `STW-056` + `STW-044` + `STW-057` + `STW-058`.
+
+- [ ] **[P0] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
+  + committed `wrangler.toml` +
+  `scripts/deploy-dashboard-cloudflare.md`
+  runbook doc + README "Public dashboard:"
+  reconciliation.** The single highest-leverage
+  remaining slice. Five changes in one
+  shippable PR: (1) `scripts/deploy-dashboard-cloudflare.sh`
+  — a pure-bash runbook (mirrors the
+  `scripts/testnet-live-publish-dashboard.sh`
+  + `scripts/testnet-live-publish.sh` shape:
+  script exists + is executable + parses with
+  `bash -n` + refuses to run on missing
+  `RBP_DASHBOARD_CF_API_TOKEN` with exit 3 +
+  refuses to run on missing `wrangler` on
+  `$PATH` with exit 3). Chains `trainer
+  --verify-index <index-dir>` (the pre-deploy
+  refuse-to-deploy-red-index gate) →
+  `wrangler pages deploy <index-dir>
+  --project-name robopoker-testnet-dashboard
+  --commit-dirty=true` (the actual deploy;
+  the runbook captures `wrangler`'s stdout +
+  the `pages_url=https://robopoker-testnet-dashboard.pages.dev/`
+  line `wrangler` prints) → a one-line
+  reconciliation step that updates the
+  README's `## Public dashboard` URL line
+  from the `pages.dev` placeholder to the
+  actual URL `wrangler` printed. Emits a
+  one-line `live_proof dashboard deploy complete:
+  pages_url=<url> files=<N> bytes=<B>`
+  headline in `SUMMARY.txt` and a
+  `pages_url` line in `deploy.json`
+  (the machine-readable manifest). Knobs:
+  `RBP_DASHBOARD_CF_API_TOKEN` (required;
+  the Cloudflare API token the runbook
+  exports as `CLOUDFLARE_API_TOKEN` for
+  `wrangler`), `RBP_DASHBOARD_PAGES_PROJECT`
+  (default `robopoker-testnet-dashboard`),
+  `RBP_DASHBOARD_CF_ACCOUNT_ID` (required
+  for first-time `wrangler pages project
+  create`; the runbook idempotently creates
+  the project on first run + skips on
+  subsequent runs). Exit codes: `0`
+  deploy succeeded + `live_proof dashboard
+  deploy complete:` line in `SUMMARY.txt` +
+  README `## Public dashboard` line updated
+  to the real URL, `1` script-internal error,
+  `3` missing `RBP_DASHBOARD_CF_API_TOKEN` /
+  missing `wrangler` / missing
+  `RBP_DASHBOARD_CF_ACCOUNT_ID` / failed
+  `trainer --verify-index` / failed
+  `wrangler pages deploy`. (2)
+  `wrangler.toml` — the minimum config the
+  Cloudflare Pages path needs (the
+  `name = "robopoker-testnet-dashboard"`
+  project name only; no `account_id` /
+  no `api_token` / no `compatibility_date` /
+  no `pages_build_output_dir` — `wrangler
+  pages deploy <dir>` is the explicit
+  directory path shape the runbook uses, so
+  the `pages_build_output_dir` config is
+  unnecessary). (3) `scripts/deploy-dashboard-cloudflare.md`
+  — the runbook doc that mirrors the
+  `scripts/testnet-live-publish-dashboard.md`
+  doc shape (purpose + chain steps + env
+  knobs + the `bash scripts/deploy-dashboard-cloudflare.sh
+  <index-dir>` invocation + the
+  `pages_url=<url>` line a CI dashboard
+  greps). (4) README `## Public dashboard`
+  section — turn `README.md:313` from a
+  baked-in `<https://robopoker-testnet-dashboard.pages.dev/>`
+  placeholder into a `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob-driven line: the section reads
+  `Public dashboard: <https://${RBP_DASHBOARD_DEPLOYED_URL:-robopoker-testnet-dashboard.pages.dev}/>`
+  (the `${VAR:-default}` shell-substitution
+  the README's existing `Public dashboard:`
+  style already uses for the URL + a
+  corresponding `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob section in the `## Quick Start`).
+  (5) The `crates/dashboard/tests/script_shape.rs`
+  new pin `deploy_dashboard_cloudflare_script_exists_and_parses`
+  (asserts the runbook script exists + is
+  executable + parses with `bash -n`).
+  Scope boundary: does NOT change the
+  dashboard's typed `IndexClient` /
+  `Render` / `Router` surface (the deploy
+  is a *deploy*, not a renderer change —
+  the dashboard's `GET /` + `GET /api/index`
+  + `GET /transcript/:id` + `GET /bench/:id`
+  surface is unchanged); does NOT push via
+  a vendored Cloudflare SDK (the live
+  `wrangler pages deploy` shell-out is the
+  bash runbook's job — adding a 50-MB SDK
+  to a no-system-deps `trainer` binary is
+  the inverse of the "pure bash + cargo +
+  trainer" shape the rest of the autotrain
+  pipeline already follows); does NOT
+  introduce a `node` / `npm` dependency
+  (`wrangler` is a standalone Rust binary
+  distributed via `npm i -g wrangler` /
+  `cargo install wrangler` — the runbook
+  only requires `wrangler` on `$PATH`, the
+  install method is the operator's choice);
+  does NOT change the STW-034 `PublishIndex`
+  / `IndexedEntry` JSON shape (a shape
+  drift fails the deploy runbook's
+  pre-deploy `trainer --verify-index` call);
+  does NOT change the dashboard's
+  `crates/dashboard/static/index.html`
+  column shape (the deploy is a deploy, not
+  a UI change). Verification commands:
+  `bash -n scripts/deploy-dashboard-cloudflare.sh`,
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the 1 new shape pin
+  passes), `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`. Hand-test commands:
+  `unset RBP_DASHBOARD_CF_API_TOKEN; scripts/deploy-dashboard-cloudflare.sh
+  receipts/publish-20260604T050000Z/index/`
+  (exits 3 + the runbook prints
+  `deploy-dashboard: missing RBP_DASHBOARD_CF_API_TOKEN
+  env knob` — the fail-fast path is live);
+  `PATH=/usr/bin:/bin wrangler -V; scripts/deploy-dashboard-cloudflare.sh
+  receipts/publish-20260604T050000Z/index/`
+  (exits 3 + the runbook prints
+  `deploy-dashboard: wrangler not on $PATH`
+  — the second fail-fast path is live).
+  Required tests: 1 new shape pin
+  `deploy_dashboard_cloudflare_script_exists_and_parses`
+  in `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-035 (the `trainer
+  --publish-index-remote` arm the runbook
+  consumes the `INDEX.json` from), STW-036
+  (the v10 dashboard crate the runbook
+  deploys), STW-049 + STW-050 (the
+  dashboard's column-shape wire + the
+  swept `<unknown>` literals the deployed
+  dashboard renders), STW-051 (the
+  friendly-fallback meta line the deployed
+  dashboard renders when an `INDEX.json`
+  is missing a stamp), STW-055 (the
+  per-row `'<missing>'` sweep the deployed
+  dashboard renders when a row is missing
+  a basename). Estimated scope: S. Completion
+  signal: `bash -n scripts/deploy-dashboard-cloudflare.sh`
+  passes; the new shape pin in
+  `script_shape.rs` is green; a CI
+  dashboard can `grep ^deploy-dashboard`
+  the runbook's `SUMMARY.txt` after an
+  operator runs the runbook for the first
+  time + the `wrangler pages deploy` creates
+  the Pages project + the `wrangler.toml`
+  is committed with no secrets + the
+  README's `## Public dashboard` line
+  updates to the real `pages.dev` URL.
+  **`lens:` CEO (the *deploy* leg of the
+  public-surface north star — a stranger
+  clicking the README link gets a real
+  Cloudflare Pages URL after the first
+  runbook invocation; the four prior
+  reviews shipped the *data feed* and the
+  *render*, STW-054 ships the *deploy*) +
+  Eng (the runbook is pure bash + `wrangler`
+  + `cargo test` + `bash -n`, mirroring
+  the STW-019 + STW-032 + STW-033 + STW-034
+  + STW-035 + STW-036 shape; the
+  `wrangler.toml` is the minimum config the
+  Cloudflare Pages path needs — no vendored
+  SDK / no `node` / no `npm`) + Design (the
+  `<https://robopoker-testnet-dashboard.pages.dev/>`
+  placeholder URL in the README becomes a
+  real URL after the first runbook
+  invocation; the "Public dashboard:
+  <...>" line at `README.md:313` is the
+  first-time-visitor answer the testnet
+  north star names).**
+
+- [ ] **[P0] `STW-055` Close the plan's
+  STW-052 false-`[ ]` row + sweep the
+  per-row `'<missing>'` literal the STW-051
+  pass missed.** Three changes in one
+  shippable slice: (1) the planning-pinning
+  mark-`[x]` of the fifth-pass `STW-052`
+  row (the on-disk code at
+  `crates/dashboard/static/index.html:155`
+  + `index.html:342-356` +
+  `crates/dashboard/tests/smoke.rs:376-407`
+  is shipped, the integration test is
+  green, the plan is lying) — pure markdown,
+  no code. (2) `crates/dashboard/static/index.html:200`
+  — replace the `var basename = (entry &&
+  entry.receipt_basename) || '<missing>';`
+  fallback with the same STW-051 friendly
+  pattern: `var basename = (entry &&
+  entry.receipt_basename) || '(basename
+  not stamped — re-run with the STW-034
+  publish-index chain)'`. (3) New
+  `crates/dashboard/tests/smoke.rs` sub-test
+  `per_row_basename_does_not_render_missing_sentinel`
+  drives the dashboard's `GET /` route with
+  a hand-authored `INDEX.json` whose
+  `entries[0].receipt_basename` is `null`
+  (or absent) and asserts the response body
+  does NOT contain the literal string
+  `'<missing>'`. The per-row `'<missing>'`
+  literal is the same anti-pattern the
+  meta-line `'<unknown>'` sweep closed, just
+  on a different code path; a future
+  regression in the per-row cell is now
+  caught at the same CI step. The
+  pre-existing `crates/dashboard/tests/smoke.rs::empty_state_renders_friendly_paragraph_when_index_has_no_entries`
+  test stays green (the per-row fallback is
+  orthogonal to the empty-state paragraph —
+  the empty-state fires on `entry_count ===
+  0`, the per-row fallback fires on
+  `entries[0].receipt_basename === null`).
+  Scope boundary: does NOT change the
+  per-row column shape (the 10-column
+  STW-050 split stays the same); does NOT
+  change the meta-line fallback the
+  STW-051 pass shipped (the per-row cell
+  is a different code path); does NOT
+  introduce a new render emitter (the
+  `index.html` JS is the only change).
+  Verification commands: `cargo test -p
+  rbp-dashboard --test smoke` (the new
+  sub-test + the existing 4 sub-tests
+  all pass), `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`. Hand-test command:
+  `RBP_DASHBOARD_INDEX_URL=file://$PWD/crates/dashboard/tests/fixtures/index-missing-basename.json
+  cargo run -p rbp-dashboard` (a stranger
+  who hand-authors a broken `INDEX.json`
+  sees the friendly `(basename not
+  stamped — re-run with the STW-034
+  publish-index chain)` placeholder, not
+  the `'<missing>'` literal). Required
+  tests: 1 new sub-test
+  `per_row_basename_does_not_render_missing_sentinel`
+  in `crates/dashboard/tests/smoke.rs`.
+  Dependencies: STW-050 (the per-row
+  column-split the per-row cell renders
+  inside), STW-051 (the meta-line
+  friendly-fallback pattern the per-row
+  fallback mirrors). Estimated scope: XS.
+  Completion signal: `cargo test -p
+  rbp-dashboard --test smoke` is green
+  with the new sub-test; the per-row
+  `'<missing>'` literal is gone from
+  `index.html:200`; the planning-pinning
+  mark-`[x]` of the fifth-pass STW-052
+  row is committed. **`lens:` Design
+  (the per-row `'<missing>'` literal is
+  the same AI-slop anti-pattern the
+  meta-line `'<unknown>'` sweep closed;
+  a future regression in the per-row
+  cell is invisible to the existing
+  smoke test, so the new sub-test is
+  the only thing that closes the
+  regression gap) + Eng (the fix is a
+  1-line JS change + a 1-line planning
+  pin + a 1-sub-test addition — three
+  changes in one slice because the
+  planning pin and the code sweep
+  share the same shipping commit;
+  pulling the planning pin out of
+  scope would re-introduce the
+  false-`[ ]` row the fifth pass
+  failed to mark).**
+
+- [ ] **[P1] `STW-056` Mark the four open
+  prior-wave rows — `STW-039` + `STW-040`
+  + `STW-041` + `STW-044` — with
+  `RESCOPED 2026-06-04 by STW-056` markers
+  + fold them into the latest wave's
+  `## Next wave` heading so a future
+  worker scanning the active queue sees
+  only the 6th-pass wave + the v6→v10
+  follow-on chain.** Pure markdown, no
+  code. Each `RESCOPED` marker carries a
+  one-line rationale: `STW-039`
+  ("rescoped — the dashboard's static
+  `index.html` already pins the per-row
+  action sequence; a typed `StepLogger`
+  in `crates/autotrain/src/observe.rs`
+  is a nice-to-have with no testnet-visible
+  value") + `STW-040` ("rescoped — the
+  README's `## Quick Start` + `## TUI
+  Preview` + `## Testnet launch proof` +
+  `## Testnet publish bundle` + `##
+  Public dashboard` sections cover the
+  first-time-visitor path; a `## Try it
+  now` section is cosmetic busywork that
+  the CEO lens's subtraction default
+  drops") + `STW-041` ("rescoped — the
+  `STW-022` plan-staleness-gate has
+  implicitly retired the `STW-001`
+  operator-decision deferred row; the
+  close-the-deferred-row task is no-op
+  work because the `STW-022` gate
+  mechanically prevents a future
+  re-introduction of the deferred row")
+  + `STW-044` ("rescoped — re-affirmed
+  unchanged as a `P1` in this wave;
+  the re-scoped 10-lib-test static-grep
+  audit is the right shape; the morning
+  wave's `TrainerError` enum refactor
+  was wrong; see the `STW-044` row
+  below for the shippable slice"). The
+  `RESCOPED` markers are committed to
+  `IMPLEMENTATION_PLAN.md` in the same
+  PR as the `STW-044` audit lands. The
+  five prior "## Next wave - review
+  2026-06-04 (*)" sections (morning +
+  afternoon + third + fourth + fifth
+  pass, ~4800 lines of historical log)
+  stay in the plan as audit trail; the
+  `STW-056` row's purpose is to mark
+  the carry-forward rows so a worker
+  scanning the active queue does not
+  re-`dispatch` shipped work. Scope
+  boundary: does NOT delete the
+  `RESCOPED` rows (audit trail);
+  does NOT introduce a new
+  planning-pinning tool (a markdown
+  edit is sufficient); does NOT
+  change the morning + afternoon +
+  third + fourth + fifth pass
+  section content (the prior review
+  rationale is historical record).
+  Verification commands: `git diff
+  --stat IMPLEMENTATION_PLAN.md` (the
+  four `RESCOPED` markers are present),
+  `git log --oneline -5 -- IMPLEMENTATION_PLAN.md`
+  (the `STW-056` commit is the latest
+  plan-file change). Required tests:
+  none (pure markdown). Dependencies:
+  none. Estimated scope: XS. Completion
+  signal: the four `RESCOPED 2026-06-04
+  by STW-056` markers are committed in
+  `IMPLEMENTATION_PLAN.md`. **`lens:`
+  CEO (the CEO lens's *focus as
+  subtraction* / *subtraction default*
+  principle: a worker scanning the
+  active queue should see only the
+  ships-now rows, not the historical
+  carry-forward rows; the five prior
+  waves' open rows are the planning
+  equivalent of feature bloat) +
+  Eng (the `RESCOPED` markers are a
+  4-line markdown edit; the work is
+  not in the code, it's in the
+  plan's own signal-to-noise ratio).**
+
+- [ ] **[P1] `STW-044` Re-affirmation of
+  the morning + afternoon + third +
+  fourth + fifth pass's re-scoped
+  shape: a 10-lib-test static-grep
+  audit that pins the existing
+  per-arm `live_proof ...` error-line
+  text without rewriting any `Mode::*`
+  arm.** This is a *re-affirmation*,
+  not new scope. The morning wave's
+  `TrainerError` enum refactor (a
+  single error type unifying the per-arm
+  error surfaces) was the wrong shape
+  — it required rewriting every
+  `Mode::*` arm's error handling, which
+  is the inverse of the "no-surprise
+  upgrade" contract the chain establishes.
+  The afternoon + third + fourth +
+  fifth passes re-scoped the row to a
+  10-lib-test static-grep audit that
+  pins the *existing* per-arm
+  `live_proof ...` error-line text
+  (e.g. `live_proof publish error:
+  receipt is red: ...` /
+  `live_proof bundle verification
+  passed: ...` /
+  `live_proof remote verification
+  passed: ...` /
+  `live_proof index verification
+  passed: ...` /
+  `live_proof receipt verification
+  passed: ...` /
+  `live_proof replay error: ...` /
+  `live_proof compare error: ...` /
+  `live_proof compare3 error: ...` /
+  `live_proof publish_index error: ...` /
+  `live_proof publish_remote error: ...`)
+  without rewriting any `Mode::*`
+  arm. 10 new lib tests in
+  `crates/autotrain/src/<mode>.rs::tests`
+  (one per arm: `publish` + `publish_index` +
+  `publish_remote` + `publish_index_remote` +
+  `verify_receipt` + `verify_bundle` +
+  `verify_remote` + `verify_index` + `replay` +
+  `compare` + `compare3`) that drive
+  the per-arm `Mode::*` handler with a
+  hand-rolled failing input (a missing
+  arg / a red receipt / a missing file /
+  a missing bucket) and assert the
+  `eprintln!` line is byte-identical
+  to the pinned contract. The
+  `TrainerError` enum is NOT introduced
+  (the morning-wave refactor is
+  rescoped away). The shape mirrors
+  the `crates/dashboard/tests/smoke.rs::per_row_basename_does_not_render_missing_sentinel`
+  sub-test the STW-055 slice adds: a
+  regression in the per-arm error
+  line is now caught at the same
+  CI step. Scope boundary: does NOT
+  introduce a new error type
+  (the morning-wave `TrainerError`
+  refactor is rescoped away); does
+  NOT change the per-arm `Mode::*`
+  handler code (the audit is
+  *read-only* with respect to the
+  handler — it pins the existing
+  text, it does not rewrite it);
+  does NOT change the `trainer --*`
+  CLI argv shape (the per-arm argv
+  is unchanged); does NOT change
+  the per-step `live_proof ...`
+  headline contract the prior slices
+  pinned. Verification commands:
+  `cargo test -p rbp-autotrain
+  --test error_shape_audit` (the
+  10 new lib tests pass), `cargo
+  test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Hand-test command: `unset
+  RBP_DASHBOARD_INDEX_URL; trainer
+  --publish-index /nonexistent`
+  (exits 2 + prints the pinned
+  `live_proof publish_index error:
+  io error: ...` line). Required
+  tests: 10 new lib tests in
+  `crates/autotrain/src/<mode>.rs::tests`
+  (one per arm). Dependencies: STW-019
+  (the per-step `live_proof ...` headline
+  contract the audit pins), STW-028
+  (the `trainer --verify-receipt` arm
+  the audit covers), STW-032 (the
+  `trainer --publish` arm), STW-033
+  (the `trainer --publish-remote` arm),
+  STW-034 (the `trainer --publish-index`
+  arm), STW-035 (the `trainer --publish-index-remote`
+  arm), STW-018 (the `trainer --compare`
+  arm), STW-031 (the `trainer --compare3`
+  arm), STW-016 (the `trainer --replay`
+  arm). Estimated scope: S. Completion
+  signal: `cargo test -p rbp-autotrain
+  --test error_shape_audit` is green
+  with the 10 lib tests; the
+  `TrainerError` enum is NOT in
+  the crate; the per-arm
+  `Mode::*` handler code is
+  unchanged (a `git diff` of the
+  `crates/autotrain/src/<mode>.rs`
+  files shows only test-file
+  changes). **`lens:` Eng (the
+  static-grep audit is a
+  *regression-closure* slice, not
+  a *refactor* slice; the morning
+  wave's `TrainerError` refactor
+  was the wrong shape because it
+  re-wrote working code; the
+  re-scoped audit pins the working
+  code without rewriting it) +
+  Design (the per-arm
+  `live_proof ...` headline
+  contract is the scrape surface
+  a CI dashboard reads; a
+  regression in the headline
+  text is invisible to a
+  hand-grep but visible to a
+  dashboard scraper; the 10
+  lib tests are the only thing
+  that closes the regression
+  gap).**
+
+- [ ] **[P1] `STW-057` The deploy-step
+  `live_proof dashboard deploy ...`
+  headline contract the existing
+  `grep ^live_proof` scrape pattern
+  expects.** A 1-line addition to
+  `scripts/deploy-dashboard-cloudflare.sh`:
+  after the `wrangler pages deploy`
+  step exits 0 + the `wrangler` stdout
+  captures the `pages_url=...` line,
+  the runbook appends `printf 'live_proof
+  dashboard deploy complete: pages_url=%s
+  files=%d bytes=%d\n' "$PAGES_URL"
+  "$FILES" "$BYTES" >> "$SUMMARY.txt"`.
+  The `FILES` + `BYTES` counts are
+  computed by `find "$INDEX_DIR" -type
+  f -printf '%s\n' | wc -l` +
+  `find "$INDEX_DIR" -type f -printf '%s\n'
+  | awk '{s+=$1} END {print s}'` so the
+  headline is deterministic + byte-stable
+  on re-runs. New `crates/autotrain/tests/script_shape.rs`
+  shell-shape pin `deploy_dashboard_cloudflare_script_emits_live_proof_headline`
+  asserts the runbook's source contains
+  the literal `live_proof dashboard deploy
+  complete: pages_url=` string + asserts
+  the runbook's `SUMMARY.txt` (after a
+  hand-test invocation against a fixture
+  `publish/test-fixture/index/`) contains
+  the pinned headline. Mirrors the
+  `live_proof publish ...` /
+  `live_proof receipt verification ...` /
+  `live_proof bundle verification ...` /
+  `live_proof index verification ...` /
+  `live_proof remote verification ...` /
+  `live_proof index_remote verification
+  ...` scrape contract the prior slices
+  pinned. Scope boundary: does NOT
+  change the deploy runbook's chain
+  steps (the `trainer --verify-index`
+  pre-deploy gate + the `wrangler pages
+  deploy` action + the README
+  reconciliation step are unchanged —
+  the headline is *appended* to
+  `SUMMARY.txt` after the existing
+  chain, not interleaved with it);
+  does NOT introduce a new scrape
+  pattern (the `grep ^live_proof` line
+  is the existing pattern); does NOT
+  change the `deploy.json` manifest
+  shape (the `pages_url` field is the
+  machine-readable complement to the
+  `live_proof ...` headline). Verification
+  commands: `bash -n scripts/deploy-dashboard-cloudflare.sh`,
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the 1 new shape pin
+  passes + the 5 prior STW-054 pinners
+  stay green), `cargo test --workspace --
+  --test-threads=4`, `cargo check --workspace`,
+  `cargo fmt --check`. Hand-test command:
+  `scripts/deploy-dashboard-cloudflare.sh
+  publish/test-fixture/index/ 2>&1 | tail -1`
+  (the `SUMMARY.txt`'s last line is
+  `live_proof dashboard deploy complete:
+  pages_url=https://robopoker-testnet-dashboard.pages.dev/
+  files=N bytes=B`). Required tests: 1
+  new shell-shape pin
+  `deploy_dashboard_cloudflare_script_emits_live_proof_headline`
+  in `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-054 (the deploy
+  runbook the headline lives in).
+  Estimated scope: XS. Completion
+  signal: the runbook's `SUMMARY.txt`
+  ends with a `live_proof dashboard
+  deploy complete:` line; the new
+  shape pin in `script_shape.rs` is
+  green. **`lens:` Design (the
+  `live_proof ...` headline contract
+  is the scrape surface a CI dashboard
+  reads; a `scripts/deploy-dashboard-cloudflare.sh`
+  runbook that ships without a
+  headline breaks the contract the
+  chain establishes) + Eng (the
+  1-line addition mirrors the
+  `live_proof publish ...` line the
+  STW-032 runbook already pins; a
+  future `live_proof ...` contract
+  change in any of the 5 prior
+  slices is locatable to the exact
+  arm + the exact `printf` format
+  string).**
+
+- [ ] **[P1] `STW-058` The dashboard's
+  Pages-specific render surface:
+  inject `RBP_DASHBOARD_DEPLOYED_URL`
+  as a `window.__DASHBOARD_DEPLOYED_URL__`
+  global the `index.html` JS reads as
+  the dashboard `<meta>` line's
+  trailing `deployed_at=<url>` fragment.**
+  A 1-file, 5-line fix to
+  `crates/dashboard/src/router.rs::serve_static_index`:
+  the handler reads
+  `RBP_DASHBOARD_DEPLOYED_URL` (defaulting
+  to the README's `https://robopoker-testnet-dashboard.pages.dev/`
+  placeholder) and injects a
+  `<script>window.__DASHBOARD_DEPLOYED_URL__ =
+  "<url>";</script>` line into the served
+  `index.html` bytes *before* the existing
+  IIFE (the inject position is the
+  `<head>`'s tail so the script runs
+  synchronously before the body IIFE).
+  The `index.html` JS reads
+  `window.__DASHBOARD_DEPLOYED_URL__`
+  and appends a
+  `deployed_at=<window.__DASHBOARD_DEPLOYED_URL__>`
+  fragment to the existing meta
+  `textContent` line (line 322) so a
+  re-deploy to a different Pages project
+  updates the rendered dashboard's
+  meta line + the README's "Public
+  dashboard:" line + the `deploy.json`
+  manifest in one source. New
+  `crates/dashboard/tests/smoke.rs`
+  sub-test `meta_line_reflects_dashboard_deployed_url_env_knob`
+  drives the dashboard with
+  `RBP_DASHBOARD_DEPLOYED_URL` set to
+  `https://example.pages.dev/` and
+  asserts the response body contains
+  the literal string
+  `deployed_at=https://example.pages.dev/`
+  (so a future regression in the
+  env-knob read is caught at the
+  same CI step). Scope boundary: does
+  NOT change the dashboard's typed
+  `IndexClient` (the deployed-URL
+  injection is a *router* change, not
+  an `IndexClient` change); does NOT
+  change the dashboard's four-route
+  surface (the `GET /` handler is
+  the only change); does NOT change
+  the dashboard's `RBP_DASHBOARD_INDEX_URL`
+  env knob (the two env knobs are
+  orthogonal: `INDEX_URL` is the
+  `INDEX.json` source, `DEPLOYED_URL`
+  is the dashboard's own URL); does
+  NOT change the `crates/dashboard/static/index.html`
+  column shape (the meta-line
+  addition is appended, not
+  interleaved). Verification commands:
+  `cargo test -p rbp-dashboard --test
+  smoke` (the new sub-test + the
+  existing 5 sub-tests all pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Hand-test command:
+  `RBP_DASHBOARD_DEPLOYED_URL=https://example.pages.dev/
+  cargo run -p rbp-dashboard` (a
+  stranger hitting `http://localhost:8080/`
+  sees a meta line ending in
+  `deployed_at=https://example.pages.dev/`).
+  Required tests: 1 new sub-test
+  `meta_line_reflects_dashboard_deployed_url_env_knob`
+  in `crates/dashboard/tests/smoke.rs`.
+  Dependencies: STW-036 (the
+  `crates/dashboard/` static
+  dashboard crate the router lives
+  in), STW-054 (the deploy runbook
+  the `RBP_DASHBOARD_DEPLOYED_URL`
+  env knob is sourced from).
+  Estimated scope: XS. Completion
+  signal: `cargo test -p
+  rbp-dashboard --test smoke` is
+  green with the new sub-test; the
+  rendered dashboard's meta line
+  reflects the `RBP_DASHBOARD_DEPLOYED_URL`
+  env knob. **`lens:` Eng (the
+  5-line fix is the minimum surface
+  that makes the dashboard's meta
+  line + the README's "Public
+  dashboard:" line + the
+  `deploy.json` manifest all read
+  from a single env knob — the
+  same single-source-of-truth
+  pattern the existing
+  `RBP_DASHBOARD_INDEX_URL` env
+  knob uses) + Design (a
+  re-deploy to a different Pages
+  project no longer leaves the
+  README + the dashboard both
+  lying about the URL; the
+  dashboard's meta line is the
+  operator-visible signal the
+  deploy succeeded with the
+  expected URL).**

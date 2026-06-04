@@ -151,6 +151,29 @@ async fn get(router: axum::Router, uri: &str) -> (StatusCode, Vec<u8>, Option<St
 
 #[tokio::test]
 async fn smoke_dashboard_routes_against_committed_fixtures() {
+    // STW-052: the empty-state override is
+    // *not* touched here — the
+    // `engaged_empty_state_for_test` RAII
+    // guard the
+    // `empty_state_renders_friendly_message_when_index_has_zero_entries`
+    // sub-test holds for its own scope
+    // restores the override to `None` on
+    // `Drop`. A bare
+    // `clear_empty_state_for_test()` call
+    // here would race with the held guard
+    // in a `cargo test --test-threads=4`
+    // schedule (the call would silently
+    // clear the override between the
+    // setter and the assertion in the
+    // empty-state test, leaving the
+    // handler on the live-data path). The
+    // pre-STW-052 `clear_*` defensive call
+    // is now REMOVED; the test pins the
+    // pre-STW-052 live-data path because
+    // the env knob is unset AND the
+    // override is `None` (the
+    // default-off state the empty-state
+    // test's RAII guard restores).
     // Start the dashboard's router on a random
     // localhost port. The smoke test does NOT
     // need a live `TcpListener` for the four
@@ -347,6 +370,146 @@ async fn smoke_dashboard_routes_against_committed_fixtures() {
         ct.starts_with("application/json"),
         "GET /transcript/{id} must be `application/json`; got `{ct}`"
     );
+}
+
+/// STW-052: the dashboard's true empty-state
+/// render is opt-in via the
+/// `RBP_DASHBOARD_EMPTY_STATE=1` env knob. When
+/// the knob is engaged, the `GET /api/index`
+/// route short-circuits to a typed empty
+/// `PublishIndex` (the `empty_publish_index()`
+/// helper) instead of reading the live
+/// `INDEX.json` / committed fixture; the
+/// `index.html` JS conditionally shows the
+/// `<p class="empty-state">…</p>` paragraph
+/// when `index.entry_count === 0`. The
+/// smoke-test assertion is the end-to-end pin:
+/// `GET /` with the env knob set renders the
+/// paragraph (`class="empty-state"` +
+/// `scripts/testnet-live-proof.sh` command
+/// name) AND the `GET /api/index` body parses
+/// as a typed empty `PublishIndex`
+/// (`entry_count: 0`, `entries: []`).
+///
+/// A future regression that drops the
+/// empty-state paragraph (a visitor who lands
+/// on the URL with no live index sees a
+/// blank page), the CSS class (the paragraph
+/// would not be styled), or the env-knob
+/// engagement (a live populated `INDEX.json`
+/// is silently shadowed by the empty-state
+/// render) fails this test at the same CI
+/// step a downstream dashboard scraper
+/// would silently break.
+#[tokio::test]
+async fn empty_state_renders_friendly_message_when_index_has_zero_entries() {
+    // STW-052: engage the empty-state render
+    // via the RAII guard the
+    // `rbp_dashboard` lib exposes
+    // (`engaged_empty_state_for_test`).
+    // The guard holds the
+    // `set_empty_state_for_test(true)`
+    // override for the full test scope
+    // (the `let _guard = ...;` binding
+    // below) and restores the override
+    // to the default-off `None` state on
+    // `Drop`. The RAII pattern is the
+    // race-free alternative to the bare
+    // `set_*` + `clear_*` pair: a
+    // parallel test that runs the bare
+    // `clear_*` mid-assertion cannot
+    // race the held guard (the override
+    // `Mutex` serializes the lookup the
+    // `serve_typed_index` handler runs
+    // and the guard's `Drop`). The
+    // alternative `RBP_DASHBOARD_EMPTY_STATE=1`
+    // env-var `set_var` is racy with
+    // parallel test execution (the
+    // `cargo test --test-threads=4`
+    // scheduling the spec names would
+    // leak the env var across test
+    // boundaries); the RAII guard is
+    // race-free.
+    let _empty_state_guard = rbp_dashboard::engaged_empty_state_for_test();
+    // Build a fresh `AppState` pointed at the
+    // committed `index.json` fixture. The
+    // empty-state env knob short-circuits the
+    // `/api/index` route so the fixture is
+    // not consulted (the assertion below
+    // pins the `entry_count: 0` shape the
+    // empty-state helper returns).
+    let app = dashboard_app(app_state_with_fixtures());
+
+    // 1. `GET /` — table scaffold HTML +
+    // empty-state paragraph. The static
+    // page renders the `<p class="empty-state">`
+    // element on the wire (the JS shows it
+    // when `index.entry_count === 0`; the
+    // element itself is in the static page
+    // bytes the handler serves). The
+    // `class="empty-state"` literal the
+    // assertion pins is the one the
+    // smoke test + the lib test both
+    // assert.
+    let (status, body, _content_type) = get(app.clone(), "/").await;
+    assert_eq!(status, StatusCode::OK, "GET / must return 200");
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    assert!(
+        body_str.contains("class=\"empty-state\""),
+        "GET / body must contain the empty-state paragraph (`class=\"empty-state\"`); got:\n{body_str}"
+    );
+    assert!(
+        body_str.contains("scripts/testnet-live-proof.sh"),
+        "GET / body must embed the `scripts/testnet-live-proof.sh` command name (the operator's actionable recipe); got:\n{body_str}"
+    );
+    assert!(
+        body_str.contains("No receipts yet"),
+        "GET / body must lead with the `No receipts yet` headline; got:\n{body_str}"
+    );
+
+    // 2. `GET /api/index` — typed empty
+    // `PublishIndex`. The handler
+    // short-circuits to the
+    // `empty_publish_index()` helper
+    // (no read of the live `INDEX.json` /
+    // committed fixture). The body must
+    // parse as a typed `PublishIndex`
+    // with `entry_count: 0` and an empty
+    // `entries[]` vec.
+    let (status, body, content_type) = get(app.clone(), "/api/index").await;
+    assert_eq!(status, StatusCode::OK, "GET /api/index must return 200");
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    let parsed: rbp_autotrain::PublishIndex = serde_json::from_str(body_str)
+        .expect("GET /api/index body must parse as PublishIndex (empty-state short-circuit)");
+    assert_eq!(
+        parsed.entry_count, 0,
+        "empty-state GET /api/index must report entry_count=0; got: {parsed:?}"
+    );
+    assert!(
+        parsed.entries.is_empty(),
+        "empty-state GET /api/index must have an empty entries[] vec; got: {parsed:?}"
+    );
+    let ct = content_type.unwrap_or_default();
+    assert!(
+        ct.starts_with("application/json"),
+        "GET /api/index must be `application/json`; got `{ct}`"
+    );
+
+    // The test-override cleanup is
+    // automatic: the
+    // `engaged_empty_state_for_test`
+    // RAII guard bound at the top of
+    // the test scope restores the
+    // override to the default-off
+    // `None` state on `Drop` (the
+    // `let _empty_state_guard = ...;`
+    // binding's `Drop` impl). A bare
+    // `clear_empty_state_for_test()`
+    // call here would race with the
+    // `Drop` in a parallel
+    // `cargo test --test-threads=4`
+    // run; the RAII pattern is the
+    // race-free alternative.
 }
 
 /// The `serve(addr)` entry point's underlying

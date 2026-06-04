@@ -65,6 +65,35 @@ pub mod router;
 pub use index_client::{IndexClient, IndexClientError};
 pub use render::{
     BenchCardFields, COMPARE3_FIXTURE_ID, Compare3Report, Compare3SubReport, Compare3Winner,
-    compare3_fixture_path, render_bench_card, render_compare3_card, render_index_table,
+    EMPTY_STATE_CLASS, compare3_fixture_path, render_bench_card, render_compare3_card,
+    render_empty_state_paragraph, render_index_table,
 };
 pub use router::{AppState, dashboard_app, serve};
+
+/// `pub` (not `#[cfg(test)]`): re-export the
+/// `set_empty_state_for_test` /
+/// `clear_empty_state_for_test` helpers the
+/// `crates/dashboard/tests/smoke.rs`
+/// integration tests use to drive the
+/// `RBP_DASHBOARD_EMPTY_STATE` env knob
+/// without racing on the process-global env
+/// var (a `set_var` / `remove_var` pair would
+/// leak the value across parallel test
+/// boundaries in a
+/// `cargo test --test-threads=4` run).
+///
+/// The functions are *named* `_for_test` so a
+/// downstream dashboard binary consumer of
+/// `rbp_dashboard` is not tempted to call
+/// them — the public API is the env-knob +
+/// the `is_empty_state` helper, not the
+/// internal override. The integration tests
+/// access them via the `rbp_dashboard::`
+/// path. The `_for_test` suffix is the same
+/// convention the `set_var` /
+/// `remove_var` / `Mutex<Option<bool>>` lib
+/// tests use elsewhere in the workspace.
+pub use router::{
+    EmptyStateTestGuard, clear_empty_state_for_test, engaged_empty_state_for_test,
+    set_empty_state_for_test,
+};
