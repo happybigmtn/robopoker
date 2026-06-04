@@ -61,6 +61,33 @@ pub enum Mode {
     /// by `RBP_COMPARE_HANDS` (default 200) and
     /// `RBP_COMPARE_BLIND` (default `B_BLIND`).
     Compare,
+    /// STW-028: re-verify a testnet live launch proof
+    /// receipt bundle on disk (the directory the
+    /// `scripts/testnet-live-proof.sh` runbook writes
+    /// or `LiveProofReceipt::write_to` synthesises).
+    /// The mode is read-only and bypasses the DB open
+    /// (mirrors `Self::Replay`); the handler delegates
+    /// to `crate::verify_receipt::run` which calls
+    /// `LiveProofReceipt::read_and_verify` and prints a
+    /// one-line verdict a testnet dashboard can grep.
+    /// The mode closes the `testnet-live-proof`
+    /// mainnet-block hinge: a future dashboard or
+    /// auditor can verify a receipt an operator dropped
+    /// without re-running `cargo test`. The `path` is
+    /// the directory containing `SUMMARY.txt`,
+    /// `recipe.json`, and the seven per-step
+    /// `exit.txt` files; a bare `--verify-receipt`
+    /// with no path is the "missing path arg" error
+    /// the handler converts into a one-line usage +
+    /// exit 2 (the smoke + replay "data-quality
+    /// problem is a non-zero exit" convention).
+    VerifyReceipt {
+        /// Absolute or CWD-relative path to a receipt
+        /// bundle directory the runbook (or the
+        /// committed `crates/autotrain/tests/fixtures/
+        /// testnet-live-proof-fixture/`) produced.
+        path: PathBuf,
+    },
 }
 
 impl Mode {
@@ -78,6 +105,26 @@ impl Mode {
                 "--smoke" => return Self::Smoke,
                 "--bench" => return Self::Bench,
                 "--compare" => return Self::Compare,
+                "--verify-receipt" => {
+                    // The value is the next argv (matches
+                    // the `trainer --replay` style of not
+                    // using `=`). A bare `--verify-receipt`
+                    // with no value returns
+                    // `Self::VerifyReceipt` with an empty
+                    // `PathBuf`; the dispatch arm in `run()`
+                    // prints a one-line usage and exits 2
+                    // (the "data-quality problem is a
+                    // non-zero exit" convention shared with
+                    // the replay + smoke modes).
+                    return match iter.next() {
+                        Some(p) => Self::VerifyReceipt {
+                            path: PathBuf::from(p),
+                        },
+                        None => Self::VerifyReceipt {
+                            path: PathBuf::new(),
+                        },
+                    };
+                }
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -128,7 +175,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --compare | --replay <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --slow | --reset | --smoke | --bench | --compare | --replay <path> | --verify-receipt <path>"
         );
         std::process::exit(1);
     }
@@ -136,20 +183,45 @@ impl Mode {
     pub async fn run() {
         // The dispatch opens a `tokio_postgres::Client`
         // *before* the match because every variant
-        // other than `Replay` is a database-backed
-        // training pipeline. STW-016 deliberately
-        // bypasses the DB open for `Replay`: the
-        // whole point of the slice is "no DB
-        // needed" (a downstream tool runs this
-        // without `DATABASE_URL` set). The early
-        // `match` arm keeps the cost out of the
-        // hot path.
+        // other than `Replay` and `VerifyReceipt` is a
+        // database-backed training pipeline. STW-016
+        // deliberately bypasses the DB open for
+        // `Replay`: the whole point of the slice is "no
+        // DB needed" (a downstream tool runs this
+        // without `DATABASE_URL` set). STW-028 follows
+        // the same shape for `VerifyReceipt`: the
+        // verifier reads the receipt from disk via
+        // `LiveProofReceipt::read_and_verify`, no DB
+        // needed. The early `match` arm keeps the cost
+        // out of the hot path.
         if let Self::Replay { path } = Self::from_args() {
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --replay <path>");
                 std::process::exit(2);
             }
             match crate::replay::run(&path) {
+                Ok(s) => {
+                    print!("{s}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // STW-028: also bypass the DB open for
+        // `VerifyReceipt`. The verifier is read-only
+        // (no `DB_URL` / `tokio_postgres::Client` use);
+        // an empty `PathBuf` is the missing-path-arg
+        // error the mode is contractually required to
+        // convert into exit 2.
+        if let Self::VerifyReceipt { path } = Self::from_args() {
+            if path.as_os_str().is_empty() {
+                eprintln!("Usage: trainer --verify-receipt <path>");
+                std::process::exit(2);
+            }
+            match crate::verify_receipt::run(&path) {
                 Ok(s) => {
                     print!("{s}");
                     std::process::exit(0);
@@ -201,14 +273,18 @@ impl Mode {
             // compare integration tests in the same
             // CI run.
             Self::Compare => crate::bench::run_compare(client).await,
-            // The `Replay` arm was handled above; the
-            // compiler still requires an exhaustive
-            // match, so the unreachable arm is a
-            // defensive `unreachable!()` with a
-            // message a future refactor will hit if
-            // the early `match` is ever removed.
+            // The `Replay` and `VerifyReceipt` arms are
+            // handled above; the compiler still requires
+            // an exhaustive match, so the unreachable
+            // arms are defensive `unreachable!()`s with
+            // messages a future refactor will hit if the
+            // early `if let`s are ever removed.
             Self::Replay { .. } => unreachable!(
                 "Mode::Replay is dispatched before the DB open; the `Self::Replay {{ .. }}` \
+                 arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::VerifyReceipt { .. } => unreachable!(
+                "Mode::VerifyReceipt is dispatched before the DB open; the `Self::VerifyReceipt {{ .. }}` \
                  arm here is the compiler-required exhaustive-match catch-all"
             ),
         }

@@ -2148,6 +2148,186 @@ have a single source of truth.
   last `bin/tui` ORPHAN item in
   `steward/DRIFT.md`.
 
+- [x] `STW-028` `trainer --verify-receipt <path>`
+  CLI mode + committed no-DB launch-proof fixture
+  (the `testnet-live-proof` HAZARDS mainnet-block
+  hinge). `STW-019` shipped the
+  `scripts/testnet-live-proof.sh` runbook +
+  `crates/autotrain/tests/live_proof.rs` cargo-test
+  counterpart. `STW-023` shipped the
+  shared `LiveProofReceipt::read_and_verify` Rust
+  verifier the integration test calls. But the
+  verifier is library-only — a downstream tool
+  (a testnet dashboard's "verify" button, a CI
+  check, a release-gate script) that already has
+  the static `trainer` binary still needs to either
+  re-run `cargo test --test live_proof_receipt`
+  (heavy, requires the full workspace checkout) or
+  call `LiveProofReceipt::read_and_verify` via a
+  hand-rolled `use` statement (heavy, requires
+  installing the workspace's library crates).
+  STW-028 closes the `testnet-live-proof`
+  HAZARDS mainnet-block hinge with three pieces
+  of proof: (a) a no-DB
+  `trainer --verify-receipt <path>` CLI subcommand
+  a downstream tool can invoke from a single
+  static `trainer` binary; (b) a committed
+  no-DB **portable reference** receipt under
+  `crates/autotrain/tests/fixtures/testnet-live-proof-fixture/`
+  a downstream auditor can re-verify on any machine
+  without a Postgres — the on-disk shape is the
+  canonical green-receipt contract, and a `git diff`
+  of the fixture only changes when the contract
+  itself changes; (c) a 5-test no-DB integration
+  test in
+  `crates/autotrain/tests/verify_receipt.rs` that
+  drives the new CLI as a subprocess against a
+  synthetic green receipt + four error paths
+  (missing dir, step-failed, bad-headline,
+  missing-path-arg), plus 5 lib tests in
+  `crates/autotrain/src/verify_receipt.rs` that
+  pin the underlying `verify_receipt::run`
+  handler (4 happy + 3 error arms + 1
+  committed-fixture re-verification). The CLI
+  prints a one-line
+  `live_proof receipt verification passed: <headline>`
+  on a green receipt (exit 0) and a
+  `live_proof receipt verification failed: <kind>:
+  <detail>` on a regression (exit 2), where `<kind>`
+  is one of `recipe_shape` / `step_failed` /
+  `headline` (the three `VerifyError` variants).
+  The mode bypasses the DB open
+  (mirrors `Mode::Replay`); an empty path is the
+  "missing path arg" error converted into a
+  one-line usage + exit 2. The committed fixture's
+  `recipe.json` mirrors the
+  `LiveProofRecipe` JSON shape one-for-one (the
+  seven pinned step names in the
+  `STW023_CHAIN_STEPS` order, the per-step
+  `name` / `exit` / `stdout_bytes` /
+  `stderr_bytes` fields), and the `SUMMARY.txt`
+  headline is the pinned
+  `testnet live_proof complete: smoke=12
+  status=12 bench=4 compare=4 replay=256` form
+  so a drift in either the fixture or the
+  verifier surfaces in `cargo test --workspace`
+  on a single lib test
+  (`verify_receipt::tests::run_verifies_committed_testnet_live_proof_fixture`).
+  Owner files:
+  `crates/autotrain/src/verify_receipt.rs` (new
+  `pub fn run(&Path) -> Result<String, String>`
+  wrapper over `LiveProofReceipt::read_and_verify`
+  that converts the three-variant `VerifyError`
+  into the printable `(kind, detail)` pair + the
+  one-line success/failure contract, plus the
+  `#[cfg(test)] mod tests` block with the 5 lib
+  tests pinning the happy path + 3 error
+  variants + the committed-fixture re-verification),
+  `crates/autotrain/src/mode.rs` (new
+  `Mode::VerifyReceipt { path: PathBuf }` variant
+  parsed from `--verify-receipt <path>` + a
+  no-DB early-dispatch arm in `Mode::run` that
+  exits 0 / 2 on the same `print!` / `eprintln!`
+  + `std::process::exit` discipline the
+  `Mode::Replay` arm uses + a `Self::VerifyReceipt
+  { .. }` unreachable!() arm in the post-DB
+  exhaustive match + a `--verify-receipt <path>`
+  suffix in the `Usage:` eprintln!), `crates/autotrain/src/lib.rs`
+  (`mod verify_receipt;` to wire the new module
+  into the crate root), `crates/autotrain/tests/verify_receipt.rs`
+  (new no-DB integration test, 5 sub-tests
+  driving the new CLI as a subprocess), `crates/autotrain/tests/fixtures/testnet-live-proof-fixture/`
+  (new tracked no-DB portable-reference receipt:
+  `SUMMARY.txt` + `ENV.txt` + `recipe.json` +
+  seven per-step `cluster/` / `reset/` / `smoke/`
+  / `status/` / `bench/` / `compare/` / `replay/`
+  sub-directories each containing `exit.txt=0` +
+  empty `stdout.txt` + empty `stderr.txt`, plus a
+  `README.md` documenting what the fixture is
+  and how to re-verify it), `scripts/testnet-live-proof.md`
+  (a new "Re-verifying a receipt with the trainer
+  binary (STW-028)" section under "How the
+  dashboard scrapes a receipt" that documents
+  the new `--verify-receipt <path>` CLI, the
+  four error modes, the committed no-DB
+  fixture, and the new
+  `verify_receipt::tests::run_verifies_committed_testnet_live_proof_fixture`
+  lib test), `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (add a one-line "STW-028 ships
+  `trainer --verify-receipt` + committed no-DB
+  launch-proof fixture" note in the
+  "Immediate P0" list). Scope boundary: do NOT
+  change the `LiveProofReceipt` / `VerifyError` /
+  `LiveProofHeadline` verifier surface (the new
+  mode is a thin wrapper, not a refactor); do NOT
+  change the runbook's `write_recipe` heredoc
+  shape; do NOT change the seven
+  `STW023_CHAIN_STEPS` step names; do NOT touch the
+  `Mode::Bench` / `Mode::Compare` /
+  `Mode::Status` / `Mode::Smoke` /
+  `Mode::Cluster` / `Mode::Reset` / `Mode::Fast` /
+  `Mode::Fast2` / `Mode::Slow` / `Mode::Replay`
+  arms; do NOT add a new `clap` /
+  `structopt` dep (the existing trainer uses a
+  hand-rolled `from_args` so the new mode
+  follows the same shape as the
+  `Mode::Replay` parse); do NOT touch the
+  `crates/server/src/analysis` / `crates/transport`
+  / `bin/tui` ORPHAN code surfaces (those are
+  closed by STW-024 / STW-025 / STW-027); do NOT
+  require a `DATABASE_URL` env (the new mode is
+  read-only + no-DB, mirrors the
+  `Mode::Replay` arm). Verification commands:
+  `cargo test -p rbp-autotrain --lib verify_receipt`
+  (the 5 new lib tests pass), `cargo test -p rbp-autotrain --test verify_receipt`
+  (the 5 new integration tests pass),
+  `cargo build --bin trainer` (the new mode
+  compiles), `cargo test --workspace` (full
+  workspace remains green),
+  `cargo fmt --check`. Required tests: 5 new
+  lib tests in
+  `crates/autotrain/src/verify_receipt.rs::tests`
+  (the 4 contract tests + the 1
+  committed-fixture re-verification) + 5 new
+  integration tests in
+  `crates/autotrain/tests/verify_receipt.rs` —
+  total 10 new tests, all no-DB and synchronous.
+  Dependencies: `STW-019` (the runbook the
+  committed fixture mirrors + the recipe.json
+  shape the new mode reads), `STW-023` (the
+  `LiveProofReceipt::read_and_verify` /
+  `LiveProofHeadline::parse` surface the new
+  mode wraps), `STW-016` (the existing
+  `Mode::Replay` no-DB early-dispatch arm the
+  new mode parallels). Estimated scope: S/M.
+  Completion signal: `cargo test
+  -p rbp-autotrain --lib verify_receipt` is
+  green with 5 tests passing; `cargo test
+  -p rbp-autotrain --test verify_receipt` is
+  green with 5 tests passing;
+  `./target/debug/trainer --verify-receipt
+  crates/autotrain/tests/fixtures/testnet-live-proof-fixture/`
+  exits 0 + prints the verbatim
+  `live_proof receipt verification passed: testnet
+  live_proof complete: smoke=12 status=12 bench=4
+  compare=4 replay=256` line;
+  `./target/debug/trainer --verify-receipt
+  /tmp/nonexistent-dir` exits 2 + prints
+  `live_proof receipt verification failed:
+  recipe_shape: ...`;
+  `cargo test --workspace` and `cargo fmt
+  --check` remain green; the committed
+  fixture's `recipe.json` `steps[i].name` field
+  matches the `STW023_CHAIN_STEPS` constant in
+  order; the new `Mode::VerifyReceipt` variant
+  is wired into the `Usage:` eprintln! line
+  (a `trainer` invocation with no args prints
+  `--verify-receipt <path>` as one of the
+  listed modes) — closing the
+  `testnet-live-proof` HAZARDS mainnet-block
+  hinge.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.

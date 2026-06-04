@@ -28,6 +28,7 @@ mod receipt;
 mod replay;
 mod slow;
 mod trainer;
+mod verify_receipt;
 
 pub mod workers;
 

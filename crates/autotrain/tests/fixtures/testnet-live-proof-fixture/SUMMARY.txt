@@ -1,0 +1,4 @@
+testnet live_proof complete: smoke=12 status=12 bench=4 compare=4 replay=256
+
+  receipt_dir: crates/autotrain/tests/fixtures/testnet-live-proof-fixture
+  trainer:     <fixture: STW-028 portable reference, not from a real run>

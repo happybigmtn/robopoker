@@ -184,6 +184,39 @@ LiveProofReceipt::read_and_verify(receipt_root)
     .expect("operator receipt is green");
 ```
 
+## Re-verifying a receipt with the trainer binary (STW-028)
+
+A downstream tool (a testnet dashboard's "verify" button, a
+CI check, a release-gate script) that already has the static
+`trainer` binary can re-verify a receipt bundle the runbook
+dropped without re-running `cargo test` or installing the
+workspace's library crates. The new no-DB mode is:
+
+```sh
+cargo build --bin trainer
+./target/debug/trainer --verify-receipt \
+    receipts/testnet-live-proof-20260604T050000Z/
+```
+
+A green exit 0 + a `live_proof receipt verification passed: ...`
+line means the bundle is verifier-compatible. A non-zero
+exit + a `live_proof receipt verification failed: <kind>: ...`
+line names the failure mode (`recipe_shape` / `step_failed` /
+`headline`) and the precise detail (the missing file, the
+failing step + exit code, the bad headline prefix).
+
+The same CLI also accepts the **committed no-DB fixture**
+the repo ships at
+`crates/autotrain/tests/fixtures/testnet-live-proof-fixture/`
+so a downstream auditor can re-verify the canonical green-receipt
+shape on any machine without a Postgres. The fixture is the
+portable reference a `cargo test --workspace` invocation
+re-verifies on every commit; a drift in either the fixture
+or the verifier fails the lib test
+`verify_receipt::tests::run_verifies_committed_testnet_live_proof_fixture`
+and the integration test
+`crates/autotrain/tests/verify_receipt.rs` simultaneously.
+
 ## What the runbook does NOT do
 
 - It does **not** change the trainer's `--smoke` / `--bench` /
