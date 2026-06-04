@@ -5226,3 +5226,1071 @@ single-shipment leverage.
   does not need) + Eng (closes the
   last un-closed deferred-decision
   hinge).**
+
+## Next wave - review 2026-06-04 (afternoon)
+
+The morning 2026-06-04 three-lens review (kanban task
+`t_c86ebbbf`, STW-036 / STW-037 shipped) pivoted the
+plan from "more rungs of the receipt chain" to "a
+visible consumer of the chain." STW-036 (dashboard) +
+STW-037 (workspace-parallel-proof-three) are now
+shipped on `main`, and four open rows from that wave
+remain: STW-038 (TrainerError), STW-039 (StepLogger),
+STW-040 (README `## Try it now`), STW-041 (STW-001
+retirement). The afternoon 2026-06-04 three-lens
+review (kanban task `t_35186537`) re-applies the
+three lenses to the *current* state and finds the
+strategic gap is no longer the operator-UX surface
+the morning wave named — it is that **the dashboard
+is built to consume a live `INDEX.json` + a live
+`BenchReport`, but no live `INDEX.json` and no
+committed `BenchReport` / `Compare3Report` exist in
+the repo today.** A stranger who runs `cargo run -p
+rbp-dashboard` on a fresh checkout sees an empty
+table, and a CI auditor who `curl`s the dashboard
+URL gets `entries: []`. The chain is green in CI;
+the *result* the chain produces is not committed.
+The afternoon wave therefore (a) ships the missing
+result fixtures (STW-042, STW-043) that turn the
+dashboard from "live-data-only" into "live-data or
+committed-fixture", and (b) re-scopes the two
+operator-UX polish rows (STW-044, STW-045) to ship
+*without* the AI-slop refactor the morning wave
+proposed, and (c) drops two rows (the STW-040 README
+`## Try it now` reframe and the STW-041 planning
+retirement) as busywork the north star does not
+need.
+
+Each row below names a single shippable slice with
+named files, verification command(s), and a `lens:`
+tag tracing the finding it closes. Rows are P0/P1
+ordered; the top row is the highest single-shipment
+leverage.
+
+- [ ] **[P0] `STW-042` `crates/dashboard/tests/fixtures/compare3-fixture.json`
+  + `crates/dashboard/src/router.rs::GET /bench/:id`
+  demo-data fallback that serves the fixture when
+  no live `INDEX.json` entry matches.** Closes the
+  "dashboard has no committed result" gap the
+  afternoon 2026-06-04 three-lens review
+  (kanban task `t_35186537`) named as the single
+  highest-leverage thrust. The v10 dashboard the
+  STW-036 row shipped is *built* to consume a live
+  `INDEX.json` + per-receipt `Compare3Report` /
+  `BenchReport`, but no committed result lives in
+  the repo today — a fresh `cargo run -p
+  rbp-dashboard` shows an empty table and a CI
+  auditor who `curl`s `/api/index` gets
+  `entries: []`. The shipped `trainer --compare3`
+  (STW-031) prints a parseable JSON line a CI
+  worker can capture, but the JSON is *runtime
+  output*, not a *committed artifact* a stranger
+  can read without running the chain. This slice
+  lands the missing committed artifact: a new
+  `crates/dashboard/tests/fixtures/compare3-fixture.json`
+  in the exact JSON shape
+  `crates/autotrain/src/bench.rs::Compare3Report::to_json`
+  emits, with hard-coded v1 / v2 / v3 per-config
+  `mbb_per_100` / `ci_95` / `win_rate` / `hands`
+  numbers and the three pairwise `delta_mbb_per_100`
+  values (v1-vs-v2, v2-vs-v3, v3-vs-v1) and a
+  `ranked_winner` field ∈ `{"v1", "v2", "v3",
+  "tie"}` — byte-stable, no `Instant::now` / no
+  UUIDs / no floats from real RNG, so a re-run of
+  the dashboard's own load produces a byte-identical
+  file. The new `crates/dashboard/src/router.rs`
+  route `GET /bench/:id` reads the fixture as a
+  *fallback* when (a) the `:id` is the fixture's
+  pinned basename `compare3-fixture` AND (b) the
+  `INDEX.json` consumed by `IndexClient` has no
+  matching entry — so a fresh `cargo run -p
+  rbp-dashboard` shows a populated `/bench/compare3-fixture`
+  card with the v1 / v2 / v3 numbers a stranger
+  can read, while a real `INDEX.json` from a real
+  STW-034 chain run still wins. A new
+  `crates/dashboard/tests/fixtures_smoke.rs::compare3_fixture_renders_bench_card`
+  integration test asserts: (1) the fixture loads
+  via `serde_json::from_str` into a typed
+  `Compare3Report` without error; (2) the
+  `render_bench_card(&fixture.card_fields())` output
+  contains the pinned `mbb_per_100` value for each
+  of v1 / v2 / v3 (so a future drift in the
+  rendered HTML breaks the test); (3) the
+  `GET /bench/compare3-fixture` route returns 200
+  + an HTML body containing the fixture's
+  `ranked_winner` field. Owner files:
+  `crates/dashboard/tests/fixtures/compare3-fixture.json`
+  (new committed byte-stable fixture, hand-authored
+  in the STW-031 `Compare3Report::to_json` shape),
+  `crates/dashboard/src/router.rs` (extend the
+  `GET /bench/:id` handler with a fixture-fallback
+  branch: when the in-memory `INDEX.json` has no
+  entry for `:id` AND the `:id == "compare3-fixture"`
+  sentinel matches, read
+  `tests/fixtures/compare3-fixture.json` from
+  disk and return the same HTML the live path
+  produces; the live path is *unchanged*),
+  `crates/dashboard/src/render.rs` (add a
+  `BenchCardFields` constructor that builds the
+  per-card column set from a `Compare3Report`
+  sub-report — `blueprint` / `baseline` /
+  `mbb_per_100` / `ci_95` / `win_rate` — reusing
+  the v1 `BenchReport` column shape so a
+  BenchReport and a Compare3Report sub-report
+  render with the same column order, and a
+  `render_compare3_card(&Compare3Report) -> String`
+  helper that renders the three pairwise
+  `delta_mbb_per_100` rows the dashboard's existing
+  `render_bench_card` does not; 2 lib tests pinning
+  the per-row column order and the
+  `compare3-fixture` sentinel shape),
+  `crates/dashboard/tests/fixtures_smoke.rs` (new
+  integration test in the existing
+  `crates/dashboard/tests/` folder: drives the
+  axum router on a random localhost port + asserts
+  `GET /bench/compare3-fixture` returns 200 +
+  contains the fixture's `ranked_winner` field +
+  contains the three pairwise `delta_mbb_per_100`
+  values; a second sub-test asserts the fixture
+  round-trips `serde_json::from_str` into a typed
+  `Compare3Report` without error and the
+  `ranked_winner` ∈ `{"v1", "v2", "v3", "tie"}`),
+  `crates/dashboard/static/index.html` (extend
+  the static `index.html` "no entries yet" empty
+  state with a one-line "Demo data:
+  /bench/compare3-fixture" link a first-time
+  visitor can click — the link is a `<a href>`
+  not a JS `fetch`, so it works without JS and
+  without a network round-trip),
+  `IMPLEMENTATION_PLAN.md` (this row),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (mark the v10 follow-on as "shipped with demo
+  data" — the existing v10 row already says the
+  dashboard is shipped, this is a one-line
+  update). Scope boundary: does NOT introduce
+  a new `Compare3Report` shape (the fixture is
+  in the STW-031 shape verbatim); does NOT
+  change the existing `GET /api/index` or
+  `GET /transcript/:id` routes; does NOT
+  change the existing `IndexClient::from_url`
+  fixture (`crates/dashboard/tests/fixtures/index.json`)
+  — the new fixture is a *demo result*; the
+  existing one is a *demo index*; both
+  coexist; does NOT change the room
+  protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means cluster
+  counts, the v1 / v2 / v3 / v4 named
+  baselines, the `CFR_TREE_COUNT_NLHE`
+  baseline, the `trainer --replay` CLI, the
+  `trainer --verify-receipt` CLI, or the
+  `trainer --smoke` / `trainer --bench` /
+  `trainer --compare` / `trainer --compare3`
+  JSON contracts; does NOT change the
+  existing `trainer --bench` /
+  `trainer --compare3` runtime path
+  (the fixture is the *committed demo
+  result*; the runtime path is the
+  *fresh-run result* — the two coexist).
+  Verification commands: `cargo test -p
+  rbp-dashboard` (the 2 new lib tests in
+  `render.rs` pass + the new `fixtures_smoke.rs`
+  integration test passes + the existing
+  3 router tests still pass),
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`,
+  `cargo run -p rbp-dashboard -- --port
+  18080 &
+  PID=$!; sleep 2; curl -s
+  http://localhost:18080/bench/compare3-fixture
+  | grep -q "ranked_winner"; kill $PID`
+  (the end-to-end demo-data render works
+  in a real shell). Required tests: 2 new
+  lib tests in
+  `crates/dashboard/src/render.rs::tests` +
+  2 new integration sub-tests in
+  `crates/dashboard/tests/fixtures_smoke.rs`.
+  Dependencies: `STW-036` (the dashboard
+  crate the new fixture is consumed by),
+  `STW-031` (the `Compare3Report` shape the
+  fixture is in). Estimated scope: M.
+  Completion signal:
+  `cargo test -p rbp-dashboard` is green
+  with 2 new lib tests + 2 new
+  integration sub-tests passing;
+  `cargo run -p rbp-dashboard -- --port
+  18080` serves a populated
+  `/bench/compare3-fixture` card with
+  the v1 / v2 / v3 numbers visible
+  to a fresh checkout; the
+  `crates/dashboard/tests/fixtures/compare3-fixture.json`
+  file is byte-stable on re-load (a
+  fresh `sha256sum` matches the
+  committed digest); the
+  `crates/dashboard/static/index.html`
+  empty-state link is visible to a
+  first-time visitor with no `INDEX.json`.
+  **`lens:` CEO (closes the "no
+  committed result" gap a public
+  testnet requires) + Eng (the
+  dashboard's *demo-data path* is
+  the missing architectural piece,
+  not a new code path) + Design
+  (the dashboard's empty-state UX
+  is the active user-facing bug,
+  not a missing doc section).**
+
+- [ ] **[P0] `STW-043` `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+  + `scripts/commit-bench-fixture.sh` operator shim
+  that produces a byte-stable `BenchReport` from
+  `trainer --bench` against a no-DB deterministic
+  small-config run.** Closes the "the receipt
+  chain is auditor-greppable but the *result* is
+  not committed" Eng gap the afternoon review
+  named. The STW-019 `testnet-live-proof.sh`
+  runbook drops a `receipts/testnet-live-proof-<UTC-ISO>/`
+  bundle on every operator run, and STW-028
+  committed a no-DB portable-reference receipt
+  the runbook can re-verify. But the
+  `trainer --bench` JSON the runbook's
+  `--bench` step captures is *operator-local
+  output* — a fresh checkout has no committed
+  `BenchReport` a stranger can `cat` to see
+  "blueprint X beat baseline Y at mbb/100 =
+  +Z, win-rate = W%, hands = N." This slice
+  lands the missing committed result: a new
+  `scripts/commit-bench-fixture.sh` pure-bash
+  shim that takes one positional arg
+  `<output-path>`, drives the existing
+  `trainer --reset` + `trainer --bench` chain
+  against a `--bench-hands` knob
+  (`RBP_BENCH_HANDS=8` default — small enough
+  to finish in under 2 s on a clean checkout)
+  with `RBP_BENCH_SEED=42` (the same fixed
+  seed the v1 `trainer --smoke` already uses
+  for the small-bench path) + `RBP_BENCH_BLUEPRINT=v1`
+  + `RBP_BENCH_BASELINE=preflop`, captures the
+  single-line JSON `BenchReport` to stdout,
+  strips the per-run `run_id` / `started_at_utc`
+  fields (which the new `crates/autotrain/src/bench.rs::BenchReport::to_json` STW-031
+  already includes — the new script's
+  `strip_run_id` `awk` one-liner removes them
+  so the committed fixture is byte-stable
+  across runs), and writes the result to
+  `<output-path>`. The committed
+  `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+  is the *reference* the shim produces on a
+  fresh checkout — a new
+  `crates/autotrain/tests/bench_report_fixture.rs`
+  integration test re-runs the shim against a
+  fresh DB + diffs the output against the
+  committed fixture, asserting byte equality
+  on the post-strip JSON (so a future
+  `BenchReport` shape drift in STW-018 /
+  STW-031 / etc. fails the test on a single
+  CI run). Owner files:
+  `scripts/commit-bench-fixture.sh` (new
+  pure-bash shim; mirrors the
+  `scripts/testnet-live-proof.sh` shape —
+  script exists + is executable + parses
+  with `bash -n` + refuses to run on a
+  missing arg with exit 3; the
+  `strip_run_id` `awk` one-liner is the
+  only logic beyond the trainer chain
+  invocation),
+  `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+  (new committed byte-stable fixture in
+  the `BenchReport::to_json` shape with
+  `run_id` / `started_at_utc` stripped —
+  the operator-facing `trainer --bench`
+  output a stranger can `cat`),
+  `crates/autotrain/tests/bench_report_fixture.rs`
+  (new no-DB no-network integration test:
+  runs the shim against a fresh
+  `cargo test -p rbp-autotrain --features
+  database` invocation, diffs the
+  output against the committed fixture
+  with `assert_eq!` on the post-strip
+  byte string, asserts the
+  `bench_report_fixture_script_exists_and_parses`
+  shape pin + the
+  `bench_report_fixture_matches_committed_digest`
+  digest pin),
+  `crates/autotrain/tests/script_shape.rs`
+  (add the 2 new shape pins
+  `commit_bench_fixture_script_exists_and_parses`
+  + `commit_bench_fixture_script_strips_run_id_fields`
+  — the existing
+  `script_shape.rs` already follows the
+  pattern; the new pins are 2 lines
+  each),
+  `IMPLEMENTATION_PLAN.md` (this row).
+  Scope boundary: does NOT change the
+  existing `BenchReport::to_json` shape
+  (the strip happens in the bash shim, not
+  in Rust); does NOT change the existing
+  `trainer --bench` runtime path (the
+  shim is a *separate* script the
+  operator runs to *produce* the
+  committed fixture, the runtime path
+  is the *fresh-run* path); does NOT
+  change the `trainer --compare3`
+  shape (STW-042 is the *compare3*
+  demo-data fixture, this is the
+  *bench* demo-data fixture — the two
+  coexist); does NOT change the room
+  protocol, the `Schema` contracts, the
+  autotrain pipeline, the K-means
+  cluster counts, the v1 / v2 / v3 / v4
+  named baselines, the
+  `CFR_TREE_COUNT_NLHE` baseline, the
+  `trainer --replay` CLI, the
+  `trainer --verify-receipt` CLI, or
+  the `trainer --smoke` /
+  `trainer --compare` /
+  `trainer --compare3` JSON contracts.
+  Verification commands: `bash -n
+  scripts/commit-bench-fixture.sh`,
+  `./scripts/commit-bench-fixture.sh
+  /tmp/bench-report.json` (exits 0 +
+  produces a parseable JSON file +
+  the `run_id` / `started_at_utc`
+  fields are absent),
+  `cargo test -p rbp-autotrain
+  --features database --test
+  bench_report_fixture` (the 2 new
+  sub-tests pass),
+  `cargo test -p rbp-autotrain
+  --test script_shape` (the 2 new
+  shape pins pass),
+  `cargo test --workspace --
+  --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`. Required tests:
+  2 new integration sub-tests in
+  `crates/autotrain/tests/bench_report_fixture.rs`
+  + 2 new shape pins in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: `STW-010` (the
+  `trainer --bench` mode the shim
+  invokes), `STW-031` (the
+  `BenchReport` shape the fixture
+  is in — the strip fields are the
+  same STW-018 introduced). Estimated
+  scope: S. Completion signal:
+  `cargo test -p rbp-autotrain
+  --test bench_report_fixture` is
+  green with 2 new sub-tests
+  passing; the
+  `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+  file is committed + a fresh
+  checkout's `sha256sum` matches
+  the in-tree `tests/fixtures/bench-report-fixture.json.sha256`
+  digest the slice ships; a CI
+  dashboard can `grep ^mbb_per_100
+  "the` `tests/fixtures/bench-report-fixture.json`
+  the file's `mbb_per_100` field.
+  **`lens:` CEO (the
+  "publicly-visible" leg of the
+  testnet north star's
+  "downloadable" requirement) +
+  Eng (the chain's auditor-greppable
+  surface extends to the result
+  the chain produces, not just the
+  chain's per-step exit codes).**
+
+- [ ] **[P1] `STW-044` Re-scope the morning-wave `STW-038`
+  `TrainerError` slice to a *per-arm error-shape
+  audit*: one new lib test per existing
+  eprintln! error line, no new `TrainerError`
+  enum, no new `to_pinned_line` method, no
+  routing refactor.** Closes the
+  "every error must be greppable" Design
+  concern the morning wave named *without*
+  the AI-slop refactor the morning wave
+  proposed. The afternoon review finds the
+  existing per-arm `live_proof ...` /
+  `live_proof publish error: receipt is
+  red: ...` / `live_proof publish_remote
+  error: ...` / `live_proof publish_index
+  error: ...` / `live_proof publish_index_remote
+  error: ...` / `workspace parallel proof
+  three complete: ...` headline shapes are
+  *already* greppable from a single pinned
+  prefix per family — a CI dashboard scraper
+  `grep ^live_proof publish error:` the
+  log and receives a stable shape. The
+  morning wave's `TrainerError` enum + the
+  10-variant `as_str` pinner + the
+  `to_pinned_line(&self) -> String` method
+  + the 12 new lib tests is a *refactor*
+  that yields no new user-visible capability
+  (the existing per-arm shape is already
+  greppable) and ships a Rust module with
+  100+ lines of enum-discriminant
+  boilerplate whose only test is "the
+  per-variant string matches the published
+  string" — the canonical "improve X"
+  pattern the task body explicitly bans.
+  The afternoon's re-scoped slice is *the
+  audit the morning wave should have
+  shipped*: a new
+  `crates/autotrain/src/error_audit.rs`
+  module (10 lib tests, *no* production
+  code) that greps the existing per-arm
+  error-line text in
+  `crates/autotrain/src/{publish,publish_remote,publish_index,publish_index_remote,mode,verify_receipt,verify_bundle}.rs`
+  and asserts each one matches the pinned
+  shape the dashboard already scrapes
+  (e.g. the test
+  `publish_receipt_red_error_line_uses_pinned_shape`
+  greps the
+  `live_proof publish error: receipt is red:`
+  prefix in `publish.rs` and asserts the
+  surrounding line is a single-statement
+  `eprintln!(...)` that emits that prefix
+  — a refactor that *deletes* the prefix
+  fails the test on a single CI run). The
+  audit is 10 lib tests, one per existing
+  error arm; each test is a `grep`-based
+  static pin; no new module is added to
+  the autotrain `lib.rs` re-export list;
+  the only `mode.rs` change is the
+  `--error-shape-test` argv flag the
+  morning wave's row already named (the
+  audit *needs* the argv flag to expose
+  the pinned shapes a CI scraper greps,
+  so the flag is the *only* surviving
+  piece of the morning wave's STW-038).
+  Owner files:
+  `crates/autotrain/src/error_audit.rs`
+  (new file, `cfg(test) mod tests` only,
+  10 static-grep lib tests pinning the
+  per-arm `live_proof ...` error-line
+  shape across the 7 source files the
+  morning wave's STW-038 listed),
+  `crates/autotrain/src/mode.rs` (add
+  the `--error-shape-test` argv flag
+  from the morning wave's STW-038 — the
+  flag is the *only* surviving piece of
+  the morning wave's row, and it
+  exposes the 10 pinned
+  `live_proof ...` prefixes a CI
+  scraper greps without exercising every
+  error path; a no-op in production,
+  the same `cargo run -- --error-shape-test`
+  the morning wave's row named),
+  `crates/autotrain/src/publish.rs`
+  (NO CHANGE — the existing
+  `live_proof publish error: receipt is red: ...`
+  line is preserved verbatim; the
+  audit *reads* it, the morning wave's
+  row was *rewriting* it — the rewrite
+  is dropped),
+  `crates/autotrain/src/publish_remote.rs`
+  (NO CHANGE),
+  `crates/autotrain/src/publish_index.rs`
+  (NO CHANGE),
+  `crates/autotrain/src/publish_index_remote.rs`
+  (NO CHANGE),
+  `crates/autotrain/src/verify_receipt.rs`
+  (NO CHANGE),
+  `crates/autotrain/src/verify_bundle.rs`
+  (NO CHANGE),
+  `IMPLEMENTATION_PLAN.md` (this row;
+  mark the morning-wave STW-038 row as
+  `RESCOPED 2026-06-04 by STW-044` so
+  a future worker does not re-claim
+  the refactor half of the original
+  STW-038). Scope boundary: does NOT
+  introduce a `TrainerError` enum; does
+  NOT introduce a `to_pinned_line`
+  method; does NOT change the
+  existing per-arm `live_proof ...`
+  error-line text; does NOT change
+  the existing exit-code contract; does
+  NOT change the per-subcommand flag
+  shape, the per-subcommand stdout
+  shape, or any `trainer --*` CLI; does
+  NOT change the room protocol, the
+  `Schema` contracts, the autotrain
+  pipeline, the K-means cluster
+  counts, the v1 / v2 / v3 / v4 named
+  baselines, or any
+  `trainer --*` JSON contract. The
+  morning wave's `STW-038` row's
+  per-arm `eprintln!` text is
+  preserved verbatim — the audit
+  *pins* the existing text, it does
+  not *rewrite* it. Verification
+  commands: `cargo test -p
+  rbp-autotrain --lib` (the 10 new
+  lib tests in `error_audit.rs`
+  pass), `cargo run -p rbp-autotrain
+  -- --error-shape-test` (prints
+  the 10 pinned `live_proof ...`
+  prefixes in alphabetical order),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Required tests: 10 new lib tests
+  in
+  `crates/autotrain/src/error_audit.rs::tests`
+  pinning the per-arm
+  `live_proof ...` error-line shape
+  across the 7 source files the
+  morning wave's STW-038 listed.
+  Dependencies: `STW-032` (the
+  `live_proof publish error: receipt
+  is red: ...` line the audit pins),
+  `STW-033` (the
+  `live_proof publish_remote error: ...`
+  line the audit pins),
+  `STW-034` (the
+  `live_proof publish_index error: ...`
+  line the audit pins),
+  `STW-035` (the
+  `live_proof publish_index_remote
+  error: ...` line the audit pins),
+  `STW-028` (the
+  `live_proof receipt verification
+  failed: ...` /
+  `live_proof receipt verification
+  passed: ...` shape the audit
+  pins). Estimated scope: S.
+  Completion signal:
+  `cargo test -p rbp-autotrain --lib`
+  is green with 10 new lib tests
+  passing; `cargo run -p
+  rbp-autotrain -- --error-shape-test`
+  prints the 10 pinned
+  `live_proof ...` prefixes a CI
+  scraper greps; the
+  `STW-038` morning-wave row is
+  marked `RESCOPED` and a future
+  worker does not re-claim the
+  refactor half. **`lens:` Design
+  (the operator-UX / error-surface
+  audit) — closes the same finding
+  the morning wave named, with the
+  *audit* shape, not the *refactor*
+  shape, so no production code
+  changes and no per-arm grep
+  prefix drift.**
+
+- [ ] **[P1] `STW-045` `scripts/trainer-observe.sh` wrapper
+  that prepends `date +%s%3N` to every stderr
+  line the trainer emits and writes a
+  `trainer.step.jsonl` per-run timeline
+  file.** Closes the "per-step machine-readable
+  timeline" Design concern the morning wave
+  named *without* the Rust `Step` enum +
+  `StepLogger` refactor the morning wave
+  proposed. The morning wave's `STW-039`
+  `crates/autotrain/src/observe.rs` typed
+  `Step` enum + `StepLogger` is a real
+  Rust module with a `Step` enum (15
+  variants) + a `StepLogger` struct with
+  an `Instant::now()` start time + a
+  `finish(exit_code)` method + a per-line
+  `trainer step: name=<name> kind=<kind>
+  duration_ms=<ms> exit=<0|1|2>` shape +
+  8 new lib tests + a `RBP_TRAINER_OBSERVE=1`
+  env knob + a `--observe-test` argv flag
+  — 200+ lines of new Rust for a feature
+  whose only consumer is "a CI worker wants
+  per-step timing." A `bash`-level wrapper
+  is 30 lines and ships the same
+  per-step timeline a CI worker wants
+  *without* touching the autotrain Rust
+  crate. The shipped slice: a new
+  `scripts/trainer-observe.sh` pure-bash
+  wrapper that takes one positional arg
+  `<output-jsonl>` + the rest of argv
+  is the `trainer` invocation to wrap
+  (e.g.
+  `scripts/trainer-observe.sh
+  /tmp/run-20260604T180000Z.step.jsonl
+  trainer --bench --blueprint v1
+  --baseline preflop`). The wrapper
+  forks `trainer "$@"` as a child
+  process, captures its stderr to a
+  pipe, prepends `date +%s%3N` (the
+  millisecond-precise UTC epoch) +
+  the captured stderr line to a
+  one-line JSON object
+  `{"ts_ms": 1749052800123, "stream":
+  "stderr", "line": "<captured>"}`,
+  appends the JSON line to the
+  `<output-jsonl>` file, and
+  duplicates the line to the
+  wrapper's own stderr (so a human
+  watching the wrapper sees the
+  same line the JSONL log sees).
+  On child exit, the wrapper
+  appends one final JSON line
+  `{"ts_ms": <now>, "stream":
+  "summary", "exit": <child-exit>,
+  "argv": <argv-as-json-array>}`
+  to the JSONL file, then exits
+  with the child's exit code (so
+  the wrapper is *transparent* to
+  any existing CI pipeline that
+  runs `trainer --bench` and
+  asserts exit 0 — the wrapper
+  preserves the exit code). The
+  pinned JSONL shape is one line
+  per event, `sort -k ts_ms` gives
+  a stable timeline, and a CI
+  dashboard can `jq -r 'select
+  (.stream == "summary") | .exit'`
+  the file to extract the per-step
+  exit. A new
+  `crates/autotrain/tests/script_shape.rs::trainer_observe_script_exists_and_parses`
+  shape pin mirrors the existing
+  `testnet_live_publish_*_script_exists_and_parses`
+  pinners. A new
+  `crates/autotrain/tests/trainer_observe.rs::trainer_observe_wraps_trainer_bench_with_timeline`
+  integration test runs
+  `scripts/trainer-observe.sh
+  /tmp/test.step.jsonl
+  trainer --bench --blueprint v1
+  --baseline preflop
+  --bench-hands 4` against a
+  fresh DB, asserts the JSONL
+  file is parseable line-by-line
+  with `jq`, asserts the last
+  line is a `stream: "summary"`
+  entry with `exit: 0` and a
+  non-empty `argv` array, and
+  asserts the wrapper's exit
+  code is 0. Owner files:
+  `scripts/trainer-observe.sh`
+  (new pure-bash wrapper; the
+  only logic is the `fork +
+  pipe stderr + prepend
+  date +%s%3N + jq` loop;
+  mirrors the
+  `scripts/testnet-live-proof.sh`
+  shape — script exists +
+  is executable + parses with
+  `bash -n` + refuses to run on
+  a missing arg with exit 3
+  + refuses to run on a
+  missing `trainer` binary on
+  `$PATH` with exit 4),
+  `crates/autotrain/tests/script_shape.rs`
+  (add 1 new shape pin:
+  `trainer_observe_script_exists_and_parses`
+  — 1 line of new test code,
+  mirrors the existing
+  pattern),
+  `crates/autotrain/tests/trainer_observe.rs`
+  (new no-DB-shape integration
+  test: requires
+  `DATABASE_URL` to be set for
+  the child `trainer --bench`
+  invocation, mirrors the
+  existing `bench.rs` /
+  `compare.rs` /
+  `compare3.rs` integration
+  tests' database-gating
+  pattern; runs the wrapper
+  + asserts the JSONL shape
+  + asserts the wrapper's
+  exit code is 0),
+  `IMPLEMENTATION_PLAN.md` (this
+  row; mark the morning-wave
+  STW-039 row as `RESCOPED
+  2026-06-04 by STW-045` so a
+  future worker does not
+  re-claim the Rust-module
+  half of the original
+  STW-039). Scope boundary:
+  does NOT introduce a new
+  Rust module in
+  `crates/autotrain/src/`;
+  does NOT introduce a
+  `Step` enum or a
+  `StepLogger` struct; does
+  NOT change the autotrain
+  `lib.rs` re-export list;
+  does NOT change the
+  existing per-arm
+  `live_proof ...` log
+  shape (the wrapper
+  *appends* a JSONL timeline
+  alongside the trainer's
+  stderr — the trainer
+  itself is unchanged);
+  does NOT change the
+  per-subcommand flag
+  shape, the per-subcommand
+  stdout shape, the
+  per-subcommand exit code,
+  the per-subcommand
+  `SUMMARY.txt` shape, or
+  any `trainer --*` CLI;
+  does NOT change the
+  room protocol, the
+  `Schema` contracts, the
+  autotrain pipeline, the
+  K-means cluster counts,
+  the v1 / v2 / v3 / v4
+  named baselines, the
+  `CFR_TREE_COUNT_NLHE`
+  baseline, the
+  `trainer --replay` CLI,
+  the `trainer --verify-receipt`
+  CLI, or the
+  `trainer --smoke` /
+  `trainer --bench` /
+  `trainer --compare` /
+  `trainer --compare3` JSON
+  contracts. The wrapper
+  is *additive* — the
+  trainer binary is
+  unchanged; a future
+  operator who runs
+  `trainer --bench` without
+  the wrapper sees the
+  *same* output they see
+  today; an operator who
+  runs
+  `scripts/trainer-observe.sh
+  <out.jsonl> trainer --bench`
+  sees the same output
+  *plus* a parallel JSONL
+  timeline. Verification
+  commands: `bash -n
+  scripts/trainer-observe.sh`,
+  `scripts/trainer-observe.sh
+  /tmp/test.step.jsonl
+  trainer --bench --blueprint v1
+  --baseline preflop
+  --bench-hands 4`
+  (exits 0 + the JSONL file
+  has at least 2 lines: one
+  `stream: "stderr"` line +
+  one `stream: "summary"`
+  line),
+  `jq -c . /tmp/test.step.jsonl
+  | head -5` (the JSONL is
+  line-parseable),
+  `cargo test -p rbp-autotrain
+  --test trainer_observe`
+  (the 1 new integration
+  sub-test passes),
+  `cargo test -p rbp-autotrain
+  --test script_shape` (the
+  1 new shape pin passes),
+  `cargo test --workspace --
+  --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`. Required
+  tests: 1 new integration
+  sub-test in
+  `crates/autotrain/tests/trainer_observe.rs`
+  + 1 new shape pin in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: `STW-010` (the
+  `trainer --bench` mode the
+  wrapper is most useful
+  against — the wrapper is
+  mode-agnostic, but the
+  integration test drives
+  `--bench` for the smallest
+  end-to-end smoke). Estimated
+  scope: S. Completion signal:
+  `cargo test -p rbp-autotrain
+  --test trainer_observe`
+  is green with 1 new
+  integration sub-test
+  passing; the
+  `scripts/trainer-observe.sh`
+  wrapper is on disk +
+  executable + parses with
+  `bash -n`; a CI dashboard
+  can `jq -c 'select(.stream
+  == "summary")' run.step.jsonl`
+  the file and receive a
+  one-line per-run summary;
+  the `STW-039` morning-wave
+  row is marked `RESCOPED`
+  and a future worker does
+  not re-claim the
+  Rust-module half.
+  **`lens:` Design (the
+  observability audit) —
+  closes the same finding
+  the morning wave named,
+  with the *bash wrapper*
+  shape, not the *Rust
+  module* shape, so no
+  autotrain Rust crate
+  changes and no risk of
+  regressing the existing
+  per-arm log shape.**
+
+- [ ] **[P1] `STW-046` Drop the morning-wave `STW-040`
+  README `## Try it now` + the
+  `scripts/replay-locally.sh` shim and
+  the morning-wave `STW-041` STW-001
+  planning-surface retirement from the
+  active queue.** The afternoon review
+  finds both rows are busywork the
+  testnet north star does not need.
+  The morning wave's `STW-040`
+  `## Try it now` reframe is a
+  *content-section-add* with no
+  behavioral test beyond
+  `grep -q '## Try it now' README.md` —
+  pure prose, no shipped capability,
+  and the existing
+  `## Testnet launch proof` +
+  `## Public dashboard` README
+  sections (lines 220-247 and
+  lines 290-330 in the current
+  README) already answer the
+  first-time-visitor question
+  ("can I see the bot play?",
+  "where is the public
+  benchmark?", "how do I run
+  the testnet launch proof?").
+  Adding a *third* redundant
+  section above the existing
+  `## Quick Start` is the
+  canonical AI-design-sludge
+  anti-pattern. The companion
+  `scripts/replay-locally.sh`
+  shim is a 30-line bash wrapper
+  around the existing
+  `trainer --replay <path>` CLI
+  the STW-016 row already
+  shipped — a one-command
+  `trainer --replay <path>`
+  invocation is *already* a
+  one-command invocation, the
+  shim adds a `replay locally
+  complete: ...` headline
+  prefix and three new
+  shape pins for a wrapper
+  that does not need a
+  wrapper. The morning wave's
+  `STW-041` STW-001
+  planning-surface retirement
+  is a process-cleanup row
+  that (a) does not block the
+  testnet north star (the
+  35 shipped STW rows have
+  proved `genesis/` +
+  `IMPLEMENTATION_PLAN.md` is
+  a sufficient executable
+  surface without a gbrain
+  DB), (b) does not change
+  any user-visible behavior
+  (the proposed
+  `genesis/AUTHORED-QUEUE.md`
+  fallback queue is a
+  *read-by-the-auto-loop*
+  artifact the auto-loop
+  does not read), and (c)
+  ships a 0-test code change
+  whose only completion
+  signal is a one-line
+  `RETIRED 2026-06-04` note
+  in `IMPLEMENTATION_PLAN.md` —
+  the AI-slop risk is high
+  (a planning-process row
+  with no behavioral test
+  is a `cargo fmt --check`
+  cargo-cult). The
+  afternoon wave's row is
+  the *drop*, not the
+  *re-scope*: mark both
+  rows as `DROPPED 2026-06-04
+  by STW-046 — busywork the
+  testnet north star does
+  not need, see the
+  afternoon three-lens
+  review (kanban task
+  `t_35186537`) for the
+  reasoning`, leave the
+  existing
+  `## Testnet launch proof` +
+  `## Public dashboard` README
+  sections as-is, leave the
+  `[!] STW-001` deferred
+  row in
+  `IMPLEMENTATION_PLAN.md` as
+  the operator-sign-off
+  blocker it already is, and
+  spend the operator's review
+  budget on STW-042 (the
+  v10 dashboard demo-data
+  fixture) and STW-043 (the
+  bench-report demo-data
+  fixture) — the two rows
+  the afternoon review
+  names as P0. Owner files:
+  `IMPLEMENTATION_PLAN.md`
+  (mark the morning-wave
+  STW-040 row as
+  `DROPPED 2026-06-04 by
+  STW-046` and the
+  morning-wave STW-041
+  row as
+  `DROPPED 2026-06-04 by
+  STW-046`; no other
+  changes — the existing
+  `[!] STW-001` deferred
+  row in the
+  `## Deferred items
+  (need operator decision
+  before promotion)`
+  section is *preserved
+  verbatim*),
+  `README.md` (NO CHANGE —
+  the existing
+  `## Testnet launch proof` +
+  `## Public dashboard`
+  sections are the
+  operator-UX answer; no
+  `## Try it now` section
+  is added; the
+  `Public dashboard: <https://robopoker-testnet-dashboard.pages.dev/>`
+  line at line 313 is
+  preserved verbatim),
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  (NO CHANGE — the
+  v10 follow-on is
+  marked shipped as the
+  STW-036 row already
+  did; the morning
+  wave's STW-040 /
+  STW-041 additions
+  to the roadmap are
+  not made). Scope
+  boundary: does NOT
+  add a `## Try it now`
+  section to
+  `README.md`; does
+  NOT add a
+  `scripts/replay-locally.sh`
+  shim; does NOT add
+  a
+  `genesis/AUTHORED-QUEUE.md`
+  fallback queue; does
+  NOT mark `STW-001`
+  as `RETIRED` in
+  `IMPLEMENTATION_PLAN.md`
+  (the deferred `[!]`
+  row is preserved);
+  does NOT change the
+  room protocol, the
+  `Schema` contracts,
+  the autotrain
+  pipeline, the
+  K-means cluster
+  counts, the v1 / v2
+  / v3 / v4 named
+  baselines, the
+  `CFR_TREE_COUNT_NLHE`
+  baseline, or any
+  `trainer --*` CLI.
+  Verification commands:
+  `git diff --
+  IMPLEMENTATION_PLAN.md`
+  (the diff is the
+  two `DROPPED` markers
+  + this STW-046 row,
+  nothing else),
+  `grep -q '## Testnet
+  launch proof'
+  README.md` (the
+  existing
+  first-time-visitor
+  section is preserved),
+  `grep -q '## Public
+  dashboard' README.md`
+  (the existing
+  public-dashboard
+  section is preserved),
+  `grep -q '## Try it
+  now' README.md` →
+  exit 1 (the
+  *redundant*
+  section is *not*
+  added — the
+  *absence* of the
+  section is the
+  completion signal),
+  `cargo test --workspace
+  -- --test-threads=4`
+  (the drop does not
+  change the autotrain
+  pipeline),
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: none
+  — STW-046 is a
+  queue-cleanup
+  decision, not a code
+  change. Dependencies:
+  none. Estimated
+  scope: XS.
+  Completion signal:
+  the
+  `IMPLEMENTATION_PLAN.md`
+  morning-wave STW-040
+  + STW-041 rows are
+  both marked
+  `DROPPED 2026-06-04
+  by STW-046` with a
+  one-line note; the
+  existing
+  `## Testnet launch
+  proof` +
+  `## Public dashboard`
+  README sections are
+  preserved verbatim;
+  the existing
+  `[!] STW-001`
+  deferred row is
+  preserved verbatim;
+  the
+  `## Try it now`
+  section is *not*
+  added to
+  `README.md`. The
+  operator's review
+  budget is freed for
+  STW-042 +
+  STW-043.
+  **`lens:` Design
+  (the AI-slop
+  review: a
+  third redundant
+  README section +
+  a zero-test
+  planning-process
+  row are the
+  canonical
+  AI-design-sludge
+  patterns the task
+  body explicitly
+  bans) + CEO (the
+  testnet north
+  star's
+  "publicly-visible"
+  requirement is
+  served by the
+  v10 dashboard +
+  the
+  `## Public
+  dashboard`
+  README section
+  the v10 ships —
+  not by a
+  `## Try it now`
+  reframe).**
