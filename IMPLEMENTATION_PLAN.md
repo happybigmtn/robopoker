@@ -210,6 +210,111 @@ context.
   integration test passes; `cargo test --workspace` and
   `cargo fmt --check` are green.
 
+- [ ] `STW-011` Rule-based named baselines (`CallStation`, `Maniac`, `Tight`) + bench baseline selector.
+  Owner files: `crates/gameroom/src/players/{callstation,maniac,tight}.rs` (new),
+  `crates/gameroom/src/players/mod.rs`,
+  `crates/autotrain/src/bench.rs`,
+  `crates/autotrain/src/mode.rs`,
+  `IMPLEMENTATION_PLAN.md`,
+  `genesis/plans/000-ceo-testnet-roadmap.md`.
+  Scope boundary: add three deterministic, named, rule-based baseline
+  `Player` implementations to `rbp-gameroom::players`, plumb a
+  `RBP_BENCH_BASELINE` env-var selector into `trainer --bench` (default
+  `fish`), and stamp the chosen baseline name into the `BenchReport`
+  JSON. Do NOT introduce a new `Player` kind, do NOT change the
+  `DatabasePlayer` / `Room` / `Schema` surface, do NOT touch the
+  trained-blueprint hydration path, do NOT make any baseline inspect
+  the blueprint.
+  Acceptance criteria:
+  (a) `crates/gameroom/src/players/callstation.rs` — a `CallStation`
+      unit struct that, on every decision, picks `Check` if legal,
+      else the call amount (i.e. never folds and never raises, the
+      textbook "calling station"). Its `decide()` must never
+      return a fold or a raise/shove; if the only legal move is a
+      fold (e.g. facing an all-in with insufficient chips) it
+      still calls because a call is legal when the stake is
+      coverable, and the runtime is guaranteed to never face
+      a sole-fold decision on a stack that can cover the bet.
+  (b) `crates/gameroom/src/players/maniac.rs` — a `Maniac` unit
+      struct that, on every decision, picks the all-in shove if
+      legal, else the max raise. On the very first decision of a
+      hand (no prior raise), `Raise` and `Shove` are both legal
+      and the maniac picks `Shove`. On a subsequent bet where
+      calling is the only legal move (a shove is already on
+      the table), the maniac calls — this preserves the
+      invariant that the chosen action is always in
+      `recall.head().legal()`.
+  (c) `crates/gameroom/src/players/tight.rs` — a `Tight` struct
+      parameterized by a preflop hand-rank threshold (default
+      `TIGHT_THRESHOLD = 7`, the 7th-best starting hand: pocket
+      pairs TT+, AK, AQ, AJ, KQs). Preflop, the `Tight` player
+      calls/raises only if its two hole cards' high-rank index
+      is at or above the threshold (so it plays a tight range
+      and folds most hands). On the flop/turn/river, `Tight`
+      falls back to the `CallStation` policy (always check or
+      call) so the postflop decision is deterministic and the
+      hand deterministically sees a showdown with at most
+      preflop raises. The threshold is `pub const` so a worker
+      can vary it (and the bench math is independent of it).
+  (d) `crates/gameroom/src/players/mod.rs` re-exports
+      `CallStation`, `Maniac`, `Tight` alongside the existing
+      `Fish`, `Human`, `DatabasePlayer`, `RealTimePlayer`,
+      `ZeroTempPlayer`. All three are unit structs (or
+      zero-sized for `Tight`) with no allocation cost.
+  (e) `crates/autotrain/src/bench.rs` — a new `bench_baseline()`
+      env-var reader returning an enum-shaped value
+      (`Fish | CallStation | Maniac | Tight`, default `Fish`,
+      unknown value also defaults to `Fish` and emits a
+      `log::warn!`); a new `BenchReport.baseline: String` field
+      stamped with the selected name; the `run_hands` signature
+      parameterised on the chosen baseline so the seat-1 player
+      is `CallStation` / `Maniac` / `Tight` instead of `Fish`
+      when the env var selects one. The `to_json` output
+      includes `"baseline": "<name>"` so a downstream scraper
+      can read it with `jq '.baseline'`.
+  (f) `crates/autotrain/src/bench.rs::tests` — six new lib tests
+      pinning the deterministic policy of each baseline:
+      `callstation_picks_check_when_legal_else_call`,
+      `callstation_never_picks_fold_or_raise`,
+      `maniac_picks_shove_when_legal`,
+      `maniac_falls_back_to_call_when_shove_not_legal`,
+      `tight_plays_premium_preflop_and_folds_garbage`,
+      `tight_postflop_plays_like_callstation`. These tests
+      construct a known `Game` (no I/O, no DB) and check that
+      `CallStation::decide`, `Maniac::decide`, and `Tight::decide`
+      return the expected `Action` variants. They pin the policy
+      at the API boundary so a future refactor that lets one of
+      these strategies fold or raise accidentally is caught at
+      unit-test time rather than discovered in a 200-hand
+      bench run.
+  (g) The default `RBP_BENCH_BASELINE` is `fish`; an
+      integration test in
+      `crates/autotrain/tests/bench.rs` (gated on `database` +
+      `DATABASE_URL` like the existing bench test) drives
+      `trainer --bench` with `RBP_BENCH_BASELINE=callstation`
+      and asserts the printed JSON contains
+      `"baseline":"callstation"`. This is the only new test in
+      that file.
+  Verification commands:
+  `cargo test -p rbp-gameroom --lib`,
+  `cargo test -p rbp-autotrain --lib`,
+  `cargo test -p rbp-autotrain --features database --tests --lib`,
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`,
+  `cargo fmt --check`.
+  Required tests: the six lib tests in (f) + the one integration
+  test in (g). They are the only new tests this slice adds (no
+  padding of unrelated suites).
+  Dependencies: `STW-010` (head-to-head bench harness) for the
+  `bench::run` / `bench::run_hands` / `BenchReport` surface this
+  slice extends.
+  Estimated scope: M.
+  Completion signal: `trainer --bench` with
+  `RBP_BENCH_BASELINE=callstation` exits 0 on a freshly-`--reset`
+  DB and prints `"baseline":"callstation"` in the JSON; the six
+  lib tests pin each baseline's policy; the existing
+  `cargo test --workspace` and `cargo fmt --check` stay green.
+
 - [x] `STW-010` Head-to-head bench harness for trained `DatabasePlayer` vs `Fish`.
   Owner files: `crates/autotrain/src/{bench,mode,lib}.rs`,
   `crates/autotrain/Cargo.toml`, `crates/gameroom/src/room.rs`,

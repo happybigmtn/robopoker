@@ -129,6 +129,7 @@ struct ParsedBench {
     win_rate_ci95: f64,
     blind: i16,
     blueprint_trained: bool,
+    baseline: String,
 }
 
 fn parse_bench_line(line: &str) -> Option<ParsedBench> {
@@ -147,10 +148,14 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
     let mut win_rate_ci95: Option<f64> = None;
     let mut blind: Option<i16> = None;
     let mut blueprint_trained: Option<bool> = None;
+    let mut baseline: Option<String> = None;
     // Split on top-level commas. The bench JSON is a flat
-    // object of `key:number` / `key:bool` pairs, none of which
-    // contain commas, so a naive `,` split is sufficient and
-    // keeps the parser independent of any JSON crate.
+    // object of `key:number` / `key:bool` / `key:"string"`
+    // pairs, none of which contain commas inside a value, so
+    // a naive `,` split is sufficient and keeps the parser
+    // independent of any JSON crate. The `baseline` field's
+    // value is a quoted string; we strip the quotes before
+    // assigning to the struct field.
     for kv in body.split(',') {
         let (k, v) = kv.split_once(':')?;
         let key = k.trim().trim_matches('"');
@@ -168,6 +173,10 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
             "blueprint_trained" => {
                 blueprint_trained = Some(matches!(raw, "true"));
             }
+            "baseline" => {
+                let s = raw.trim_matches('"');
+                baseline = Some(s.to_string());
+            }
             _ => return None,
         }
     }
@@ -182,6 +191,7 @@ fn parse_bench_line(line: &str) -> Option<ParsedBench> {
         win_rate_ci95: win_rate_ci95?,
         blind: blind?,
         blueprint_trained: blueprint_trained?,
+        baseline: baseline?,
     })
 }
 
@@ -305,4 +315,79 @@ fn bench_run_emits_parseable_json_with_consistent_accounting() {
         "bench: blueprint_trained must be false after --reset; got {}",
         parsed.blueprint_trained
     );
+    // (v) The default baseline (no `RBP_BENCH_BASELINE` env
+    // var) is `fish`. This is the documented pre-STW-011
+    // behavior; the new `bench_baseline()` env-var reader
+    // is exercised by the next test. A future refactor that
+    // changes the default without updating the bench docs
+    // surfaces here.
+    assert_eq!(
+        parsed.baseline, "fish",
+        "bench: default baseline must be 'fish'; got {:?}",
+        parsed.baseline
+    );
+}
+
+/// Asserts that `trainer --bench` honours the
+/// `RBP_BENCH_BASELINE` env var by sitting the chosen
+/// named baseline at seat 1 and stamping the chosen
+/// baseline's name into the JSON `baseline` field. This
+/// is the STW-011 proof point that the bench can now
+/// claim a "blueprint beats a NAMED deterministic
+/// baseline" result rather than the pre-STW-011
+/// "blueprint beats uniform random" claim. Uses
+/// `callstation` because the callstation's policy is
+/// deterministic and visibly different from `fish` (the
+/// callstation never folds or raises, so its per-hand
+/// outcomes are stable across runs of the same hand
+/// sequence).
+#[test]
+fn bench_run_respects_bench_baseline_env_override() {
+    if !database_url_set() {
+        return;
+    }
+    // Reset state so the test's bench run is deterministic.
+    let (stdout, stderr, code) = run_trainer(&["--reset"], &[]);
+    assert_eq!(
+        code, 0,
+        "trainer --reset must exit 0 before the bench run.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+
+    let (stdout, stderr, code) = run_trainer(
+        &["--bench"],
+        &[
+            ("RBP_BENCH_HANDS", "20"),
+            ("RBP_BENCH_BLIND", "2"),
+            ("RBP_BENCH_BASELINE", "callstation"),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "trainer --bench with RBP_BENCH_BASELINE=callstation must exit 0.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with('{') && l.trim_end().ends_with('}'))
+        .unwrap_or_else(|| {
+            panic!(
+                "trainer --bench must print a single-line JSON report on stdout.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+            )
+        });
+    let parsed = parse_bench_line(line).unwrap_or_else(|| {
+        panic!("trainer --bench stdout must be a parseable BenchReport JSON; got: {line:?}")
+    });
+
+    // The chosen baseline must round-trip into the JSON.
+    assert_eq!(
+        parsed.baseline, "callstation",
+        "bench: RBP_BENCH_BASELINE=callstation must stamp baseline='callstation'; got {:?}",
+        parsed.baseline
+    );
+    // The other accounting invariants still hold under the
+    // new baseline selector.
+    assert_eq!(parsed.hands, 20);
+    assert_eq!(parsed.blind, 2);
+    assert!(parsed.mbb_per_100.is_finite() && parsed.mbb_ci95.is_finite());
+    assert!(parsed.win_rate.is_finite() && parsed.win_rate_ci95.is_finite());
 }
