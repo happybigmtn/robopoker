@@ -43,6 +43,8 @@ rbp-mccfr       = { version = "1.0", path = "../mccfr"                       }
 rbp-nlhe        = { version = "1.0", path = "../nlhe", features = ["database"] }
 rbp-gameroom    = { version = "1.0", path = "../gameroom", features = ["database"] }
 rbp-auth        = { version = "1.0", path = "../auth", features = ["database"] }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
 tokio-postgres  = "0.7"
 async-trait     = "0.1"
 const_format    = "0.2"

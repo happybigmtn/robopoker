@@ -1292,7 +1292,148 @@ mechanically prevents the ghost P0 rows from being re-`[ ]`-ed.
 The CEO roadmap's only documented open launch-proof item is
 the deferred `testnet-live-proof` operator receipt (see
 `steward/PROMOTIONS.md` deferred `testnet-live-proof` row);
-no next-slice is currently promoted.
+`STW-023` promotes and lands that slice: a Rust-side
+`LiveProofReceipt` verifier that drives the same chain the
+existing `crates/autotrain/tests/live_proof.rs` integration test
+covers and drops a per-step receipt bundle on disk with the
+exact layout the `scripts/testnet-live-proof.sh` runbook
+produces, plus a `recipe.json` manifest the runbook script
+also writes so the two surfaces share a single machine-readable
+schema.
+
+- [ ] `STW-023` Live-proof receipt bundle: shared
+  `LiveProofReceipt` verifier + runbook `recipe.json` manifest.
+  The `steward/HINGES.md` rank #5 `testnet-live-proof` hinge
+  names the operator-visible launch-proof gap: "A documented
+  live run of `--smoke -> --bench -> --compare -> --replay`
+  on the same DB is the operator-visible launch proof not
+  captured by unit tests alone." `STW-019` shipped the runbook
+  (`scripts/testnet-live-proof.sh`) + the per-step
+  `{stdout,stderr,exit}.txt` layout, and the live-proof
+  integration test (`crates/autotrain/tests/live_proof.rs`)
+  drives the same chain as a single `cargo test` invocation,
+  but the two surfaces produce *independent* receipts with
+  *separate* verification rules — the runbook writes
+  `SUMMARY.txt`, the integration test writes an
+  `eprintln!` line, and a future drift in one fails without
+  a clear "the other is also stale" signal. `STW-023` lands
+  a single shared `LiveProofReceipt` verifier both surfaces
+  call into, plus a `recipe.json` manifest the runbook
+  script writes alongside `SUMMARY.txt` so the chain-step
+  order + per-step exit codes are machine-readable, not
+  text-grep-able. A new
+  `crates/autotrain/tests/live_proof_receipt.rs` (no
+  `database` feature gate, runs in
+  `cargo test --workspace`) drops a synthetic receipt under
+  `target/test-receipts/live_proof-fixture-<UTC>/`, calls
+  `LiveProofReceipt::verify` on the freshly-written receipt,
+  and asserts the verifier agrees the receipt is green
+  (every step exit 0, the headline line parses, the
+  `recipe.json` manifest is JSON-parseable, the per-step
+  `recipe.json.steps[i].name` field matches the
+  `receipts/<step>/` directory name). A regression in the
+  receipt shape (renamed step, dropped exit code, broken
+  headline prefix) fails the test. The `live_proof.rs`
+  integration test is updated to also call
+  `LiveProofReceipt::write_to` on a real `cargo test
+  --test live_proof` run, so a `cargo test --workspace`
+  invocation produces the same on-disk shape the runbook
+  does — making the operator-visible receipt *and* the
+  CI-visible receipt share one verifier. Owner files:
+  `crates/autotrain/src/receipt.rs` (new — `LiveProofStep`,
+  `LiveProofReceipt`, `LiveProofRecipe`, the
+  `LiveProofReceipt::record_step` / `::write_to` /
+  `::headline` / `::verify` / `::read_from` / `::recipe_path`
+  surface, and the `STW023_CHAIN_STEPS` constant that
+  pins the seven step names `cluster` / `reset` / `smoke` /
+  `status` / `bench` / `compare` / `replay` in order),
+  `crates/autotrain/src/lib.rs` (wire the new module),
+  `crates/autotrain/tests/live_proof.rs` (drop a per-step
+  receipt bundle + call `LiveProofReceipt::verify` at the
+  end of the chain, gated on `database` feature +
+  `DATABASE_URL` like the existing assertions),
+  `crates/autotrain/tests/live_proof_receipt.rs` (new no-DB
+  test that drops a synthetic receipt under
+  `target/test-receipts/live_proof-fixture-<UTC>/`, calls
+  `LiveProofReceipt::verify` on it, and asserts the
+  verifier's "green" verdict + the headline line + the
+  recipe.json step-name order matches the directory layout),
+  `crates/autotrain/tests/script_shape.rs` (assert the
+  runbook script sources the new `recipe.json` block),
+  `scripts/testnet-live-proof.sh` (write a
+  `recipe.json` manifest alongside `SUMMARY.txt` using a
+  new `write_recipe` helper that mirrors the `LiveProofRecipe`
+  struct), `scripts/testnet-live-proof.md` (document the
+  new `recipe.json` file + the
+  `crates/autotrain::LiveProofReceipt::verify` verifier
+  reuse), `IMPLEMENTATION_PLAN.md` (this row + the
+  plan-staleness-gate `STW-023` claim), and
+  `genesis/plans/000-ceo-testnet-roadmap.md` (note STW-023
+  as the `testnet-live-proof` operator-receipt promotion).
+  Scope boundary: do NOT change the seven chain step
+  names (`cluster` / `reset` / `smoke` / `status` /
+  `bench` / `compare` / `replay`), the
+  `testnet live_proof complete: smoke=...` headline
+  format (the runbook and `script_shape.rs` already pin
+  it; the new verifier re-uses the same regex), the
+  `RBP_FAST_EPOCHS` / `RBP_BENCH_HANDS` / `RBP_COMPARE_HANDS`
+  env discipline, the existing per-step
+  `{stdout,stderr,exit}.txt` layout, the
+  `live_proof.rs` chain step count (six in
+  `live_proof.rs`: cluster, reset, smoke, status, bench,
+  compare, replay — note `live_proof.rs` actually counts
+  6/6 with replay as step 6, so the verifier accepts
+  any step order as long as every name appears exactly
+  once), the STW-019 / STW-020 / STW-021 / STW-022
+  gate shapes, the `Cargo.toml` dependency graph, the
+  `crates/transport` / `bin/tui` / `crates/server/src/analysis`
+  orphan surfaces, the `STW-001` planning-surface
+  decision, the `STW-007` artifact-retirement sign-off,
+  the `STW-011` / `STW-015` provenance notes, or the
+  `tui.qa.json` / `tui.receipt.md` shape. Verification
+  commands: `cargo check --workspace`,
+  `cargo test -p rbp-autotrain --test live_proof_receipt`
+  (no DB, runs in `cargo test --workspace`),
+  `cargo test -p rbp-autotrain --test script_shape`
+  (no DB, runs in `cargo test --workspace`),
+  `cargo test --workspace -- --test-threads=4`,
+  `cargo fmt --check`, `bash -n scripts/testnet-live-proof.sh`,
+  `bash scripts/plan-staleness-gate.sh`. Required tests:
+  the new lib tests in `receipt.rs::tests`
+  (`live_proof_receipt_records_steps_in_order`,
+  `live_proof_receipt_write_to_drops_per_step_files`,
+  `live_proof_receipt_headline_format_is_pinned`,
+  `live_proof_receipt_read_from_round_trips`,
+  `live_proof_receipt_verify_accepts_green_receipt`,
+  `live_proof_receipt_verify_rejects_failed_step`,
+  `live_proof_recipe_serialises_step_order`) plus the
+  new `live_proof_receipt.rs` integration test's
+  `synthetic_receipt_verifies_green_via_lib`,
+  `synthetic_receipt_manifest_recipes_step_names`,
+  `synthetic_receipt_verifier_rejects_renamed_step`,
+  `synthetic_receipt_verifier_rejects_missing_exit_code`,
+  `synthetic_receipt_headline_uses_pinned_prefix`. The
+  new `script_shape.rs` test
+  `script_writes_recipe_json_manifest` asserts the
+  runbook script sources a `recipe.json` block (a
+  `cat > "$RECEIPT_DIR/recipe.json" <<'JSON' ... JSON`
+  heredoc anchored to a known `LiveProofRecipe` JSON
+  shape). Completion signal: a fresh
+  `cargo test -p rbp-autotrain --test live_proof_receipt`
+  invocation drops a
+  `target/test-receipts/live_proof-fixture-<UTC>/SUMMARY.txt`
+  whose headline is the pinned `testnet live_proof
+  complete: smoke=N status=N bench=N compare=N replay=N`
+  line; a fresh `bash scripts/testnet-live-proof.sh`
+  against a real Postgres drops a
+  `receipts/testnet-live-proof-<UTC-ISO>/recipe.json`
+  whose `steps[i].name` is one of the seven pinned
+  names; `LiveProofReceipt::verify` returns `Ok(())`
+  on both surfaces; the STW-022 plan-staleness gate
+  exits 0 (`checked=N ghosts=0`) and the new STW-023
+  claim is registered in the gate's `P0_TO_STW` /
+  `STW_TO_STW023` claim map; `cargo test --workspace`
+  and `cargo fmt --check` are green.
 
 - [x] `STW-022` Plan-vs-reality staleness gate:
   `steward/HINGES.md` rank #1 is "Retiring or updating the

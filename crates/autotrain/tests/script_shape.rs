@@ -7,7 +7,7 @@
 //! broken, executable bit cleared, doc drift) fails CI before it
 //! ever reaches a live DB.
 //!
-//! The four sub-tests assert the runbook's static contract:
+//! The five sub-tests assert the runbook's static contract:
 //!
 //! 1. `script_exists_and_is_executable` — the runbook is on disk
 //!    and has its executable bit set (a worker can invoke it via
@@ -25,6 +25,18 @@
 //!    covers (`--cluster`, `--reset`, `--smoke`, `--status`,
 //!    `--bench`, `--compare`, `--replay`). A future refactor that
 //!    drops a leg fails here.
+//! 5. `script_writes_recipe_json_manifest` (STW-023) — the runbook
+//!    script sources a `cat > "$RECEIPT_DIR/recipe.json" <<JSON ... JSON`
+//!    heredoc whose body parses as the `LiveProofRecipe` JSON shape
+//!    (the seven pinned step names in order, the `trainer_bin` /
+//!    `database_url` / `steps[]` fields, the per-step `name` /
+//!    `exit` / `stdout_bytes` / `stderr_bytes` fields). The runbook
+//!    doc also references the `recipe.json` file. A regression
+//!    that drops the `recipe.json` block (or renames a step
+//!    field) fails this test and the
+//!    `crates/autotrain/tests/live_proof_receipt.rs` integration
+//!    test simultaneously — the operator-visible receipt and
+//!    the CI-visible receipt share one source of truth.
 //!
 //! The test deliberately does **not** shell out to the runbook
 //! itself: that would require `DATABASE_URL` and would be a
@@ -236,4 +248,213 @@ fn script_summary_headline_format_is_pinned() {
         );
         last_idx = idx;
     }
+}
+
+/// `script_writes_recipe_json_manifest` (STW-023) — the
+/// runbook script must source a `recipe.json` heredoc
+/// whose body parses as the `LiveProofRecipe` JSON shape
+/// (the seven pinned step names in order, the three
+/// top-level fields `trainer_bin` / `database_url` /
+/// `steps[]`, and the per-step `name` / `exit` /
+/// `stdout_bytes` / `stderr_bytes` fields), and the
+/// runbook doc must reference the `recipe.json` file in
+/// its receipt-layout section. A regression that drops
+/// the `recipe.json` block (or renames a step field)
+/// fails here. The test asserts by (a) string-substring
+/// checks on every `LiveProofRecipe` field name (catches
+/// a renamed or dropped field), (b) ordered step-name
+/// scan (catches a re-ordered or dropped step), (c) the
+/// `write_recipe "$RECEIPT_DIR"` invocation site (catches
+/// a regression that defines the function but never
+/// calls it), (d) the runbook doc's `recipe.json`
+/// mention (catches a doc drift), and (e) a
+/// `serde_json` round-trip on the extracted heredoc
+/// body so a future regression that swaps a field or
+/// drops a comma fails CI even when the substring
+/// assertions above pass.
+#[test]
+fn script_writes_recipe_json_manifest() {
+    let script = read(&script_path());
+    // (1) The runbook must source a `write_recipe`
+    // helper that writes the manifest. We assert the
+    // function definition + a single `cat >` heredoc
+    // are present, so a future refactor that drops
+    // the function fails CI.
+    assert!(
+        script.contains("write_recipe() {"),
+        "STW-023 runbook must define a `write_recipe()` helper that writes the recipe.json manifest; \
+         a regression that drops the function makes the operator receipt unverifiable"
+    );
+    assert!(
+        script.contains("cat > \"$recipe_path\" <<JSON")
+            || script.contains("cat > \"$recipe_path\" <<'JSON'"),
+        "STW-023 runbook must source a `cat > $recipe_path <<JSON ... JSON` heredoc; \
+         the `LiveProofRecipe` JSON shape is the verifier's contract"
+    );
+    // (2) The JSON heredoc must contain every field
+    // the `LiveProofRecipe` struct serialises.
+    for field in &[
+        "\"trainer_bin\":",
+        "\"database_url\":",
+        "\"steps\":",
+        "\"name\":",
+        "\"exit\":",
+        "\"stdout_bytes\":",
+        "\"stderr_bytes\":",
+    ] {
+        assert!(
+            script.contains(field),
+            "STW-023 runbook recipe.json heredoc must contain `{field}`; the on-disk shape mirrors the \
+             Rust `LiveProofRecipe` struct, so a missing field breaks the `serde_json` round-trip"
+        );
+    }
+    // (3) The seven pinned step names must appear in
+    // the heredoc, in order. The order is what the
+    // verifier asserts against `STW023_CHAIN_STEPS`;
+    // a future refactor that re-orders (or drops) a
+    // step name must update the runbook's heredoc in
+    // the same change.
+    let mut last_idx = 0usize;
+    for step in &[
+        "\"name\": \"cluster\"",
+        "\"name\": \"reset\"",
+        "\"name\": \"smoke\"",
+        "\"name\": \"status\"",
+        "\"name\": \"bench\"",
+        "\"name\": \"compare\"",
+        "\"name\": \"replay\"",
+    ] {
+        let idx = script.find(step).unwrap_or_else(|| {
+            panic!(
+                "STW-023 runbook recipe.json heredoc must include step name `{step}`; \
+                 a future chain refactor that drops a step name must update both the heredoc \
+                 and the Rust `STW023_CHAIN_STEPS` constant in the same change"
+            )
+        });
+        assert!(
+            idx >= last_idx,
+            "STW-023 runbook recipe.json step names must appear in cluster, reset, smoke, status, \
+             bench, compare, replay order (got `{step}` before its predecessor)"
+        );
+        last_idx = idx;
+    }
+    // (4) The runbook must call `write_recipe` after
+    // the chain lands. A regression that defines the
+    // function but never calls it leaves the
+    // `recipe.json` file missing from the receipt.
+    assert!(
+        script.contains("write_recipe \"$RECEIPT_DIR\""),
+        "STW-023 runbook must call `write_recipe \"$RECEIPT_DIR\"` to drop the manifest next to \
+         SUMMARY.txt; a regression that defines the function but never calls it silently breaks \
+         the verifier contract"
+    );
+    // (5) The runbook doc must reference the
+    // `recipe.json` file in its receipt-layout
+    // section.
+    let doc = read(&runbook_doc_path());
+    assert!(
+        doc.contains("recipe.json"),
+        "STW-023 runbook doc must reference `recipe.json` in its receipt-layout section; \
+         a worker reading the doc would not know the manifest exists"
+    );
+    // (6) Mechanically extract the heredoc body and
+    // round-trip it through `serde_json::from_str` so
+    // a future regression that swaps a field, drops a
+    // comma, or breaks the heredoc terminator fails
+    // CI even when the substring assertions above
+    // pass. The heredoc body is a non-quoted
+    // `<<JSON` block whose `$TRAINER_BIN` /
+    // `$db_redacted` / `$step_stdout` / etc. tokens
+    // are literal text in the script source (bash
+    // interpolates them at exec time). The heredoc
+    // body wraps each variable in literal `"`
+    // delimiters (the source has
+    // `"\""$VAR"\""` form, which the test sees as
+    // `"$VAR"`). We substitute the *bare* variable
+    // tokens with a string that already includes
+    // the surrounding JSON quotes so the resulting
+    // body is valid JSON.
+    let body = extract_heredoc_body(&script, "JSON")
+        .expect("STW-023 runbook script must source a <<JSON ... JSON heredoc");
+    let substituted = body
+        .replace(
+            "$TRAINER_BIN",
+            "/srv/dev/repos/robopoker/target/debug/trainer",
+        )
+        .replace("$db_redacted", "<redacted: 49 chars>")
+        .replace("$cluster_exit", "0")
+        .replace("$cluster_stdout", "0")
+        .replace("$cluster_stderr", "0")
+        .replace("$reset_exit", "0")
+        .replace("$reset_stdout", "0")
+        .replace("$reset_stderr", "0")
+        .replace("$smoke_exit", "0")
+        .replace("$smoke_stdout", "0")
+        .replace("$smoke_stderr", "0")
+        .replace("$status_exit", "0")
+        .replace("$status_stdout", "0")
+        .replace("$status_stderr", "0")
+        .replace("$bench_exit", "0")
+        .replace("$bench_stdout", "0")
+        .replace("$bench_stderr", "0")
+        .replace("$compare_exit", "0")
+        .replace("$compare_stdout", "0")
+        .replace("$compare_stderr", "0")
+        .replace("$replay_exit", "0")
+        .replace("$replay_stdout", "0")
+        .replace("$replay_stderr", "0");
+    let parsed: serde_json::Value = serde_json::from_str(&substituted).unwrap_or_else(|e| {
+        panic!(
+            "STW-023 runbook recipe.json heredoc must parse as JSON \
+             (after bash interpolation tokens are substituted); got \
+             error: {e}\n--- heredoc body ---\n{substituted}\n"
+        )
+    });
+    let steps = parsed
+        .get("steps")
+        .and_then(|s| s.as_array())
+        .unwrap_or_else(|| panic!("STW-023 recipe.json must have a `steps` array; got: {parsed}"));
+    let expected_names = [
+        "cluster", "reset", "smoke", "status", "bench", "compare", "replay",
+    ];
+    for (i, step) in steps.iter().enumerate() {
+        let name = step
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_else(|| {
+                panic!("STW-023 recipe.json steps[{i}].name must be a string; got: {step}")
+            });
+        assert_eq!(
+            name, expected_names[i],
+            "STW-023 recipe.json steps[{i}].name must be `{}`; got: `{name}`",
+            expected_names[i]
+        );
+    }
+}
+
+/// Extract the body of a `<<'TAG' ... TAG` heredoc from a
+/// bash script. Lines are scanned in order; the first
+/// line containing `<<'TAG'` (or `<<TAG`) opens the body;
+/// the next line that equals `TAG` (whitespace-trimmed)
+/// closes it. Returns `None` if no heredoc with the given
+/// terminator is found, mirroring the runtime error a
+/// bash script would surface at exec time.
+fn extract_heredoc_body(script: &str, tag: &str) -> Option<String> {
+    let open_a = format!("<<'{tag}'");
+    let open_b = format!("<<{tag}");
+    let mut open = false;
+    let mut body: Vec<&str> = Vec::new();
+    for line in script.lines() {
+        if !open {
+            if line.contains(&open_a) || line.contains(&open_b) {
+                open = true;
+            }
+            continue;
+        }
+        if line.trim() == tag {
+            return Some(body.join("\n"));
+        }
+        body.push(line);
+    }
+    None
 }

@@ -43,6 +43,7 @@ Postgres, the runbook drops a directory tree:
 receipts/testnet-live-proof-20260604T050000Z/
 ├── SUMMARY.txt                    # headline + per-step exit codes
 ├── ENV.txt                        # env the chain ran with (secrets redacted)
+├── recipe.json                    # machine-readable manifest (STW-023)
 ├── cluster/{stdout,stderr,exit}.txt
 ├── reset/{stdout,stderr,exit}.txt
 ├── smoke/{stdout,stderr,exit}.txt
@@ -61,6 +62,34 @@ for that step). The dashboard can grep `SUMMARY.txt` for the
 `*/stdout.txt` to parse the per-step artifact (e.g. the
 `BenchReport` JSON for `--bench`, the rendered seat/action text for
 `--replay`).
+
+The `recipe.json` manifest is the single source of truth for the
+chain step order + per-step exit codes. Its JSON shape mirrors
+the `crates/autotrain::LiveProofRecipe` struct one-for-one:
+
+```json
+{
+  "trainer_bin": "/srv/dev/repos/robopoker/target/debug/trainer",
+  "database_url": "<redacted: 49 chars>",
+  "steps": [
+    { "name": "cluster", "exit": 0, "stdout_bytes": 123, "stderr_bytes": 0 },
+    { "name": "reset",   "exit": 0, "stdout_bytes":  45, "stderr_bytes": 0 },
+    { "name": "smoke",   "exit": 0, "stdout_bytes": 678, "stderr_bytes": 0 },
+    { "name": "status",  "exit": 0, "stdout_bytes":  90, "stderr_bytes": 0 },
+    { "name": "bench",   "exit": 0, "stdout_bytes": 234, "stderr_bytes": 0 },
+    { "name": "compare", "exit": 0, "stdout_bytes": 210, "stderr_bytes": 0 },
+    { "name": "replay",  "exit": 0, "stdout_bytes": 256, "stderr_bytes": 0 }
+  ]
+}
+```
+
+The seven `steps[i].name` strings are pinned in the
+`crates/autotrain::STW023_CHAIN_STEPS` constant, in this order —
+a future chain refactor that re-orders or drops a step must
+update both the runbook's `write_recipe` heredoc and the
+constant in the same change. The `database_url` field stores the
+redacted `<redacted: N chars>` form (mirroring `ENV.txt`); a
+`cat recipe.json` does not leak a secret into a CI artifact.
 
 ## How to run it
 
@@ -137,6 +166,22 @@ python -c "import json,sys; print(json.load(open(sys.argv[1])))" \
 
 # Render the bench's first transcript (the public reproducible surface).
 cat receipts/testnet-live-proof-*/replay/stdout.txt
+
+# Re-verify a receipt bundle with the shared Rust verifier (STW-023).
+# The verifier asserts every step exited 0, the `recipe.json` manifest
+# is shape-valid, and the SUMMARY.txt headline matches the pinned
+# `testnet live_proof complete: smoke=...` format.
+cargo test -p rbp-autotrain --test live_proof_receipt
+```
+
+A third-party auditor that has the `recipe.json` file (and not
+the `SUMMARY.txt` headline) can re-verify the chain with the
+shared `LiveProofReceipt::read_and_verify` API directly:
+
+```rust
+use rbp_autotrain::LiveProofReceipt;
+LiveProofReceipt::read_and_verify(receipt_root)
+    .expect("operator receipt is green");
 ```
 
 ## What the runbook does NOT do
@@ -170,6 +215,14 @@ asserts:
 4. The runbook doc references every chain step the live proof
    integration test covers (`--cluster`, `--reset`, `--smoke`,
    `--status`, `--bench`, `--compare`, `--replay`).
+5. The runbook script sources a `recipe.json` manifest block
+   (a `cat > "$RECEIPT_DIR/recipe.json" <<JSON ... JSON`
+   heredoc anchored to the `LiveProofRecipe` JSON shape)
+   and the doc documents the manifest file in the
+   receipt-layout section above. The heredoc terminator
+   is unquoted (`<<JSON`, not `<<'JSON'`) so the
+   `TRAINER_BIN` / `db_redacted` shell variables expand
+   into the manifest body before write.
 
 This means a future refactor that, say, removes the `--status` leg
 or renames an env knob fails the shell-shape test even before it

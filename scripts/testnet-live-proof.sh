@@ -10,6 +10,7 @@
 #   receipts/testnet-live-proof-<UTC-ISO>/
 #     SUMMARY.txt                    # the one-line launch receipt
 #     ENV.txt                        # the env the chain ran with
+#     recipe.json                    # machine-readable manifest (STW-023)
 #     cluster/{stdout,stderr,exit}.txt
 #     reset/{stdout,stderr,exit}.txt
 #     smoke/{stdout,stderr,exit}.txt
@@ -289,6 +290,107 @@ fi
 run_step replay 11 --replay "$TRANSCRIPT_PATH"
 REPLAY_BYTES="$(wc -c < "$RECEIPT_DIR/replay/stdout.txt" | tr -d '[:space:]')"
 
+# --- write_recipe <receipt_dir> ------------------------------------------
+# write_recipe — drop a `recipe.json` machine-readable
+# manifest alongside `SUMMARY.txt` so the
+# `crates/autotrain::LiveProofReceipt::verify` verifier
+# (and a testnet dashboard) can re-verify the chain
+# without re-reading every per-step `exit.txt`. The
+# on-disk JSON shape mirrors the
+# `crates/autotrain::LiveProofRecipe` struct
+# (trainer_bin, database_url, steps[]) one-for-one, and
+# the shell `STW023_CHAIN_STEPS` order is pinned in
+# the verifier's constant. A future chain refactor
+# that re-orders (or drops) a step must update this
+# heredoc in the same change. Mirrors the
+# `LiveProofReceipt::write_to` Rust side.
+write_recipe() {
+    local recipe_path="$1/recipe.json"
+    # Compute the per-step byte counts the verifier
+    # captures. The runbook writes the `stdout.txt` /
+    # `stderr.txt` files via `run_step` so a `wc -c
+    # < <file>` here is always well-defined for steps
+    # that landed.
+    local cluster_stdout cluster_stderr cluster_exit
+    local reset_stdout reset_stderr reset_exit
+    local smoke_stdout smoke_stderr smoke_exit
+    local status_stdout status_stderr status_exit
+    local bench_stdout bench_stderr bench_exit
+    local compare_stdout compare_stderr compare_exit
+    local replay_stdout replay_stderr replay_exit
+    for step in cluster reset smoke status bench compare replay; do
+        local step_dir="$1/$step"
+        local so se ex
+        so="$(wc -c < "$step_dir/stdout.txt" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+        se="$(wc -c < "$step_dir/stderr.txt" 2>/dev/null | tr -d '[:space:]' || echo 0)"
+        ex="$(cat "$step_dir/exit.txt" 2>/dev/null || echo 1)"
+        # Pad left-pad to base-name so the eval below
+        # assigns cleanly.
+        eval "${step}_stdout=$so ${step}_stderr=$se ${step}_exit=$ex"
+    done
+    # Redact DATABASE_URL/DB_URL in the manifest — the
+    # runbook's ENV.txt also redacts them. Mirrors the
+    # `<redacted: N chars>` form the recipe writer
+    # emits so a `cat recipe.json` does not leak a
+    # secret into a CI artifact.
+    local db_redacted="<unset>"
+    if [[ -n "${DATABASE_URL:-}" ]]; then
+        db_redacted="<redacted: ${#DATABASE_URL} chars>"
+    elif [[ -n "${DB_URL:-}" ]]; then
+        db_redacted="<redacted: ${#DB_URL} chars>"
+    fi
+    cat > "$recipe_path" <<JSON
+{
+  "trainer_bin": "$TRAINER_BIN",
+  "database_url": "$db_redacted",
+  "steps": [
+    {
+      "name": "cluster",
+      "exit": $cluster_exit,
+      "stdout_bytes": $cluster_stdout,
+      "stderr_bytes": $cluster_stderr
+    },
+    {
+      "name": "reset",
+      "exit": $reset_exit,
+      "stdout_bytes": $reset_stdout,
+      "stderr_bytes": $reset_stderr
+    },
+    {
+      "name": "smoke",
+      "exit": $smoke_exit,
+      "stdout_bytes": $smoke_stdout,
+      "stderr_bytes": $smoke_stderr
+    },
+    {
+      "name": "status",
+      "exit": $status_exit,
+      "stdout_bytes": $status_stdout,
+      "stderr_bytes": $status_stderr
+    },
+    {
+      "name": "bench",
+      "exit": $bench_exit,
+      "stdout_bytes": $bench_stdout,
+      "stderr_bytes": $bench_stderr
+    },
+    {
+      "name": "compare",
+      "exit": $compare_exit,
+      "stdout_bytes": $compare_stdout,
+      "stderr_bytes": $compare_stderr
+    },
+    {
+      "name": "replay",
+      "exit": $replay_exit,
+      "stdout_bytes": $replay_stdout,
+      "stderr_bytes": $replay_stderr
+    }
+  ]
+}
+JSON
+}
+
 # --- the headline SUMMARY.txt -------------------------------------------
 SUMMARY="$RECEIPT_DIR/SUMMARY.txt"
 {
@@ -305,6 +407,15 @@ SUMMARY="$RECEIPT_DIR/SUMMARY.txt"
     echo "    compare  exit=$(cat "$RECEIPT_DIR/compare/exit.txt") hands=$COMPARE_HANDS"
     echo "    replay   exit=$(cat "$RECEIPT_DIR/replay/exit.txt") bytes=$REPLAY_BYTES"
 } > "$SUMMARY"
+
+# Drop the `recipe.json` machine-readable manifest. The
+# `crates/autotrain::LiveProofReceipt::verify` verifier
+# reads this file + the per-step `exit.txt` files; the
+# integration test
+# `crates/autotrain/tests/live_proof_receipt.rs`
+# `synthetic_receipt_manifest_recipes_step_names` test
+# pins the JSON shape via the on-disk reader.
+write_recipe "$RECEIPT_DIR"
 
 # Echo the headline line so a CI worker scraping stdout can pin the
 # receipt without reading the file. The format matches
