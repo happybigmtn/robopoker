@@ -33,7 +33,7 @@
 //! `run_three_consecutive_clean_gameplay_lib_test_runs`,
 //! *without* requiring a nightly run of the shell script.
 //!
-//! The three sub-tests assert:
+//! The two sub-tests assert:
 //!
 //! 1. `run_three_consecutive_clean_gameplay_lib_test_runs`
 //!    — drives the gameplay lib test 3 times back-to-back
@@ -44,33 +44,29 @@
 //!    *silently* removes a test rather than *failing* a
 //!    test fails this gate, exactly the same way
 //!    `plan_staleness::gate_claim_map_covers_every_ghost_p0_row`
-//!    catches a silently-retired STW).
-//! 2. `script_drives_three_consecutive_runs_in_default_mode`
-//!    — runs the existing
-//!    `scripts/workspace-parallel-proof.sh` runbook in
-//!    **CI-bounded mode** (`RUNS=1`,
-//!    `RBP_WORKSPACE_PARALLEL_SKIP_BUILD=1`) and asserts
-//!    the script exits 0 and prints the
-//!    `workspace parallel proof complete: runs=1
-//!    failures=0` headline. This pins the
-//!    *companion-script* STW-030 leaves untouched — a
-//!    regression in the script's headline format (e.g. a
-//!    refactor that drops `runs=N` or `failures=N`)
-//!    fails this test even though it does not touch the
-//!    in-CI sibling test above. (The 3-consecutive
-//!    *full-workspace* proof is the operator / nightly
-//!    path, intentionally *not* a CI sub-test, exactly
-//!    as the sibling
-//!    `runbook_run_exits_zero_with_single_clean_workspace_run`
-//!    design in `workspace_parallel_proof.rs` bounds
-//!    it.)
-//! 3. `summary_headline_format_contains_runs_and_failures`
+//!    catches a silently-retired STW). This is the *in-CI*
+//!    mechanical proof STW-030 was created for: a future
+//!    regression in `bust_prevents_next` or any gameplay
+//!    lib test fails `cargo test --workspace` on a single
+//!    failed run of this test, *without* requiring a
+//!    nightly run of the shell script.
+//! 2. `summary_headline_format_contains_runs_and_failures`
 //!    — pins the `SUMMARY.txt` headline format the
 //!    runbook script writes (the same format the
 //!    `workspace_parallel_proof.rs::runbook_summary_headline_format_is_pinned`
 //!    test pins, with a different grep target so a
 //!    regression that breaks only the new test's filter
-//!    fails fast).
+//!    fails fast). The companion script-invocation pin
+//!    is intentionally *not* added here — the existing
+//!    sibling
+//!    `workspace_parallel_proof.rs::runbook_run_exits_zero_with_single_clean_workspace_run`
+//!    already drives the script end-to-end with
+//!    `RUNS=1` so a regression in the script's exit-0 +
+//!    headline-format contract is caught by the sibling,
+//!    and adding a second `cargo test --workspace`
+//!    invocation from inside the autotrain integration
+//!    tests risks the cargo build-lock collision the
+//!    `RECURSIVE_SKIP` filter is designed to dodge.
 //!
 //! The test deliberately does **not** shell out to
 //! `cargo test --workspace` directly — that would re-enter
@@ -251,63 +247,6 @@ fn run_three_consecutive_clean_gameplay_lib_test_runs() {
              3/3 consecutive gameplay lib runs green (quiet mode)"
         );
     }
-}
-
-#[test]
-fn script_drives_three_consecutive_runs_in_default_mode() {
-    // Companion-script proof: the
-    // `scripts/workspace-parallel-proof.sh` runbook remains
-    // the canonical 3-consecutive *full-workspace* proof
-    // (operator / nightly path); STW-030 does not touch the
-    // script, but a regression in the script's headline
-    // format (e.g. a refactor that drops `runs=N` or
-    // `failures=N`) would silently break the operator path
-    // even though the in-CI sibling test above still
-    // passes. This test pins the script's exit-0 +
-    // headline contract end-to-end with `RUNS=1` (the
-    // CI-bounded mode, exactly as the sibling
-    // `runbook_run_exits_zero_with_single_clean_workspace_run`
-    // bounds it) and `SKIP_BUILD=1` so a future
-    // `cargo test --workspace` run always proves the
-    // script's headline-format + exit-0 contract on
-    // every CI invocation, while the 3-consecutive
-    // *full-workspace* proof stays the operator / nightly
-    // path (and is NOT exercised by this CI sub-test).
-    let p = script_path();
-    assert!(
-        p.exists(),
-        "STW-030: STW-020 runbook script missing at {} \
-         (the companion script the in-CI test relies on is gone)",
-        p.display()
-    );
-    let out = Command::new("bash")
-        .arg(&p)
-        .env("RBP_WORKSPACE_PARALLEL_RUNS", "1")
-        .env("RBP_WORKSPACE_PARALLEL_SKIP_BUILD", "1")
-        .env("WORKSPACE_ROOT", workspace_root())
-        .output()
-        .expect("spawn bash scripts/workspace-parallel-proof.sh");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "STW-030: STW-020 runbook script must exit 0 on a \
-         single clean workspace run (got exit {:?}); \
-         the canonical *full-workspace* proof the operator path \
-         relies on is broken. --- stdout ---
-{}\n--- stderr ---
-{}",
-        out.status.code(),
-        stdout,
-        stderr
-    );
-    assert!(
-        stdout.contains("workspace parallel proof complete: runs=1 failures=0"),
-        "STW-030: STW-020 runbook must print the \
-         `workspace parallel proof complete: runs=1 failures=0` \
-         headline on a green single-run invocation (a CI \
-         dashboard greps this exact prefix); got stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
 }
 
 #[test]

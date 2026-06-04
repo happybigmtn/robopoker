@@ -42,7 +42,7 @@ planner's `PROMOTIONS.md` ranks highest.
   filter is meant to keep stable. STW-030 lands a
   new no-DB integration test
   `crates/autotrain/tests/workspace_parallel_proof_three.rs`
-  with three sub-tests: (a) the *in-CI* 3-consecutive
+  with two sub-tests: (a) the *in-CI* 3-consecutive
   proof `run_three_consecutive_clean_gameplay_lib_test_runs`
   drives `cargo test -p rbp-gameplay --lib --
   --test-threads=4` three consecutive times (the
@@ -52,29 +52,38 @@ planner's `PROMOTIONS.md` ranks highest.
   fix is live and the flake is dead) and asserts
   every run exits 0, prints `test result: ok. 111
   passed`, and the three `passed` counts are
-  identical; (b) the *companion-script* pin
-  `script_drives_three_consecutive_runs_in_default_mode`
-  drives the existing
-  `scripts/workspace-parallel-proof.sh` runbook with
-  `RBP_WORKSPACE_PARALLEL_RUNS=1` (the CI-bounded
-  mode, mirroring the sibling
-  `runbook_run_exits_zero_with_single_clean_workspace_run`
-  design in `workspace_parallel_proof.rs`) and
-  asserts the script exits 0 and prints
-  `workspace parallel proof complete: runs=1
-  failures=0`; (c) the static `SUMMARY.txt`
+  identical; (b) the static `SUMMARY.txt`
   printf-format pin
   `summary_headline_format_contains_runs_and_failures`
   greps the runbook script for the ordered
   `runs=${RUNS}` / `failures=${failures}` pair
-  contract. The new `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET=1`
+  contract. The companion script-invocation pin
+  is intentionally *not* added as a third sub-test
+  — the existing sibling
+  `workspace_parallel_proof.rs::runbook_run_exits_zero_with_single_clean_workspace_run`
+  already drives the script end-to-end with
+  `RUNS=1` so a regression in the script's exit-0 +
+  headline-format contract is caught by the sibling,
+  and adding a second `cargo test --workspace`
+  invocation from inside the autotrain integration
+  tests risks the cargo build-lock collision the
+  `RECURSIVE_SKIP` filter is designed to dodge.
+  The new `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET=1`
   env knob lets an operator mute the per-run
   `stdout` echo without changing the
   exit-code contract. The accompanying
   `scripts/workspace-parallel-proof.sh` remains
   the canonical 3-consecutive *full-workspace*
-  proof (operator / nightly path); STW-030 adds
-  the cheap in-CI proof so a future regression in
+  proof (operator / nightly path); STW-030 also
+  extends the script's `RECURSIVE_SKIP` filter
+  to skip the new in-CI test names so the
+  script's child `cargo test --workspace`
+  invocation does not re-enter the new tests'
+  spawn pattern (without changing the script's
+  3-consecutive full-workspace behavior or the
+  headline / exit-code contract the sibling
+  tests pin). STW-030 adds the cheap in-CI proof
+  so a future regression in
   `bust_prevents_next` or any gameplay lib test
   fails `cargo test --workspace` on a single
   failed run of the new
@@ -88,19 +97,22 @@ planner's `PROMOTIONS.md` ranks highest.
   exits in under 2 s on a clean checkout. Owner
   files:
   `crates/autotrain/tests/workspace_parallel_proof_three.rs`
-  (new file with the three sub-tests + the
+  (new file with the two sub-tests + the
   `RBP_WORKSPACE_PARALLEL_PROOF_THREE_QUIET`
   env knob),
+  `scripts/workspace-parallel-proof.sh`
+  (extend `RECURSIVE_SKIP` to also skip the
+  new in-CI test names so the script's
+  child `cargo test --workspace` invocation
+  does not re-enter the new tests' spawn
+  pattern; the script's 3-consecutive
+  full-workspace behavior is unchanged),
   `IMPLEMENTATION_PLAN.md` (this row),
   `genesis/plans/000-ceo-testnet-roadmap.md`
   (mark the `verification:workspace-parallel`
   P0-row as closed with a one-line note in the
   P0 retirement list). Scope boundary: do NOT
-  touch the existing
-  `scripts/workspace-parallel-proof.sh` script
-  (the canonical 3-consecutive *full-workspace*
-  proof stays the operator / nightly path); do
-  NOT touch the
+  touch the
   `crates/autotrain/tests/workspace_parallel_proof.rs`
   shape contract (the existing 4 sub-tests stay
   as-is, the new test is a sibling, not a
@@ -131,21 +143,21 @@ planner's `PROMOTIONS.md` ranks highest.
   under `cargo test --workspace --
   --test-threads=4`. Verification commands:
   `cargo test -p rbp-autotrain --test
-  workspace_parallel_proof_three` (the 3 new
+  workspace_parallel_proof_three` (the 2 new
   sub-tests pass), `cargo test --workspace
   --no-run && cargo test --workspace --
   --test-threads=4
   --skip=runbook_run_exits_zero_with_single_clean_workspace_run
-  --skip=run_three_consecutive_clean_gameplay_lib_test_runs`
+  --skip=run_three_consecutive_clean_gameplay_lib_test_runs
+  --skip=summary_headline_format_contains_runs_and_failures`
   (3 consecutive green runs as a
   smoke-check, exit 0), `cargo test --workspace
   -- --test-threads=4` (full workspace
   green), `cargo check --workspace`,
-  `cargo fmt --check`. Required tests: 3 new
+  `cargo fmt --check`. Required tests: 2 new
   lib tests in
   `crates/autotrain/tests/workspace_parallel_proof_three.rs`
   (`run_three_consecutive_clean_gameplay_lib_test_runs` /
-  `script_drives_three_consecutive_runs_in_default_mode` /
   `summary_headline_format_contains_runs_and_failures`).
   Dependencies: `STW-020` (the
   `bust_prevents_next_deterministic` 64-seed
@@ -158,7 +170,7 @@ planner's `PROMOTIONS.md` ranks highest.
   scope: S. Completion signal:
   `cargo test -p rbp-autotrain --test
   workspace_parallel_proof_three` is green
-  with 3 new sub-tests passing;
+  with 2 new sub-tests passing;
   `cargo test --workspace -- --test-threads=4`
   exits 0; the new
   `run_three_consecutive_clean_gameplay_lib_test_runs`

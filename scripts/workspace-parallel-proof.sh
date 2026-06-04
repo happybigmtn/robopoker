@@ -64,7 +64,6 @@ fi
 #  and
 #  crates/autotrain/tests/workspace_parallel_proof_three.rs::
 #  `run_three_consecutive_clean_gameplay_lib_test_runs`
-#  / `script_drives_three_consecutive_runs_in_default_mode`
 #  / `summary_headline_format_contains_runs_and_failures`)
 # spawn this very script (or the cargo test invocations the
 # script drives). If we don't filter them out, the script
@@ -77,7 +76,7 @@ fi
 # `crates/autotrain/tests/workspace_parallel_proof_three.rs`
 # `summary_headline_format_contains_runs_and_failures`
 # shape test) so the filter survives future refactors.
-RECURSIVE_SKIP='--skip=runbook_run_exits_zero_with_single_clean_workspace_run --skip=run_three_consecutive_clean_gameplay_lib_test_runs --skip=script_drives_three_consecutive_runs_in_default_mode --skip=summary_headline_format_contains_runs_and_failures'
+RECURSIVE_SKIP='--skip=runbook_run_exits_zero_with_single_clean_workspace_run --skip=run_three_consecutive_clean_gameplay_lib_test_runs --skip=summary_headline_format_contains_runs_and_failures'
 
 failures=0
 for run in $(seq 1 "${RUNS}"); do
