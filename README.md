@@ -60,6 +60,31 @@ let obs = Observation::from(Street::Flop);
 let equity = obs.equity();
 ```
 
+### Testnet dashboard env knobs
+
+The `## Public dashboard` section below sources its
+`<https://...pages.dev/>` URL from the
+`RBP_DASHBOARD_DEPLOYED_URL` env knob, defaulting to
+the `robopoker-testnet-dashboard.pages.dev/` placeholder
+when unset. The
+[`scripts/deploy-dashboard-cloudflare.sh`](scripts/deploy-dashboard-cloudflare.sh)
+runbook (the *deploy* leg of the public-surface north
+star the STW-054 slice ships) sets
+`RBP_DASHBOARD_DEPLOYED_URL` to the real `pages.dev`
+URL `wrangler pages deploy` printed and reconciles the
+README's `## Public dashboard` line in the same
+invocation.
+
+```bash
+# Default — the placeholder URL the README renders
+# before the first deploy runbook invocation.
+echo "Public dashboard: https://${RBP_DASHBOARD_DEPLOYED_URL:-robopoker-testnet-dashboard.pages.dev/}"
+
+# Post-first-deploy — the real `pages.dev` URL the
+# deploy runbook exports.
+export RBP_DASHBOARD_DEPLOYED_URL="robopoker-testnet-dashboard.pages.dev"
+```
+
 ## Crate Overview
 
 | Crate | Description |
@@ -310,14 +335,14 @@ new `crates/dashboard/` workspace member with three layers:
    per-row `Download transcript` link to `/transcript/:id`,
    and a per-row `Open replay` link to `/bench/:id`.
 
-Public dashboard: <https://robopoker-testnet-dashboard.pages.dev/>
+Public dashboard: <https://${RBP_DASHBOARD_DEPLOYED_URL:-robopoker-testnet-dashboard.pages.dev/}>
 
 The `RBP_DASHBOARD_DEPLOYED_URL` env knob the test harness
 sets; the placeholder URL the v10 ships with is greppable so a
 dashboard-readiness check can `grep -q 'Public dashboard:'
 README.md`. A testnet dashboard can `curl
-https://robopoker-testnet-dashboard.pages.dev/api/index` and
-receive the same `INDEX.json` shape the `trainer --verify-index`
+https://${RBP_DASHBOARD_DEPLOYED_URL:-robopoker-testnet-dashboard.pages.dev/}/api/index`
+and receive the same `INDEX.json` shape the `trainer --verify-index`
 re-verifier accepts. The deploy runbook is
 
 ```bash
@@ -330,7 +355,14 @@ pre-deploy refuse-to-deploy-red-index gate) and
 `aws s3 sync <publish-root>/index/ s3://<bucket>/<prefix>/ --delete
 --cache-control max-age=60` as a sequence of subprocesses.
 See [`scripts/testnet-live-publish-dashboard.md`](scripts/testnet-live-publish-dashboard.md)
-for the full runbook.
+for the S3/CloudFront runbook, and
+[`scripts/deploy-dashboard-cloudflare.md`](scripts/deploy-dashboard-cloudflare.md)
+for the Cloudflare-Pages sibling that uses `wrangler pages
+deploy` instead of `aws s3 sync` (the
+`RBP_DASHBOARD_DEPLOYED_URL` env knob the README's
+`Public dashboard:` line sources from is the same knob the
+Cloudflare-Pages runbook reconciles to after the first
+deploy).
 
 ## Workspace parallel test proof
 

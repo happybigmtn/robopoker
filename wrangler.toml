@@ -1,0 +1,33 @@
+# wrangler.toml — STW-054 Cloudflare Pages deploy config.
+#
+# The Pages project name the
+# `scripts/deploy-dashboard-cloudflare.sh` STW-054
+# runbook's `wrangler pages deploy <dir>
+# --project-name <name>` call consumes. The committed
+# config is the minimum the Cloudflare Pages path
+# needs — no `account_id` / no extra Pages-build
+# knobs / no vendored SDK. The Cloudflare auth
+# credential is read from the
+# `RBP_DASHBOARD_CF_API_TOKEN` env knob at deploy time
+# and routed to the `wrangler` CLI as a
+# `CLOUDFLARE_API_TOKEN` env override; no secrets are
+# committed here. A regression that adds any key
+# mapping to a Cloudflare secret (an env-injection
+# block, an env-knob line with a real value, etc.)
+# fails the
+# `crates/autotrain/tests/script_shape.rs::deploy_dashboard_cloudflare_wrangler_toml_has_no_secrets`
+# pin (added in STW-054 alongside the runbook pinner)
+# at CI time before the secret reaches a Cloudflare
+# Pages deploy.
+#
+# The Pages project `robopoker-testnet-dashboard` is
+# auto-created on the first `wrangler pages deploy`
+# invocation; the
+# `<https://robopoker-testnet-dashboard.pages.dev/>`
+# URL the README's `## Public dashboard` section
+# references is the *post-first-deploy* URL a stranger
+# sees when an operator actually runs
+# `scripts/deploy-dashboard-cloudflare.sh` for the
+# first time.
+
+name = "robopoker-testnet-dashboard"

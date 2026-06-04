@@ -8503,7 +8503,7 @@ is NOT new scope. The new scope is `STW-051` +
   continues to work unchanged
   after the audit).**
 
-- [ ] **[P1] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
+- [x] **[P1] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
   runbook + committed `wrangler.toml` +
   `RBP_DASHBOARD_CF_API_TOKEN` env knob:
   the *deploy* leg of the public-surface

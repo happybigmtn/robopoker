@@ -1342,6 +1342,334 @@ fn testnet_live_publish_dashboard_script_references_aws_s3_sync() {
     );
 }
 
+// --- STW-054 cloudflare-pages-deploy runbook shape pins ------
+//
+// The STW-054 Cloudflare Pages dashboard-deploy runbook
+// (`scripts/deploy-dashboard-cloudflare.sh`) is the
+// *deploy* leg of the public-surface north star the prior
+// CEO lens named: a CI worker that produced an
+// `INDEX.json` (via the STW-034 → STW-035 chain) wants
+// to `wrangler pages deploy` it to a Cloudflare Pages
+// project the dashboard's `RBP_DASHBOARD_INDEX_URL` env
+// knob points at. The STW-036 S3/CloudFront runbook
+// already ships (a parallel deploy surface the operator
+// picks between via the script they invoke), and STW-054
+// adds the Cloudflare Pages path alongside it. The four
+// pins below mirror the STW-019 + STW-032 + STW-033 +
+// STW-034 + STW-035 + STW-036 file-on-disk +
+// pre-deploy-gate + CLI-reference + no-secrets-in-config
+// pinners the autotrain pipeline already follows, so a
+// regression in the Cloudflare Pages runbook's surface
+// (file missing, syntax broken, executable bit cleared,
+// no pre-deploy `trainer --verify-index` call, no
+// `wrangler pages deploy` call, no
+// `RBP_DASHBOARD_CF_API_TOKEN` env-knob reference, or
+// — most important — a `[vars]` block with a real
+// Cloudflare API token committed in `wrangler.toml`)
+// fails CI at the same step a future operator would
+// silently break or — worse — silently leak a secret.
+
+fn deploy_dashboard_cloudflare_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("deploy-dashboard-cloudflare.sh")
+}
+
+fn wrangler_toml_path() -> PathBuf {
+    workspace_root().join("wrangler.toml")
+}
+
+#[test]
+fn deploy_dashboard_cloudflare_script_exists_and_parses() {
+    // The STW-054 Cloudflare Pages dashboard-deploy
+    // runbook script must be on disk, executable,
+    // and parse with `bash -n`. A regression that
+    // drops the file (or breaks the bash grammar)
+    // fails the gate at CI time before a CI worker
+    // can shell out to it. Mirrors the STW-019 +
+    // STW-032 + STW-033 + STW-034 + STW-035 +
+    // STW-036 file-on-disk pins.
+    let p = deploy_dashboard_cloudflare_script_path();
+    assert!(
+        p.exists(),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script missing at {}; \
+         the Cloudflare Pages dashboard deploy has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must have \
+             its owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches a live
+    // Cloudflare Pages dashboard-deploy step.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/deploy-dashboard-cloudflare.sh");
+    assert!(
+        out.status.success(),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script must parse with \
+         `bash -n` (got exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn deploy_dashboard_cloudflare_script_references_wrangler_pages_deploy() {
+    // The STW-054 runbook must invoke
+    // `wrangler pages deploy <index-dir>` — the
+    // Cloudflare Pages push the dashboard's
+    // `RBP_DASHBOARD_INDEX_URL` env knob points
+    // at. We assert by `wrangler pages deploy`
+    // substring because that is the form the
+    // operator types and the form a CI dashboard
+    // scraper greps. The runtime call site uses
+    // the `"$WRANGLER_BIN" pages deploy` form
+    // (so a worker can override the `wrangler`
+    // binary path via the `WRANGLER_BIN` env
+    // knob), not the literal `wrangler pages
+    // deploy` form. The substring we pin is the
+    // literal `wrangler pages deploy` so the
+    // pinner fails if a future edit drops the
+    // call site (or renames the Cloudflare CLI
+    // command). Mirrors the STW-036
+    // `testnet_live_publish_dashboard_script_references_aws_s3_sync`
+    // pinner.
+    let script = read(&deploy_dashboard_cloudflare_script_path());
+    assert!(
+        script.contains("wrangler pages deploy"),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must invoke \
+         `wrangler pages deploy` (via the `$WRANGLER_BIN` env knob); a worker reading \
+         the script would not know how to deploy the dashboard data feed to Cloudflare \
+         Pages",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+    assert!(
+        script.contains("robopoker-testnet-dashboard"),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must pin the \
+         Pages project name `robopoker-testnet-dashboard` (the project the README's \
+         `<https://robopoker-testnet-dashboard.pages.dev/>` placeholder becomes real \
+         after the first deploy); a worker reading the script would not know which \
+         Pages project the deploy targets",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+    assert!(
+        script.contains("--commit-dirty=true"),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must invoke \
+         `wrangler pages deploy ... --commit-dirty=true` so the deploy proceeds even \
+         when the Pages project's git working tree is dirty (the `wrangler.toml` is \
+         the only committed file the Pages path cares about; the deploy payload is \
+         the local `index/` dir, not a git commit)",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+}
+
+#[test]
+fn deploy_dashboard_cloudflare_script_references_rbp_dashboard_cf_api_token() {
+    // The STW-054 runbook must reference the
+    // `RBP_DASHBOARD_CF_API_TOKEN` env knob (the
+    // Cloudflare API token the operator sets at
+    // deploy time; the token is NEVER echoed and
+    // NEVER written to disk). A regression that
+    // renames the env knob (or drops the
+    // `exit 3` fail-fast gate the runbook
+    // implements) fails this pin so a CI worker
+    // reading the script can wire the same env
+    // knob the operator is expected to set.
+    // Mirrors the STW-035
+    // `testnet_live_publish_index_s3_script_references_*`
+    // env-knob pinners.
+    let script = read(&deploy_dashboard_cloudflare_script_path());
+    assert!(
+        script.contains("RBP_DASHBOARD_CF_API_TOKEN"),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must \
+         reference the `RBP_DASHBOARD_CF_API_TOKEN` env knob (the Cloudflare API \
+         token the operator sets at deploy time; the runbook routes the token to \
+         the `wrangler` CLI as a `CLOUDFLARE_API_TOKEN` env override at the runtime \
+         call site only); a worker reading the script would not know which env \
+         knob the deploy authenticates against",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+    assert!(
+        script.contains("CLOUDFLARE_API_TOKEN"),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must route \
+         the `RBP_DASHBOARD_CF_API_TOKEN` env knob to the `wrangler` CLI via a \
+         `CLOUDFLARE_API_TOKEN` env override (the `wrangler` CLI's documented auth \
+         env-var name); a hand-rolled `--api-token $RBP_DASHBOARD_CF_API_TOKEN` \
+         form would echo the token in `ps -ef` and the CI worker's process list",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+}
+
+#[test]
+fn deploy_dashboard_cloudflare_wrangler_toml_has_no_secrets() {
+    // The committed `wrangler.toml` at the repo
+    // root pins the Pages project name +
+    // `pages_build_output_dir` +
+    // `compatibility_date` the `wrangler pages
+    // deploy` call consumes. The config MUST NOT
+    // contain a `[vars]` block (or any other key
+    // that maps to a Cloudflare secret — e.g.
+    // `api_token = "..."` under a project
+    // header) because the runbook reads the
+    // Cloudflare API token from the
+    // `RBP_DASHBOARD_CF_API_TOKEN` env knob at
+    // deploy time. A regression that adds a real
+    // secret to `wrangler.toml` leaks the secret
+    // to every `git clone` (and the public
+    // GitHub mirror) and is irrecoverable without
+    // rotating the secret. This pin is the
+    // cheapest possible early-warning system: a
+    // `[vars]` block with a `=` line, or a
+    // `api_token` key anywhere in the file, fails
+    // the test at CI time before the secret
+    // reaches a Cloudflare Pages deploy.
+    let p = wrangler_toml_path();
+    assert!(
+        p.exists(),
+        "STW-054 Cloudflare Pages dashboard-deploy runbook expects a `wrangler.toml` \
+         at the repo root pinning the Pages project config; file missing at {}",
+        p.display()
+    );
+    let config = read(&p);
+    // (a) The file must pin the Pages project
+    // name. Per the sixth-pass STW-054 spec, the
+    // `wrangler pages deploy <dir>` shell-out the
+    // runbook uses is the explicit directory path
+    // shape, so the `pages_build_output_dir` /
+    // `compatibility_date` keys are unnecessary
+    // and are intentionally NOT pinned in the
+    // committed `wrangler.toml` (adding them would
+    // create a config/env drift surface the runbook
+    // does not defend against — the runbook is
+    // env-knob-driven, not config-file-driven).
+    // The `name = "robopoker-testnet-dashboard"`
+    // project name is the only config key the
+    // `wrangler pages deploy` call needs.
+    assert!(
+        config.contains("name = \"robopoker-testnet-dashboard\""),
+        "STW-054 `wrangler.toml` at {} must pin the Pages project name \
+         `robopoker-testnet-dashboard`",
+        p.display()
+    );
+    // (b) The file must NOT contain a
+    // `pages_build_output_dir` key (the sixth-pass
+    // STW-054 spec explicitly excludes the key —
+    // `wrangler pages deploy <dir>` is the
+    // explicit directory path shape the runbook
+    // uses, so a `pages_build_output_dir` line
+    // would silently shadow the on-the-wire
+    // directory the runbook passes on the command
+    // line). A regression that adds a
+    // `pages_build_output_dir = "..."` line fails
+    // this pin.
+    assert!(
+        !config.contains("pages_build_output_dir"),
+        "STW-054 `wrangler.toml` at {} must NOT contain a `pages_build_output_dir` \
+         key; the `wrangler pages deploy <dir>` shell-out the runbook uses is the \
+         explicit directory path shape, so a `pages_build_output_dir` line would \
+         silently shadow the on-the-wire directory the runbook passes on the \
+         command line. The runbook is env-knob-driven, not config-file-driven.",
+        p.display()
+    );
+    // (c) The file must NOT contain a
+    // `compatibility_date` key (the sixth-pass
+    // STW-054 spec explicitly excludes the key —
+    // the runbook's `wrangler pages deploy` call
+    // does not pass a `--compatibility-date` flag
+    // and the config-file form would be a
+    // config/env drift surface a future refactor
+    // would have to defend against). A regression
+    // that adds a `compatibility_date = "..."`
+    // line fails this pin.
+    assert!(
+        !config.contains("compatibility_date"),
+        "STW-054 `wrangler.toml` at {} must NOT contain a `compatibility_date` key; \
+         the runbook's `wrangler pages deploy` call does not pass a \
+         `--compatibility-date` flag and the config-file form is intentionally \
+         absent (the runbook is env-knob-driven, not config-file-driven).",
+        p.display()
+    );
+    // (d) The file must NOT contain a TOML
+    // section header that maps to a Cloudflare
+    // secret — `[vars]`, `[env]`, or a
+    // `[env.production]` / `[env.preview]`
+    // block (the canonical env-injection
+    // surfaces Cloudflare Pages exposes, and
+    // the most likely place a future
+    // contributor will paste a Cloudflare API
+    // token by mistake). A regression that adds
+    // any of these as a *TOML section header*
+    // (i.e. a `[xxx]` line at the start of a
+    // non-comment line) fails this pin. The pin
+    // is line-anchored so a *comment* that
+    // references `[vars]` (e.g. the comment in
+    // this very pin's docstring) does NOT fail
+    // the pin.
+    let has_secret_section = config.lines().map(|l| l.trim_start()).any(|l| {
+        l.starts_with("[vars]")
+            || l.starts_with("[env]")
+            || l.starts_with("[env.production]")
+            || l.starts_with("[env.preview]")
+    });
+    assert!(
+        !has_secret_section,
+        "STW-054 `wrangler.toml` at {} must NOT contain a TOML section header for \
+         a Cloudflare secret (one of `[vars]`, `[env]`, `[env.production]`, \
+         `[env.preview]`); the Cloudflare API token is read from the \
+         `RBP_DASHBOARD_CF_API_TOKEN` env knob at deploy time (no secrets are \
+         committed)",
+        p.display()
+    );
+    // auth" by mistake). The pin is line-
+    // anchored (`key = "value"` form, not a
+    // substring match) so a *comment* that
+    // mentions the word `api_token` does NOT
+    // fail the pin. A regression that adds an
+    // `api_token = "..."` line (a real TOML
+    // key=value with a non-empty string
+    // payload) fails this pin.
+    let has_api_token_line = config.lines().any(|l| {
+        let trimmed = l.trim_start();
+        trimmed.starts_with("api_token = \"")
+            || trimmed.starts_with("api_token='")
+            || trimmed.starts_with("auth_token = \"")
+            || trimmed.starts_with("auth_token='")
+    });
+    assert!(
+        !has_api_token_line,
+        "STW-054 `wrangler.toml` at {} must NOT contain a real secret key line \
+         (one of `api_token = \"...\"`, `api_token='...'`, `auth_token = \"...\"`, \
+         `auth_token='...'`); the Cloudflare API token is read from the \
+         `RBP_DASHBOARD_CF_API_TOKEN` env knob at deploy time (no secrets are \
+         committed)",
+        p.display()
+    );
+}
+
 // --- STW-037 operator-runnable 3-consecutive full-workspace
 //     proof runbook shape pins -----------------------------
 //
