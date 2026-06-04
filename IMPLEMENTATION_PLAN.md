@@ -1948,6 +1948,73 @@ have a single source of truth.
   remain green; `crates/server/tests/` is no longer an
   empty directory.
 
+- [x] `STW-026` Sinkhorn triangle-inequality flake
+  stabilization in `crates/clustering/src/emd.rs`. The
+  `is_sinkhorn_emd_triangle` lib test asserts the strict
+  triangle inequality `a + b >= c` for three
+  Sinkhorn-minimized entropic-OT couplings, but
+  `STW-020` parallel-workspace proof (and a 1/100-1/500
+  rerun-rate of the random test on the current source)
+  showed a small fraction of `EMD::random()` inputs
+  produce an `~11%` `a + b < c` violation (e.g.
+  `a = 0.0856 + b = 0.0948 < c = 0.2008 / 1.15`); the
+  proportional violation is structural to the entropic
+  Sinkhorn at `temperature = 0.025`
+  (`rbp_core::SINKHORN_TEMPERATURE`), not a regression
+  in the math. STW-026 pins the contract with a
+  `TOLERANCE = 1.15` margin on each of the three arms
+  (`a + b >= c / TOLERANCE`) — a `~3%` safety margin
+  over the worst observed `~11%` violation — and adds
+  a hand-rolled `is_sinkhorn_emd_triangle_deterministic`
+  test on a fixed `Metric` (`d(0,1) = d(1,2) = 1.0`,
+  `d(0,2) = 2.1`) + three single-bucket Flop
+  histograms so a future Sinkhorn regression is
+  locatable to the exact arm + magnitude of the
+  `TOLERANCE` breach on a reproducible input, not a
+  fresh `EMD::random()` flake. The heuristic triangle
+  test (`is_heuristic_emd_triangle`) is unchanged: the
+  heuristic is a greedy projection, not an entropic
+  optimization, and its own `TOLERANCE = 1.25` was
+  already a generous bound. The Sinkhorn contract is
+  intentionally tighter than the heuristic contract —
+  a Sinkhorn regression that grows the worst-case
+  violation past `15%` will fail this test even though
+  the heuristic still passes. Owner files:
+  `crates/clustering/src/emd.rs` (the `TOLERANCE`
+  constant + the new deterministic test + the
+  rationale docs above each test). Scope boundary: do
+  NOT touch the `Sinkhorn::minimize` math, the
+  `rbp_core::SINKHORN_TEMPERATURE` constant, the
+  `is_equity_emd_*` / `is_sinkhorn_emd_positive` /
+  `is_sinkhorn_emd_zero` / `is_heuristic_emd_*`
+  contract tests, the `Heuristic` triangle test
+  tolerance, the `EMD::random()` fixture, the
+  `Heuristic` approximation path, the `crates/transport`
+  `STW-024` work, the `STW-020` parallel-workspace
+  runbook, or the `bust_prevents_next_deterministic`
+  gameplay test. The fix is *only* a tolerance +
+  documentation change on the one lib test, plus one
+  new deterministic regression test. Verification
+  commands: `cargo test -p rbp-clustering --lib`
+  (1/100-1/500 flake rate → 0/200 in the 200-run
+  probe); `cargo test --workspace -- --test-threads=4`
+  (the random sinkhorn triangle test was the source
+  of the 1/N parallel-workspace flake, the new
+  tolerance makes it deterministic green);
+  `cargo fmt --check`; `cargo check --workspace`.
+  Required tests: the existing 18 `rbp-clustering` lib
+  tests, of which 2 are the `is_sinkhorn_emd_triangle`
+  + new `is_sinkhorn_emd_triangle_deterministic` (the
+  latter is a new addition; the former is a tolerance
+  relaxation). Dependencies: none. Estimated scope: S.
+  Completion signal: the `is_sinkhorn_emd_triangle`
+  random test passes 200/200 in a fresh `for i in
+  $(seq 1 200); do cargo test -p rbp-clustering
+  --lib emd::tests::is_sinkhorn_emd_triangle; done`
+  loop; the `is_sinkhorn_emd_triangle_deterministic`
+  test is green on first run; `cargo test --workspace
+  -- --test-threads=4` reports 0 failures.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.
