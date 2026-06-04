@@ -5440,7 +5440,7 @@ leverage.
   is the active user-facing bug,
   not a missing doc section).**
 
-- [ ] **[P0] `STW-043` `crates/autotrain/tests/fixtures/bench-report-fixture.json`
+- [x] **[P0] `STW-043` `crates/autotrain/tests/fixtures/bench-report-fixture.json`
   + `scripts/commit-bench-fixture.sh` operator shim
   that produces a byte-stable `BenchReport` from
   `trainer --bench` against a no-DB deterministic

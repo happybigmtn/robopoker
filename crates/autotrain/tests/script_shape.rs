@@ -1449,3 +1449,119 @@ fn workspace_parallel_proof_three_script_exists_and_parses() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// STW-043 shell-shape pinner: the
+// `scripts/commit-bench-fixture.sh` bench-result fixture
+// shim is on disk + executable + parses with `bash -n`,
+// AND its `strip_run_id` awk one-liner is present in the
+// script source so a future refactor that drops the
+// strip pass fails CI before a downstream auditor can
+// `cat` a non-byte-stable committed fixture. Mirrors the
+// STW-019 / STW-032 / STW-033 / STW-034 / STW-035 / STW-036
+// / STW-037 file-on-disk + bash-n pins; the second pin
+// is the STW-043-specific shape contract the fixture's
+// byte-stability depends on (the `BenchReport::to_json`
+// format string STW-010 / STW-017 / STW-031 emits carries
+// `run_id` + `started_at_utc`, so the shim's strip pass
+// is the *only* thing that turns the per-run output
+// into a byte-stable committed fixture a stranger can
+// grep).
+
+fn commit_bench_fixture_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("commit-bench-fixture.sh")
+}
+
+#[test]
+fn commit_bench_fixture_script_exists_and_parses() {
+    // The STW-043 bench-fixture shim must be on disk,
+    // executable, and parse with `bash -n`. A regression
+    // that drops the file (or breaks the bash grammar)
+    // fails the gate at CI time before a CI worker can
+    // shell out to it. Mirrors the STW-019 / STW-032 /
+    // STW-033 / STW-034 / STW-035 / STW-036 / STW-037
+    // file-on-disk + bash-n pinners.
+    let p = commit_bench_fixture_script_path();
+    assert!(
+        p.exists(),
+        "STW-043 bench-fixture shim missing at {}; \
+         the committed bench result has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the shim.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-043 bench-fixture shim at {} must have its owner-executable bit set \
+             (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing
+    // it. A non-zero exit (a syntax error) fails the
+    // test so a future edit that breaks the bash
+    // grammar fails CI before it reaches a live
+    // bench-fixture re-run.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/commit-bench-fixture.sh");
+    assert!(
+        out.status.success(),
+        "STW-043 bench-fixture shim must parse with `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn commit_bench_fixture_script_strips_run_id_fields() {
+    // The shim's `strip_run_id` helper must be present
+    // in the script source AND must reference the two
+    // per-run fields (`run_id` + `started_at_utc`) the
+    // STW-043 byte-stability contract is pinned on. A
+    // regression that drops the strip pass (or renames
+    // the helper) lets `run_id` / `started_at_utc` leak
+    // into the committed fixture, breaking the
+    // byte-stability promise the `bench_report_fixture.
+    // json.sha256` sidecar pins. The fixture's
+    // SHA256 + the script's source are the two
+    // auditable surfaces; a future regression in
+    // either fails CI.
+    let script = read(&commit_bench_fixture_script_path());
+    assert!(
+        script.contains("strip_run_id"),
+        "STW-043 bench-fixture shim must define a `strip_run_id` helper; \
+         the byte-stability contract depends on the strip pass being \
+         present in the script source"
+    );
+    assert!(
+        script.contains("\"run_id\""),
+        "STW-043 bench-fixture shim's strip pass must reference the `run_id` \
+         field name (`\"run_id\"`); a future `BenchReport::to_json` revision \
+         that drops `run_id` should also drop this pin"
+    );
+    assert!(
+        script.contains("\"started_at_utc\""),
+        "STW-043 bench-fixture shim's strip pass must reference the \
+         `started_at_utc` field name (`\"started_at_utc\"`); a future \
+         `BenchReport::to_json` revision that drops `started_at_utc` \
+         should also drop this pin"
+    );
+}
