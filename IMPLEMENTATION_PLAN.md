@@ -9562,7 +9562,7 @@ scope. The new scope is `STW-054` + `STW-055`
   arm + the exact `printf` format
   string).**
 
-- [ ] **[P1] `STW-058` The dashboard's
+- [x] **[P1] `STW-058` The dashboard's
   Pages-specific render surface:
   inject `RBP_DASHBOARD_DEPLOYED_URL`
   as a `window.__DASHBOARD_DEPLOYED_URL__`
@@ -9780,7 +9780,7 @@ north star's *one-source-of-truth* claim:
 The seventh pass therefore ships four
 deliverables, ordered by leverage:
 
-- [ ] **[P0] `STW-058` The dashboard's
+- [x] **[P0] `STW-058` The dashboard's
   Pages-specific render surface: inject
   `RBP_DASHBOARD_DEPLOYED_URL` as a
   `window.__DASHBOARD_DEPLOYED_URL__` global

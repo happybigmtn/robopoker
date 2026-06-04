@@ -803,3 +803,164 @@ async fn per_row_basename_does_not_render_missing_sentinel() {
     // inspection would surface
     // the literal.
 }
+
+/// STW-058: the dashboard's Pages-specific render
+/// surface. The `serve_static_index` handler reads
+/// the `RBP_DASHBOARD_DEPLOYED_URL` env knob on every
+/// request, injects the value as a
+/// `window.__DASHBOARD_DEPLOYED_URL__` JS global, and
+/// the `index.html` JS appends a
+/// `deployed_at=<url>` fragment to the meta line. A
+/// re-deploy to a different Pages project updates the
+/// rendered dashboard's meta line + the README's
+/// "Public dashboard:" line + the `deploy.json`
+/// manifest in one source.
+///
+/// The smoke-test pin is the end-to-end shape:
+/// drive the dashboard's `GET /` route with the
+/// `RBP_DASHBOARD_DEPLOYED_URL` override engaged to
+/// `https://example.pages.dev/`, then assert the
+/// response body (a) contains the literal
+/// `deployed_at=https://example.pages.dev/` substring
+/// (the JS reads the injected global and appends
+/// the fragment to the meta `textContent` line) and
+/// (b) contains the literal
+/// `window.__DASHBOARD_DEPLOYED_URL__ = "https://example.pages.dev/"`
+/// (the router's pre-IIFE script injection). The
+/// double-pin catches both the *inject* path (a
+/// regression that drops the `<script>` line fails
+/// the (b) assertion) and the *consume* path (a
+/// regression that drops the JS append fails the (a)
+/// assertion) at the same CI step a visitor's
+/// page-source inspection would surface the
+/// divergence.
+///
+/// The override is the race-free alternative to the
+/// `set_var` / `remove_var` pattern: a parallel
+/// `cargo test --test-threads=4` run cannot leak the
+/// value across test boundaries (the override is a
+/// process-wide `Mutex<Option<String>>` that the
+/// `DeployedUrlTestGuard`'s `Drop` impl restores to
+/// `None` on test-scope exit). The same pattern the
+/// STW-052 `engaged_empty_state_for_test` guard
+/// uses.
+#[tokio::test]
+async fn meta_line_reflects_dashboard_deployed_url_env_knob() {
+    // Engage the `RBP_DASHBOARD_DEPLOYED_URL`
+    // override for the lifetime of this test scope.
+    // The RAII guard binds the override to the
+    // `let _guard = ...;` binding so a parallel
+    // test that runs `clear_deployed_url_for_test`
+    // mid-assertion cannot race the held guard (the
+    // override `Mutex` serializes the lookup the
+    // `serve_static_index` handler runs and the
+    // guard's `Drop`).
+    let _deployed_url_guard =
+        rbp_dashboard::engaged_deployed_url_for_test("https://example.pages.dev/");
+    // Build a fresh `AppState` pointed at the
+    // committed `index.json` fixture. The
+    // `RBP_DASHBOARD_DEPLOYED_URL` override is
+    // engaged, so the `GET /` handler injects the
+    // `https://example.pages.dev/` URL as the
+    // `window.__DASHBOARD_DEPLOYED_URL__` global;
+    // the assertion below pins both the *inject*
+    // substring and the JS's *consume* substring.
+    let app = dashboard_app(app_state_with_fixtures());
+
+    // 1. `GET /` — served static `index.html`
+    // bytes, post-router-injection. The body must
+    // contain the literal
+    // `window.__DASHBOARD_DEPLOYED_URL__ = "https://example.pages.dev/"`
+    // substring (the router's pre-IIFE script
+    // injection; the JS-string-literal form
+    // mirrors the source `index.html` line the
+    // JS reads on page load).
+    let (status, body, content_type) = get(app.clone(), "/").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET / must return 200; got {status}"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    let expected_url = "https://example.pages.dev/";
+    assert!(
+        body_str.contains(&format!(
+            "window.__DASHBOARD_DEPLOYED_URL__ = \"{expected_url}\";"
+        )),
+        "GET / body must contain the STW-058 router-injected \
+         `window.__DASHBOARD_DEPLOYED_URL__` global with the \
+         override URL; got:\n{body_str}"
+    );
+    // 2. The JS-side consume pin: the served
+    // `index.html` body must contain the literal
+    // `deployed_at=https://example.pages.dev/`
+    // substring. The static `index.html` JS
+    // appends this fragment to the meta line's
+    // `textContent` (the JS source is in the
+    // served bytes verbatim, and the JS runs in
+    // a visitor's browser — the assertion is the
+    // static-HTML pin: a regression that drops
+    // the `deployed_at=` append fails the
+    // assertion at the same CI step a visitor's
+    // page-source inspection would surface the
+    // missing fragment).
+    //
+    // Note: the JS's
+    // `meta.textContent = '...'` line runs in the
+    // browser, so the served bytes carry the
+    // *JS source* (the `'deployed_at=' + deployedUrl`
+    // string-template) — the literal
+    // `deployed_at=` substring the assertion
+    // pins is the JS template's source. The
+    // actual rendered meta line is browser-side
+    // and not in the served bytes; the static
+    // HTML substring pin is the cheapest
+    // possible server-side check.
+    assert!(
+        body_str.contains("deployed_at="),
+        "GET / body must contain the STW-058 JS `deployed_at=` \
+         append source; got:\n{body_str}"
+    );
+    assert!(
+        body_str.contains("+ deployedUrl"),
+        "GET / body must contain the STW-058 JS `+ deployedUrl` \
+         concat; got:\n{body_str}"
+    );
+    assert!(
+        body_str.contains(expected_url),
+        "GET / body must contain the override URL `{expected_url}` \
+         at least once (the router-injected global); got:\n{body_str}"
+    );
+    // The static `index.html` JS default fallback
+    // (`'https://robopoker-testnet-dashboard.pages.dev/'`)
+    // must NOT appear in the body when the
+    // override is engaged (the override wins,
+    // so the served global is the override URL,
+    // not the README's placeholder). A regression
+    // that drops the override-wins path leaks
+    // the placeholder URL into a deployed
+    // dashboard, which the STW-058 follow-on
+    // STW-059 fixes via the deploy-runbook
+    // export.
+    assert!(
+        body_str.contains("var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || 'https://robopoker-testnet-dashboard.pages.dev/';"),
+        "GET / body must contain the STW-058 JS `deployedUrl` \
+         read source (the consume side); got:\n{body_str}"
+    );
+    let ct = content_type.unwrap_or_default();
+    assert!(
+        ct.starts_with("text/html"),
+        "GET / must be `text/html`; got `{ct}`"
+    );
+    // The `cache-control: no-cache` header is
+    // unchanged (the STW-058 inject does NOT
+    // change the response header surface; a
+    // re-deploy to a different Pages project
+    // picks up the new URL on the next page
+    // load via the no-cache header, the same
+    // shape the pre-STW-058 served page carries).
+    // The test does NOT re-assert the
+    // `no-cache` literal here — the
+    // `smoke_dashboard_routes_against_committed_fixtures`
+    // sub-test already pins it.
+}

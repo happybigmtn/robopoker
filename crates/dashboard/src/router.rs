@@ -55,14 +55,111 @@ use crate::render;
 /// per-hand bundles without configuration.
 pub const DEFAULT_TRANSCRIPT_DIR: &str = "./transcripts";
 
-/// `RBP_DASHBOARD_DEPLOYED_URL` env knob — the Cloudflare
-/// Pages / production URL the README's
-/// `## Public dashboard` section points at. The dashboard
-/// build script reads this at deploy time; the
-/// `crates/autotrain/tests/script_shape.rs` shape pins
-/// assert the README's `## Public dashboard` line carries
-/// a `Public dashboard: <URL>` token this knob sets.
+/// `RBP_DASHBOARD_DEPLOYED_URL` env knob — STW-058's
+/// Pages-specific render surface. The dashboard's
+/// `serve_static_index` handler reads this knob on
+/// every request, injects the value as a
+/// `window.__DASHBOARD_DEPLOYED_URL__` JS global, and
+/// the `index.html` JS appends a `deployed_at=<url>`
+/// fragment to the meta line. A re-deploy to a
+/// different Pages project updates the rendered
+/// dashboard's meta line + the README's "Public
+/// dashboard:" line + the `deploy.json` manifest in
+/// one source. Default: the README's
+/// `https://robopoker-testnet-dashboard.pages.dev/`
+/// placeholder, the same value the pre-STW-058 served
+/// page carries. The handler reads the env var on
+/// every request (cheap `std::env::var` lookup, the
+/// same shape the existing
+/// `RBP_DASHBOARD_EMPTY_STATE` / `RBP_DASHBOARD_INDEX_URL`
+/// knobs follow) so a re-deploy to a different Pages
+/// project picks up the new URL on the next page
+/// load without a `cargo run` restart.
 pub const DEFAULT_DEPLOYED_URL: &str = "https://robopoker-testnet-dashboard.pages.dev/";
+
+/// Process-wide override the integration tests engage
+/// to drive the `RBP_DASHBOARD_DEPLOYED_URL` env knob
+/// without racing on `set_var` / `remove_var` (the
+/// 2024-edition `unsafe std::env::set_var` / `remove_var`
+/// pattern would leak the value across parallel test
+/// boundaries in a `cargo test --test-threads=4` run).
+/// The override is consulted on every request the
+/// `serve_static_index` handler runs and falls through
+/// to the env-var read when `None` (the default). The
+/// override is the same race-free pattern the existing
+/// `EMPTY_STATE_TEST_OVERRIDE` static + RAII guard
+/// use (STW-052).
+static DEPLOYED_URL_TEST_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Engage the `RBP_DASHBOARD_DEPLOYED_URL` override
+/// for the lifetime of the returned
+/// [`DeployedUrlTestGuard`]. The integration test
+/// pins the guard to a `let _guard = ...;` binding so
+/// the override is restored to the default `None`
+/// state when the test scope exits. A parallel test
+/// that runs the bare `clear_*` mid-assertion cannot
+/// race the held guard (the override `Mutex`
+/// serializes the lookup the `serve_static_index`
+/// handler runs and the guard's `Drop`).
+pub fn set_deployed_url_for_test(url: &str) {
+    let mut guard = DEPLOYED_URL_TEST_OVERRIDE
+        .lock()
+        .expect("deployed-url override mutex poisoned");
+    *guard = Some(url.to_string());
+}
+
+pub fn clear_deployed_url_for_test() {
+    let mut guard = DEPLOYED_URL_TEST_OVERRIDE
+        .lock()
+        .expect("deployed-url override mutex poisoned");
+    *guard = None;
+}
+
+pub struct DeployedUrlTestGuard {
+    _marker: std::marker::PhantomData<()>,
+}
+
+impl Drop for DeployedUrlTestGuard {
+    fn drop(&mut self) {
+        clear_deployed_url_for_test();
+    }
+}
+
+pub fn engaged_deployed_url_for_test(url: &str) -> DeployedUrlTestGuard {
+    set_deployed_url_for_test(url);
+    DeployedUrlTestGuard {
+        _marker: std::marker::PhantomData,
+    }
+}
+
+/// Resolve the `RBP_DASHBOARD_DEPLOYED_URL` env knob
+/// the `serve_static_index` handler reads on every
+/// request. The function consults the
+/// `DEPLOYED_URL_TEST_OVERRIDE` process-wide override
+/// first (the race-free alternative the
+/// `crates/dashboard/tests/smoke.rs` integration tests
+/// use to drive the knob in a parallel
+/// `cargo test --test-threads=4` run); when the
+/// override is `None` (the default) the function falls
+/// through to the env-var read, defaulting to
+/// [`DEFAULT_DEPLOYED_URL`]. The function is `pub` (not
+/// `#[cfg(test)]`) because the integration tests are a
+/// *separate* crate and the production crate is built
+/// without `cfg(test)`; the `_for_test`-suffixed
+/// override setters are the convention a downstream
+/// dashboard binary consumer follows to know not to
+/// call the override in production.
+pub fn deployed_url() -> String {
+    if let Some(override_value) = DEPLOYED_URL_TEST_OVERRIDE
+        .lock()
+        .expect("deployed-url override mutex poisoned")
+        .as_ref()
+        .cloned()
+    {
+        return override_value;
+    }
+    std::env::var("RBP_DASHBOARD_DEPLOYED_URL").unwrap_or_else(|_| DEFAULT_DEPLOYED_URL.to_string())
+}
 
 /// `RBP_DASHBOARD_EMPTY_STATE` env knob — STW-052's
 /// opt-in switch for the dashboard's true empty-state
@@ -388,6 +485,56 @@ pub fn static_index_html_path() -> PathBuf {
     manifest.join("static").join("index.html")
 }
 
+/// STW-058: inject the `RBP_DASHBOARD_DEPLOYED_URL` env
+/// knob as a `window.__DASHBOARD_DEPLOYED_URL__` global
+/// the `index.html` JS reads as the dashboard `<meta>`
+/// line's trailing `deployed_at=<url>` fragment. The
+/// inject point is the static page's `</head>` (the
+/// single-tag delimiter the `crates/dashboard/static/index.html`
+/// file carries byte-exactly once), so the injected
+/// script runs *before* the body IIFE the page already
+/// contains. The function panics on a `</head>`-less
+/// page (the static `index.html` is checked in with the
+/// tag present, so a regression that drops the tag
+/// surfaces at the same CI step a future page author
+/// would notice). The injection is a *router* change,
+/// not an `IndexClient` change — the dashboard's
+/// typed-read / four-route surface is unchanged.
+fn inject_deployed_url(html: &str, deployed_url: &str) -> String {
+    // Escape the URL for embedding in a JS string
+    // literal (a `</script>` substring in the URL
+    // would otherwise close the script tag early). The
+    // escape covers the JS string-context
+    // `\` / `"` / line-terminator characters; the URL
+    // is a `https://...` token the deploy runbook
+    // produces so the `\` / `"` escapes are
+    // defensive (a future operator who passes a
+    // non-URL token would see the `\` escape engage
+    // the same defensive path the existing
+    // `crates/autotrain/src/publish_index.rs`
+    // `PublishIndexError::MissingArg` validator
+    // follows).
+    let escaped = deployed_url
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('<', "\\u003c");
+    let tag = "</head>";
+    let idx = html.rfind(tag).unwrap_or_else(|| {
+        panic!(
+            "static index.html is missing `</head>`; cannot inject \
+             RBP_DASHBOARD_DEPLOYED_URL global"
+        )
+    });
+    let inject = format!("<script>window.__DASHBOARD_DEPLOYED_URL__ = \"{escaped}\";</script>");
+    let mut out = String::with_capacity(html.len() + inject.len() + tag.len());
+    out.push_str(&html[..idx]);
+    out.push_str(&inject);
+    out.push_str(&html[idx..]);
+    out
+}
+
 /// `GET /` — serve the static `index.html` the
 /// `index_client` / `render` modules feed. The response
 /// is `text/html; charset=utf-8` with a 200 status. The
@@ -397,11 +544,23 @@ pub fn static_index_html_path() -> PathBuf {
 /// new `INDEX.json`, the next dashboard reload picks it
 /// up without a hard refresh).
 async fn serve_static_index(State(state): State<AppState>) -> Response {
-    let mut response = (
-        StatusCode::OK,
-        Body::from((*state.static_index_html).clone()),
-    )
-        .into_response();
+    // STW-058: the `RBP_DASHBOARD_DEPLOYED_URL` env
+    // knob is read on every request (the same
+    // cheap env-var read the existing
+    // `RBP_DASHBOARD_EMPTY_STATE` /
+    // `RBP_DASHBOARD_INDEX_URL` knobs follow) so a
+    // re-deploy to a different Pages project picks
+    // up the new URL on the next page load without
+    // a `cargo run` restart. The default is the
+    // same `https://robopoker-testnet-dashboard.pages.dev/`
+    // placeholder the `pub const DEFAULT_DEPLOYED_URL`
+    // declaration pins (a `cargo run -p
+    // rbp-dashboard` with no env knob set serves
+    // the placeholder URL in the meta line, the same
+    // shape the pre-STW-058 served page carries).
+    let deployed_url = deployed_url();
+    let body = inject_deployed_url(&state.static_index_html, &deployed_url);
+    let mut response = (StatusCode::OK, Body::from(body)).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),

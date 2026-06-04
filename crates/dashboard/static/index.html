@@ -352,7 +352,45 @@
           var createdAt = index.created_at_utc
             ? index.created_at_utc
             : '(created_at_utc not stamped — re-run with RBP_PUBLISH_INDEX_UTC set)';
-          meta.textContent = 'index: ' + publishRoot + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + createdAt;
+          // STW-058: append the
+          // `deployed_at=<url>` fragment
+          // to the meta line so a
+          // re-deploy to a different
+          // Pages project updates the
+          // rendered dashboard's
+          // meta line + the README's
+          // "Public dashboard:" line
+          // + the `deploy.json`
+          // manifest in one source
+          // (the
+          // `window.__DASHBOARD_DEPLOYED_URL__`
+          // global the
+          // `crates/dashboard/src/router.rs::serve_static_index`
+          // handler injects at the
+          // top of the page, sourced
+          // from the
+          // `RBP_DASHBOARD_DEPLOYED_URL`
+          // env knob). The default
+          // is the README's
+          // `https://robopoker-testnet-dashboard.pages.dev/`
+          // placeholder, the same
+          // value the
+          // `pub const DEFAULT_DEPLOYED_URL`
+          // at
+          // `crates/dashboard/src/router.rs:65`
+          // already declares, so a
+          // pre-STW-058 env-knob-less
+          // `cargo run -p
+          // rbp-dashboard` shows the
+          // same URL the README does.
+          // A future `STW-059` follow-on
+          // exports the env knob from
+          // the deploy runbook so the
+          // meta line + the README +
+          // the manifest all read from
+          // a single source.
+          var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || 'https://robopoker-testnet-dashboard.pages.dev/';
+          meta.textContent = 'index: ' + publishRoot + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + createdAt + ' deployed_at=' + deployedUrl;
           // STW-052: the empty-state paragraph
           // is hidden by default; the JS flips
           // the `visible` class on when the
