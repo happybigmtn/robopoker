@@ -23,6 +23,7 @@ mod epoch;
 mod fast;
 mod mode;
 mod pretraining;
+mod replay;
 mod slow;
 mod trainer;
 
