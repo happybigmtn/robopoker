@@ -241,6 +241,33 @@ the shell-shape pinner (`cargo test -p rbp-autotrain --test
 script_shape`) that catches a runbook regression without needing a
 live database.
 
+## Workspace parallel test proof
+
+The full `cargo test --workspace -- --test-threads=4` chain is
+wrapped in a single operator-visible runbook that proves the
+workspace stays green across 3 consecutive parallel runs:
+
+```bash
+bash scripts/workspace-parallel-proof.sh
+```
+
+The runbook runs `cargo test --workspace -- --test-threads=4` 3
+times back-to-back, captures each run's stdout + stderr + exit
+code into a per-run directory under
+`logs/workspace-parallel-proof/<UTC-ISO>/run-{1,2,3}/`, and emits
+a one-line `workspace parallel proof complete: runs=3 failures=0`
+headline in `SUMMARY.txt` on success. Knobs (all optional):
+`RBP_WORKSPACE_PARALLEL_THREADS` (default `4`),
+`RBP_WORKSPACE_PARALLEL_RUNS` (default `3`),
+`RBP_WORKSPACE_PARALLEL_SKIP_BUILD` (set to `1` to skip the
+one-time pre-build for tight inner loops). Exit codes: `0` all
+runs passed, `1` script-internal error, `3` one or more runs
+failed. The shell-shape pinner (`cargo test -p rbp-autotrain
+--test workspace_parallel_proof`) catches a runbook regression
+(script missing, `bash -n` broken, executable bit cleared,
+SUMMARY.txt headline format drift) without needing 3 full
+workspace runs.
+
 ## References
 
 1. (2019). Superhuman AI for multiplayer poker. [(Science)](https://science.sciencemag.org/content/early/2019/07/10/science.aay2400)

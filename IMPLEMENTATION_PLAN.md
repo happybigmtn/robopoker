@@ -1207,6 +1207,143 @@ complete:` line; the new `script_shape` integration test passes;
 new runbook is linked from `README.md` under `## Testnet launch
 proof`.
 
+- [x] `STW-020` Stabilize full workspace parallel test proof.
+The `steward/HAZARDS.md` table classifies
+`verification:workspace-parallel` as mainnet-block (not
+user-facing) and `steward/HINGES.md` ranks it hinge #2: "Proving
+or fixing `cargo test --workspace -- --test-threads=4` makes
+every shipped-row completion signal trustworthy again." One
+historical full-workspace run failed at
+`crates/gameplay/src/game.rs:1397` on a brittle
+"winner-takes-all" assertion in `bust_prevents_next`; the
+5fcc090 fix relaxed the assertion to assert pot conservation,
+but the *workspace-level parallel proof* itself was never
+locked in — a future test that re-introduces a global-RNG-
+dependent brittle assertion would silently pass locally and
+flake under `--test-threads=4`. STW-020 lands three pieces of
+proof: (a) a pure-bash `scripts/workspace-parallel-proof.sh`
+runbook that runs `cargo test --workspace -- --test-threads=4`
+3 times back-to-back, captures each run's stdout/stderr/exit
+into `logs/workspace-parallel-proof/<UTC-ISO>/run-{1,2,3}/`,
+asserts all 3 exit 0, and prints a one-line `workspace
+parallel proof complete: runs=3 failures=0` summary on
+success (exits 3 on any run failure, exits 1 on script
+internal error); (b) an integration test in
+`crates/gameplay/tests/workspace_parallel_proof.rs` that
+invokes the script via `Command::new("bash")` and asserts the
+summary line + exit 0, so `cargo test --workspace` itself
+proves the proof; (c) a deterministic regression test in
+`crates/gameplay/src/game.rs` (`bust_prevents_next_deterministic`)
+that injects a seeded `StdRng` into the deck deal path and
+runs the heads-up all-in flow across 64 fixed seeds,
+asserting the full pot conservation invariant (sum=200,
+len=2, each ∈ {0, 100, 200}, sorted ∈ {{0,200}, {100,100}})
+for every seed — making the conservation property
+bit-exactly reproducible. Owner files:
+`scripts/workspace-parallel-proof.sh` (new, pure bash, ~50
+lines), `crates/gameplay/tests/workspace_parallel_proof.rs`
+(new integration test, no Postgres needed), a small RNG
+injection seam in `crates/cards/src/deck.rs` (new
+`Deck::deal_with` constructor that takes a `seed: u64` and
+uses a local `StdRng` so the deal is deterministic), a
+matching helper in `crates/gameplay/src/game.rs` for the
+seeded test, `IMPLEMENTATION_PLAN.md` (this row),
+`README.md` (link the runbook under `## Workspace parallel
+test proof`). Scope boundary: do NOT modify the existing
+5fcc090-relaxed `bust_prevents_next` assertion or the 32-
+trial `bust_prevents_next_conserves_pot_across_boards` —
+STW-020 only ADDS the seeded regression test next to them.
+Do NOT change the parallel-test thread count from 4 (the
+documented worker-runner contract; `RBP_WORKSPACE_PARALLEL_THREADS`
+overrides in CI). Do NOT add a third-party determinism
+harness. Do NOT touch the HINGES ranking or the HAZARDS
+table — STW-020 closes the open hinge by the work itself,
+not by re-ranking. The stale-P0 retirement (hinge #1) and
+STW-001 / STW-007 deferred items are out of scope.
+Verification commands: `bash scripts/workspace-parallel-proof.sh`
+(exits 0, prints the summary line), `cargo test --workspace`
+(the integration test passes), `cargo test -p rbp-gameplay
+--lib bust_prevents_next` (all 3 bust tests pass), `cargo
+test -p rbp-gameplay --test workspace_parallel_proof` (the
+runbook driver passes), `cargo fmt --check`, `cargo check
+--workspace`. Required tests: new
+`bust_prevents_next_deterministic` lib test + new
+`workspace_parallel_proof_run_exits_zero_with_three_clean_workspace_runs`
+integration test. No padding of unrelated suites.
+Dependencies: the 5fcc090 relaxed assertion (already on
+`main`). Estimated scope: S/M. Completion signal: a fresh
+`bash scripts/workspace-parallel-proof.sh` from a clean
+checkout prints `workspace parallel proof complete: runs=3
+failures=0` and exits 0; the new `workspace_parallel_proof`
+integration test passes; the 64-seed
+`bust_prevents_next_deterministic` test passes; `cargo
+test --workspace` and `cargo fmt --check` are green; the
+runbook is linked from `README.md` under `## Workspace
+parallel test proof`.
+
+## Active items (worker-ready)
+
+The most recent slice in the active queue is below. It is shipped
+(committed on `main`); the next open slice will be promoted from
+`genesis/plans/` or the next `auto steward --report-only` pass before
+a worker claims a new card. If neither surfaces a P0 / SEC /
+mainnet-blocking item, the next claimable slice is whatever the
+planner's `PROMOTIONS.md` ranks highest.
+
+- [x] `STW-019` testnet live launch proof runbook + receipt bundle:
+  the HAZARDS table classifies `testnet-live-proof` as
+  mainnet-block, user-facing, and `steward/HINGES.md` ranks it
+  hinge #5: "a documented live run of `--smoke -> --bench -> --
+  compare -> --replay` on the same DB is the operator-visible
+  launch proof not captured by unit tests alone". A new pure-bash
+  `scripts/testnet-live-proof.sh` (shebang `#!/usr/bin/env bash`,
+  `set -euo pipefail`) drives the existing trainer chain
+  (`--cluster` -> `--reset` -> `--smoke` -> `--status` -> `--bench`
+  -> `--compare` -> `--replay <transcript>`) as subprocesses
+  against a single Postgres, captures each step's stdout + stderr
+  + exit into `receipts/testnet-live-proof-<UTC-ISO>/<step>/{stdout,stderr,exit}.txt`,
+  and emits a one-line `testnet live_proof complete: smoke=N
+  status=N bench=N compare=N replay=BYTES` headline in
+  `SUMMARY.txt` a dashboard can grep. The script refuses to run
+  with exit 3 when neither `DATABASE_URL` nor `DB_URL` is set.
+  Owner files: `scripts/testnet-live-proof.sh` (new, ~80 lines,
+  pure bash), `crates/autotrain/tests/script_shape.rs` (new
+  pinner test — asserts the runbook script exists, is
+  executable, parses with `bash -n`, and the runbook doc lists
+  every env knob and every chain step), `crates/autotrain/tests/live_proof.rs`
+  (new integration test gated on `database` + `DATABASE_URL` —
+  drives the same six steps in a single `cargo test` invocation
+  end-to-end), `README.md` (link the runbook under
+  `## Testnet launch proof`), `IMPLEMENTATION_PLAN.md` (this
+  row), `genesis/plans/000-ceo-testnet-roadmap.md` (mark the
+  v6 launch proof as shipped with a one-line note). Scope
+  boundary: do NOT change the trainer chain, the per-step
+  `Mode::*` arms, the JSON report shapes, the per-side PnL
+  math, the `trainer --replay` render, the named baselines, the
+  v1 / v2 `Blueprint` enum, or the v1 / v2 trained configs the
+  bench / compare seats. The runbook is *additive*: it shells
+  out to the existing trainer binary and captures per-step
+  artifacts. Verification commands: `cargo test -p rbp-autotrain
+  --features database --test live_proof` (end-to-end through a
+  real Postgres), `cargo test -p rbp-autotrain --test script_shape`
+  (script existence + `bash -n` parseability), `bash
+  scripts/testnet-live-proof.sh` against a real Postgres (drops
+  a `receipts/testnet-live-proof-<UTC-ISO>/` directory with the
+  `SUMMARY.txt` headline), `cargo test --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt --check`. Required tests:
+  the new `crates/autotrain/tests/{live_proof,script_shape}.rs`
+  integration tests; no padding of unrelated suites. Dependencies:
+  `STW-009` (smoke), `STW-010` (bench), `STW-014`/`STW-015` (the
+  transcripts the `--replay` leg reads), `STW-016` (`--replay`
+  mode), `STW-018` (compare). Estimated scope: M. Completion
+  signal: a fresh `bash scripts/testnet-live-proof.sh` against a
+  real Postgres drops a `receipts/testnet-live-proof-*/`
+  directory whose `SUMMARY.txt` contains the `testnet live_proof
+  complete:` line; the new integration tests pass; `cargo test
+  --workspace` and `cargo fmt --check` are green; the new
+  runbook is linked from `README.md` under `## Testnet launch
+  proof`.
+
 ## Deferred items (need operator decision before promotion)
 
 - [!] `STW-001` Recreate executable planning surface.

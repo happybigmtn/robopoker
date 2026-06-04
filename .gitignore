@@ -9,6 +9,8 @@
 
 # STW-019 runbook receipts (runtime output of `bash scripts/testnet-live-proof.sh`)
 /receipts/
+# STW-020 runbook runtime logs (output of `bash scripts/workspace-parallel-proof.sh`)
+/logs/
 # `auto steward` planning artifacts (canonical source is /tmp/.../<STEWARD-...>/)
 /steward/
 

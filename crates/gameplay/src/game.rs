@@ -1478,6 +1478,69 @@ mod tests {
         }
     }
 
+    /// Deterministic regression for the heads-up all-in showdown pot
+    /// conservation property. Threads a seeded `StdRng` through the
+    /// `Deck::deal_with` path so the postflop board deals are
+    /// bit-exactly reproducible — the same `seed` always produces
+    /// the same `Hand`, so a CI failure points to a real code
+    /// change, not to a lucky / unlucky global-RNG draw. Runs the
+    /// full heads-up all-in flow across 64 fixed seeds (one per
+    /// `seed: u64`) and asserts the same conservation invariants
+    /// the relaxed `bust_prevents_next` test pins: total payouts
+    /// sum to 200, exactly 2 settlements, every reward in
+    /// {0, 100, 200}, sorted split in {{0, 200}, {100, 100}}.
+    /// Pinned to the workspace-parallel proof (STW-020) so a
+    /// future regression in the showdown PnL math cannot
+    /// silently pass locally and only flake under
+    /// `cargo test --workspace -- --test-threads=4`.
+    #[test]
+    fn bust_prevents_next_deterministic() {
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        for seed in 0u64..64 {
+            let game = Game::root();
+            let shove = game.to_shove();
+            let game = game.apply(Action::Shove(shove));
+            let shove = game.to_shove();
+            let game = game.apply(Action::Shove(shove));
+            let mut game = game;
+            let mut rng = StdRng::seed_from_u64(seed ^ 0xC0DE_BEEF);
+            while !game.must_stop() {
+                if game.must_deal() {
+                    let cards = game.deck().deal_with(&mut rng, game.street());
+                    game = game.apply(Action::Draw(cards));
+                }
+            }
+            let rewards: Vec<Chips> = game
+                .settlements()
+                .iter()
+                .map(|s| s.pnl().reward())
+                .collect();
+            assert_eq!(
+                rewards.iter().sum::<Chips>(),
+                200,
+                "seed {seed}: pot must be conserved (200 chips risked, 200 paid out)"
+            );
+            assert_eq!(
+                rewards.len(),
+                2,
+                "seed {seed}: heads-up must produce 2 settlements"
+            );
+            for r in &rewards {
+                assert!(
+                    [0, 100, 200].contains(r),
+                    "seed {seed}: reward {r} not in {{0, 100, 200}}"
+                );
+            }
+            let mut sorted = rewards.clone();
+            sorted.sort_unstable();
+            assert!(
+                sorted == vec![0, 200] || sorted == vec![100, 100],
+                "seed {seed}: expected {{0, 200}} or {{100, 100}} reward split, got {rewards:?}"
+            );
+        }
+    }
+
     /// actor_idx wraps correctly with ticker
     #[test]
     fn actor_idx_wrapping() {
