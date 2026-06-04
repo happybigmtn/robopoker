@@ -3074,9 +3074,361 @@ re-running the chain.
   line; the new integration tests
   pass; `cargo test --workspace` and
   `cargo fmt --check` are green; the
-  committed `publish-fixture/` bundle is
+  + the committed `publish-fixture/` bundle is
   re-verified on every `cargo test
   --workspace` run.
+
+- [x] `STW-033` `trainer --publish-remote
+  <receipt-dir> --bucket <s3://...>`
+  + no-DB `trainer --verify-remote
+  <remote-dir>` remote-upload plan
+  surface. The v7-follow-on-of-v7
+  follow-on the STW-032 runbook doc
+  names explicitly: a CI worker that
+  fetches the STW-032 publish bundle
+  can `trainer --publish-remote
+  <receipt-dir> --bucket <s3://...>
+  --prefix <prefix/>` to write a
+  deterministic upload plan
+  (`<publish>/<basename>/remote/remote_plan.json`)
+  + a post-upload receipt
+  (`<publish>/<basename>/remote/remote_receipt.json`)
+  the same worker (or a downstream
+  auditor) re-verifies with
+  `trainer --verify-remote
+  <publish>/<basename>/remote/`. The
+  publish-remote step re-verifies the
+  receipt with
+  `LiveProofReceipt::read_and_verify`
+  AS THE FIRST GATE (so a red
+  receipt short-circuits the upload
+  with `PublishRemoteError::ReceiptRed(...)`
+  before any `BundleDir` /
+  `BucketUri` gate can fire), then
+  re-verifies the STW-032 publish
+  bundle with
+  `PublishedBundle::from_bundle_path` +
+  `manifest.verify`, then writes the
+  per-file upload plan. The plan's
+  `s3_objects[]` array is sorted by
+  `s3_uri` for determinism; the
+  `created_at_utc` /
+  `uploaded_at_utc` fall back to
+  the `<unknown>` sentinel when the
+  `RBP_PUBLISH_REMOTE_UTC` env knob
+  is unset so the integration test
+  is byte-stable. The new
+  `Mode::PublishRemote` arm is a
+  no-DB early-dispatch (mirrors
+  `Self::Publish` + `Self::VerifyBundle`):
+  reads the receipt + bundle, runs
+  the pre-upload gates, writes the
+  plan + the receipt, and prints a
+  one-line
+  `live_proof publish_remote complete:
+  bucket=... prefix=... files=...
+  bytes=... bundle_sha256=...
+  basename=... dry_run=...` headline
+  (the same `live_proof ... complete:`
+  family the STW-019 / STW-031 /
+  STW-032 trainers already print so
+  one `grep ^live_proof` scraper can
+  read the whole chain). The new
+  `Mode::VerifyRemote` arm is the
+  post-upload re-verifier: reads the
+  on-disk `remote_receipt.json`,
+  re-hashes every local file the
+  receipt claims to have uploaded,
+  asserts every digest matches,
+  asserts every `s3_uri` in the
+  receipt appears in the inlined
+  plan (a phantom `s3_uri` is a
+  hard `MissingObject` error), and
+  prints a one-line
+  `live_proof remote verification
+  passed: ...` /
+  `live_proof remote verification
+  failed: ...` headline. The arm
+  defaults to `--dry-run` (the
+  `RBP_PUBLISH_REMOTE_DRY_RUN=1`
+  knob); the
+  `--no-dry-run` argv flips the
+  arm into live mode (which shells
+  out to `aws s3 cp` per file in
+  the plan — the `aws` CLI must be
+  on `$PATH` and the shell must
+  have the
+  `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` env
+  knobs set; a missing `aws` returns
+  `PublishRemoteError::AwsCli` and
+  the arm exits 2). The companion
+  `scripts/testnet-live-publish-s3.sh`
+  runbook is pure bash, mirrors the
+  STW-019 `testnet-live-proof.sh` +
+  STW-032 `testnet-live-publish.sh`
+  shape (script exists + is
+  executable + parses with `bash -n`
+  + refuses to run on a missing
+  receipt with exit 3 + refuses to
+  run on a missing bucket with
+  exit 3), and drives the full
+  chain: (1) re-verify the receipt
+  with `trainer --verify-receipt`,
+  (2) re-verify the STW-032 publish
+  bundle with `trainer
+  --verify-bundle`, (3) shell out
+  to `trainer --publish-remote`,
+  (4) re-verify the post-upload
+  `remote_receipt.json` with
+  `trainer --verify-remote`. The
+  bash script's `PUBLISH_DRY_RUN=0`
+  knob flips the
+  `trainer --publish-remote` arm
+  into live mode (which shells out
+  to `aws s3 cp` per file). Owner
+  files: `crates/autotrain/src/publish_remote.rs`
+  (new `S3Object` struct +
+  `PublishRemotePlan` struct +
+  `PublishedRemoteReceipt` struct +
+  `PublishRemoteError` enum +
+  `Display` + `From<PublishError>`
+  impls + `publish_remote_receipt`
+  top-level entry point +
+  `PublishedRemoteReceipt::verify`
+  + `read_remote_receipt` + new
+  `bucket_uri_as_str_matches_published_strings`
+  / `bucket_uri_rejects_non_s3_prefix`
+  / `bucket_uri_rejects_empty_bucket`
+  / `publish_remote_dry_run_writes_plan_and_receipt`
+  / `publish_remote_s3_uris_are_sorted_for_determinism`
+  / `publish_remote_refuses_red_receipt`
+  / `publish_remote_round_trips_through_verifier`
+  / `publish_remote_verifier_rejects_tampered_file`
+  / `publish_remote_to_json_contains_every_field`
+  / `publish_remote_bare_bucket_name_normalises_to_s3_uri`
+  / `publish_remote_created_at_utc_falls_back_to_unknown`
+  / `publish_remote_io_error_propagates_for_missing_receipt`
+  / `publish_remote_io_error_propagates_for_missing_bundle`
+  lib tests), `crates/autotrain/src/mode.rs`
+  (new `Mode::PublishRemote` arm
+  + `--publish-remote <receipt>
+  --bucket <s3://...> [--prefix
+  <prefix/>] [--no-dry-run]` argv
+  handling + the
+  `publish_remote::publish_remote_receipt`
+  call + new `Mode::VerifyRemote`
+  arm + `--verify-remote <path>`
+  argv handling + the
+  `publish_remote::read_remote_receipt` +
+  `PublishedRemoteReceipt::verify`
+  call + both new modes listed in
+  the `Usage:` eprintln! line),
+  `crates/autotrain/src/lib.rs`
+  (re-export the new `S3Object` /
+  `PublishRemotePlan` /
+  `PublishedRemoteReceipt` /
+  `PublishRemoteError` types +
+  register the new
+  `publish_remote` module),
+  `crates/autotrain/tests/publish_remote.rs`
+  (new no-DB integration test
+  `publish_remote_round_trips_through_real_trainer_binary`
+  that drives
+  `trainer --publish <receipt>` +
+  `trainer --publish-remote <receipt>
+  --bucket <s3://...>` +
+  `trainer --verify-remote
+  <remote-dir>` end-to-end against
+  a synthetic receipt +
+  asserts the headline starts with
+  the pinned
+  `live_proof publish_remote
+  complete: ` prefix + the
+  `bucket=... prefix=... files=...
+  bytes=... bundle_sha256=...
+  basename=... dry_run=...` tokens
+  are present + the
+  `remote_plan.json` +
+  `remote_receipt.json` files are
+  on disk + the verifier's headline
+  starts with the pinned
+  `live_proof remote verification
+  passed: ` prefix + a second test
+  `publish_remote_run_exits_two_with_red_receipt_line`
+  that drops a red receipt (rewrites
+  `cluster/exit.txt` to `1`) +
+  drives `trainer --publish-remote`
+  + asserts exit 2 + the stderr
+  starts with
+  `live_proof publish_remote error:
+  receipt is red: ` + a third test
+  `publish_remote_run_exits_two_with_missing_bucket`
+  that drives
+  `trainer --publish-remote <receipt>`
+  with no `--bucket` flag + asserts
+  exit 2 + the stderr carries the
+  `--bucket` usage line),
+  `crates/autotrain/tests/script_shape.rs`
+  (add the new
+  `testnet_live_publish_s3_script_exists_and_parses`
+  shape pin: S3 script exists + is
+  executable + parses with `bash -n`
+  + the
+  `testnet_live_publish_s3_script_has_verify_bundle_pre_upload_gate`
+  pre-upload-gate pin: the S3
+  script must shell out to
+  `trainer --verify-bundle <bundle>`
+  BEFORE the
+  `trainer --publish-remote <receipt>`
+  call + the
+  `testnet_live_publish_s3_script_references_publish_remote_cli`
+  CLI-reference pin: the S3 script
+  references the
+  `trainer --publish-remote <receipt>
+  --bucket <s3://...>` CLI
+  subcommand),
+  `scripts/testnet-live-publish-s3.sh`
+  (new pure-bash driver that
+  re-verifies the receipt + the
+  STW-032 publish bundle before
+  shelling out to
+  `trainer --publish-remote` +
+  shells out to
+  `trainer --verify-remote` for
+  post-upload re-verification +
+  writes a `SUMMARY.txt` headline
+  a CI worker can `cat` to confirm
+  the chain landed end-to-end),
+  `scripts/testnet-live-publish.md`
+  (replace the "next slice" /
+  "NOT this one" parenthetical
+  about the S3 / GCS / git-tag
+  push with a one-line "shipped as
+  STW-033" note + the new
+  `trainer --publish-remote` CLI
+  example + a link to
+  `scripts/testnet-live-publish-s3.sh`),
+  `scripts/testnet-live-proof.md`
+  (replace the "next slice" /
+  "follow-on" parenthetical about
+  the dashboard-bucket push with a
+  one-line STW-033 reference +
+  link to
+  `scripts/testnet-live-publish-s3.sh`),
+  `IMPLEMENTATION_PLAN.md` (this
+  row). Scope boundary: do NOT
+  touch the STW-019
+  `testnet-live-proof.sh` runbook
+  (the publish-remote is a
+  follow-on *consumer* of the
+  receipts the runbook produces,
+  not a refactor); do NOT touch
+  the STW-032 `testnet-live-publish.sh`
+  runbook (the publish-remote is
+  a follow-on *consumer* of the
+  publish bundles the STW-032
+  runbook produces, not a
+  refactor); do NOT change the
+  STW-023
+  `LiveProofReceipt::read_and_verify`
+  / `LiveProofRecipe` JSON shape
+  (the publish-remote reads +
+  re-verifies the receipt as a
+  pre-upload gate, then writes its
+  own `remote_plan.json` +
+  `remote_receipt.json` — a
+  `recipe.json` drift fails the
+  publish-remote step's
+  pre-upload `trainer
+  --verify-receipt` call); do NOT
+  change the STW-032
+  `PublishedBundle` /
+  `BundleFile` / `PublishError`
+  JSON shape (the publish-remote
+  reads + re-verifies the bundle
+  with
+  `PublishedBundle::from_bundle_path` +
+  `manifest.verify` — a
+  `manifest.json` drift fails the
+  publish-remote step's pre-upload
+  `trainer --verify-bundle` call);
+  do NOT vendor the AWS SDK or
+  `rusoto_s3` (the upload step is
+  the bash runbook's job — the
+  Rust arm only writes the upload
+  plan + the post-upload receipt);
+  do NOT shell out to `aws` in the
+  default `trainer --publish-remote`
+  path (the `cargo test --workspace`
+  integration test runs in
+  dry-run so a regression in the
+  CLI surface fails CI without an
+  `aws` credential or a live
+  bucket); do NOT change the
+  `Mode::Status` / `Mode::Fast` /
+  `Mode::Fast2` / `Mode::Fast3` /
+  `Mode::Slow` / `Mode::Reset` /
+  `Mode::Smoke` / `Mode::Bench` /
+  `Mode::Compare` / `Mode::Compare3`
+  / `Mode::Replay` / `Mode::VerifyReceipt`
+  / `Mode::Publish` / `Mode::VerifyBundle`
+  code paths. Verification
+  commands: `cargo test -p
+  rbp-autotrain --features
+  database --tests --lib`,
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt
+  --check`, `bash -n
+  scripts/testnet-live-publish-s3.sh`.
+  Required tests: the new lib
+  tests in
+  `publish_remote.rs::tests` + the
+  new
+  `crates/autotrain/tests/publish_remote.rs`
+  integration test + the new
+  `crates/autotrain/tests/script_shape.rs`
+  shape pins; no padding of
+  unrelated suites. Dependencies:
+  `STW-032` (the
+  `crates/autotrain/src/publish.rs::PublishedBundle`
+  + the
+  `crates/autotrain/src/verify_bundle.rs::run`
+  handler the publish-remote step
+  consumes), `STW-028` (the
+  `trainer --verify-receipt` CLI
+  the publish-remote bash runbook
+  shells out to as a pre-upload
+  gate), `STW-019` (the
+  `testnet-live-proof.sh` runbook
+  the publish-remote step consumes
+  receipts from). Estimated scope:
+  M. Completion signal:
+  `trainer --publish-remote <receipt>
+  --bucket <s3://...>` exits 0 on
+  a green
+  `receipts/testnet-live-proof-<UTC-ISO>/`
+  + a fresh STW-032 publish bundle
+  + prints the pinned
+  `live_proof publish_remote
+  complete: ...` headline + writes
+  a `remote_plan.json` +
+  `remote_receipt.json` pair under
+  `<publish>/<basename>/remote/`;
+  `trainer --verify-remote
+  <publish>/<basename>/remote/`
+  exits 0 + prints the pinned
+  `live_proof remote verification
+  passed: ...` line; the new
+  integration tests pass;
+  `cargo test --workspace` and
+  `cargo fmt --check` are green;
+  `bash -n
+  scripts/testnet-live-publish-s3.sh`
+  parses; the
+  `testnet_live_publish_s3_script_*`
+  shape pins pass.
 
 ## Deferred items (need operator decision before promotion)
 
