@@ -487,6 +487,29 @@ fn extract_heredoc_body(script: &str, tag: &str) -> Option<String> {
 //    `trainer --verify-receipt <receipt>` before the publish
 //    step (the "refuse to publish a red receipt" gate the
 //    receipt verifier is the source of truth for).
+//
+// STW-033 also ships a *companion* bash runbook
+// `scripts/testnet-live-publish-s3.sh` that drives the
+// `trainer --publish-remote` + `trainer --verify-remote` arms.
+// The shell-shape integration test pins its shape with three
+// sub-tests:
+//
+// 5. `testnet_live_publish_s3_script_exists_and_parses` —
+//    the S3 runbook script must be on disk, executable,
+//    and parse with `bash -n` (mirrors the STW-032
+//    `testnet_live_publish.sh` shape).
+// 6. `testnet_live_publish_s3_doc_references_verify_remote_cli` —
+//    the S3 runbook doc must reference the
+//    `trainer --verify-remote <path>` CLI subcommand
+//    STW-033 ships (mirrors the STW-032
+//    `testnet_live_publish.md` shape).
+// 7. `testnet_live_publish_s3_script_has_verify_receipt_pre_publish_gate` —
+//    the S3 runbook script must shell out to
+//    `trainer --verify-receipt <receipt>` BEFORE the
+//    `trainer --publish-remote` call (the
+//    "refuse to plan an upload for a red receipt"
+//    gate the receipt verifier is the source of
+//    truth for).
 
 fn publish_script_path() -> PathBuf {
     workspace_root()
@@ -498,6 +521,12 @@ fn publish_runbook_doc_path() -> PathBuf {
     workspace_root()
         .join("scripts")
         .join("testnet-live-publish.md")
+}
+
+fn publish_s3_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-s3.sh")
 }
 
 #[test]
@@ -630,5 +659,122 @@ fn testnet_live_publish_script_has_verify_receipt_pre_publish_gate() {
         verify_idx < publish_idx,
         "STW-032 publish runbook must call `--verify-receipt` BEFORE `--publish`; \
          a script that publishes before verifying is the inverse of the refuse-to-publish-red-receipt gate"
+    );
+}
+
+// ===========================================================================
+// STW-033 publish-remote (S3 / GCS / git-tag) runbook shape contract
+// ===========================================================================
+//
+// The publish-remote runbook
+// (`scripts/testnet-live-publish-s3.sh`) is a
+// pure-bash driver that consumes the STW-032 publish
+// bundle the publish runbook produced and (optionally,
+// via `--no-dry-run`) shells out to `aws s3 cp` per
+// The companion STW-033 tests above pin the
+// file-on-disk / bash-parse / --verify-remote-doc /
+// --verify-receipt-pre-gate surface; the two
+// sub-tests below add the *additional* contracts the
+// companion tests don't pin:
+//
+// 1. `testnet_live_publish_s3_script_has_verify_bundle_pre_upload_gate` —
+//    the runbook script must shell out to
+//    `trainer --verify-bundle <bundle>` BEFORE the
+//    `trainer --publish-remote` call (the
+//    "refuse to upload a red publish bundle" gate the
+//    bundle verifier is the source of truth for:
+//    a publish-remote of a red bundle is a hard error,
+//    not a warning).
+// 2. `testnet_live_publish_s3_script_references_publish_remote_cli` —
+//    the runbook script references the
+//    `trainer --publish-remote <receipt-dir>
+//     --bucket <s3://...>` CLI subcommand the
+//    publish-remote step shells out to (a worker
+//    reading the script would not know how to invoke
+//    the upload without this mention).
+
+#[test]
+fn testnet_live_publish_s3_script_has_verify_bundle_pre_upload_gate() {
+    // The publish-remote runbook script must shell
+    // out to `trainer --verify-bundle <bundle>`
+    // BEFORE the `trainer --publish-remote` call.
+    // The "refuse to upload a red publish bundle"
+    // gate the bundle verifier is the source of
+    // truth for: a publish-remote of a red bundle
+    // is a hard error, not a warning.
+    //
+    // We assert by ordered substring scan of the
+    // *runtime call sites* (the `if !` lines that
+    // shell out to the trainer binary, NOT the
+    // docstring comments that mention the flags
+    // in passing). The companion `--verify-receipt`
+    // pre-upload gate is pinned by
+    // `testnet_live_publish_s3_script_has_verify_receipt_pre_publish_gate`
+    // above.
+    let script = read(&publish_s3_script_path());
+    // Find the runtime `if ! "...verify-bundle
+    // <dir>"` call. The script uses a fixed
+    // shell-quoted form
+    // `if ! "$TRAINER_BIN" --verify-bundle "$PUBLISH_DIR"`
+    // so the substring `$TRAINER_BIN" --verify-bundle`
+    // is unique to the call site (a docstring
+    // comment would not have the trailing `"`).
+    let verify_bundle_call = script.find(r#"$TRAINER_BIN" --verify-bundle"#).unwrap_or_else(|| {
+        panic!(
+            "STW-033 publish-remote runbook must shell out to `trainer --verify-bundle <bundle>` \
+             as a pre-upload gate; the runtime call `$TRAINER_BIN\" --verify-bundle` is missing \
+             from the script"
+        )
+    });
+    // Find the runtime `--publish-remote
+    // "$RECEIPT_DIR"` call (it lives inside the
+    // REMOTE_ARGS array, so the substring
+    // `--publish-remote "$RECEIPT_DIR"` is unique
+    // to the call site).
+    let publish_remote_call = script.find(r#"--publish-remote "$RECEIPT_DIR""#).unwrap_or_else(|| {
+        panic!(
+            "STW-033 publish-remote runbook must shell out to `trainer --publish-remote <receipt>`; \
+             the runtime call `--publish-remote \"$RECEIPT_DIR\"` is missing from the script"
+        )
+    });
+    assert!(
+        verify_bundle_call < publish_remote_call,
+        "STW-033 publish-remote runbook must call `--verify-bundle` BEFORE `--publish-remote`; \
+         a script that publishes-remote before verifying the publish bundle is the inverse of the \
+         refuse-to-upload-red-bundle gate (verify-bundle call at offset {verify_bundle_call}, \
+         publish-remote call at offset {publish_remote_call})"
+    );
+}
+
+#[test]
+fn testnet_live_publish_s3_script_references_publish_remote_cli() {
+    // The publish-remote runbook script must
+    // reference the
+    // `trainer --publish-remote <receipt-dir>
+    // --bucket <s3://...>` CLI subcommand the
+    // publish-remote step shells out to. A worker
+    // reading the script would not know how to
+    // invoke the upload without this mention. We
+    // assert by flag form (`--publish-remote` +
+    // `--bucket`) because that is the form the
+    // operator types and the form a dashboard
+    // scraper greps. Mirrors the STW-032
+    // `testnet_live_publish_doc_references_verify_bundle_cli`
+    // pinner (which asserts the
+    // `--verify-bundle` mention in the doc).
+    let script = read(&publish_s3_script_path());
+    assert!(
+        script.contains("--publish-remote"),
+        "STW-033 publish-remote runbook script at {} must reference the \
+         `trainer --publish-remote <receipt-dir>` CLI subcommand; a worker reading the \
+         script would not know how to invoke the upload",
+        publish_s3_script_path().display()
+    );
+    assert!(
+        script.contains("--bucket"),
+        "STW-033 publish-remote runbook script at {} must reference the \
+         `--bucket <s3://...>` CLI flag; a worker reading the script would not know \
+         how to point the upload at a bucket",
+        publish_s3_script_path().display()
     );
 }

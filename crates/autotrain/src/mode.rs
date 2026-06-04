@@ -178,6 +178,89 @@ pub enum Mode {
         /// `trainer --publish` arm wrote.
         path: PathBuf,
     },
+    /// STW-033: plan + (optionally) apply a
+    /// remote upload of the STW-032 publish
+    /// bundle to a remote object store (S3 /
+    /// GCS / git-tag) bucket the operator (or
+    /// a CI worker) names. Mirrors
+    /// `Self::Publish` + `Self::VerifyBundle`:
+    /// read-only + bypasses the DB open, calls
+    /// the
+    /// `crate::publish_remote::publish_remote_receipt`
+    /// handler, and prints a one-line
+    /// `live_proof publish_remote complete: ...`
+    /// headline a dashboard scraper can
+    /// `grep ^live_proof publish_remote complete:`
+    /// the log. The handler refuses to plan
+    /// an upload for a red receipt (re-runs
+    /// the STW-023 verifier + the STW-032
+    /// `trainer --verify-bundle` check as
+    /// pre-upload gates). The `path` is the
+    /// `receipts/testnet-live-proof-<UTC-ISO>/`
+    /// directory the runbook produced; the
+    /// `bucket` is the bucket URI
+    /// (`s3://<name>/` or bare `<name>`); the
+    /// `prefix` is the key prefix inside the
+    /// bucket (defaults to `<basename>/`); the
+    /// `dry_run` flag (default `true`) skips
+    /// the actual `aws s3 cp` shell-out and
+    /// only writes the upload plan + a stub
+    /// `remote_receipt.json` (the
+    /// `cargo test --workspace` integration
+    /// test runs in dry-run so a regression
+    /// in the CLI surface fails CI without an
+    /// `aws` credential or a live bucket).
+    PublishRemote {
+        /// Absolute or CWD-relative path to a
+        /// `receipts/testnet-live-proof-<UTC-ISO>/`
+        /// directory the runbook produced.
+        path: PathBuf,
+        /// Bucket URI (`s3://<name>/` or bare
+        /// `<name>`). The arm normalises the
+        /// bare-name form to `s3://<name>/` so
+        /// the per-file `s3_uri` is always
+        /// `s3://...`.
+        bucket: String,
+        /// Key prefix inside the bucket.
+        /// Defaults to `<basename>/` if the
+        /// operator passes `--prefix ''`.
+        prefix: String,
+        /// When `true` (the default), the arm
+        /// writes the upload plan + a stub
+        /// `remote_receipt.json` and exits 0
+        /// without shelling out to `aws` /
+        /// `gsutil` / `git`. When `false`, the
+        /// arm shells out to `aws s3 cp` per
+        /// `s3_objects[]` entry and writes the
+        /// post-upload `remote_receipt.json`.
+        dry_run: bool,
+    },
+    /// STW-033: re-verify a published remote
+    /// receipt (the `remote_receipt.json` the
+    /// `trainer --publish-remote` arm wrote
+    /// under `<publish>/<basename>/remote/`).
+    /// Mirrors `Self::VerifyBundle`: read-only
+    /// + bypasses the DB open, calls the
+    /// `crate::publish_remote::read_remote_receipt`
+    /// + `PublishedRemoteReceipt::verify`
+    /// verifier pair, and prints a one-line
+    /// `live_proof remote verification passed: ...`
+    /// / `live_proof remote verification failed: ...`
+    /// line a dashboard scraper can
+    /// `grep ^live_proof remote verification`
+    /// the log. The verifier re-hashes every
+    /// local file the receipt claims to have
+    /// uploaded, asserts every digest matches
+    /// the receipt, and rejects the receipt
+    /// with a typed `PublishRemoteError` on a
+    /// mismatch.
+    VerifyRemote {
+        /// Absolute or CWD-relative path to a
+        /// `<publish>/<basename>/remote/`
+        /// directory the
+        /// `trainer --publish-remote` arm wrote.
+        path: PathBuf,
+    },
 }
 
 impl Mode {
@@ -252,6 +335,94 @@ impl Mode {
                         },
                     };
                 }
+                "--publish-remote" => {
+                    // STW-033: the publish-remote
+                    // arm takes a positional
+                    // `<receipt-dir>` followed by
+                    // `--bucket <s3://...>` (or bare
+                    // bucket name) + optional
+                    // `--prefix <prefix/>` +
+                    // optional `--no-dry-run` (or
+                    // `--dry-run` to make the
+                    // default explicit). The argv
+                    // shape mirrors the runbook's
+                    // `trainer --publish-remote
+                    // <receipt-dir> --bucket
+                    // <bucket> --prefix <prefix>
+                    // [--no-dry-run]` invocation.
+                    // We scan ahead collecting the
+                    // optional flags; the bare
+                    // `--publish-remote` with no
+                    // value returns
+                    // `Self::PublishRemote` with an
+                    // empty `PathBuf`; the dispatch
+                    // arm in `run()` prints a
+                    // one-line usage and exits 2.
+                    let receipt = match iter.next() {
+                        Some(p) => PathBuf::from(p),
+                        None => PathBuf::new(),
+                    };
+                    let mut bucket: String = String::new();
+                    let mut prefix: String = String::new();
+                    let mut dry_run: bool = true;
+                    // The bucket / prefix / dry-run
+                    // flags can appear in any order
+                    // AFTER the receipt positional;
+                    // a second positional (a future
+                    // multi-positional extension) is
+                    // ignored.
+                    while let Some(flag) = iter.peek() {
+                        match flag.as_str() {
+                            "--bucket" => {
+                                iter.next();
+                                bucket = iter.next().unwrap_or_default();
+                            }
+                            "--prefix" => {
+                                iter.next();
+                                prefix = iter.next().unwrap_or_default();
+                            }
+                            "--no-dry-run" => {
+                                iter.next();
+                                dry_run = false;
+                            }
+                            "--dry-run" => {
+                                iter.next();
+                                dry_run = true;
+                            }
+                            // A non-flag token or a
+                            // different flag ends the
+                            // publish-remote argv
+                            // scope; the next iteration
+                            // of the outer loop will
+                            // dispatch it.
+                            _ => break,
+                        }
+                    }
+                    return Self::PublishRemote {
+                        path: receipt,
+                        bucket,
+                        prefix,
+                        dry_run,
+                    };
+                }
+                "--verify-remote" => {
+                    // STW-033: the verify-remote
+                    // arm's value is the next argv.
+                    // A bare `--verify-remote` with
+                    // no value returns
+                    // `Self::VerifyRemote` with an
+                    // empty `PathBuf`; the dispatch
+                    // arm in `run()` prints a
+                    // one-line usage and exits 2.
+                    return match iter.next() {
+                        Some(p) => Self::VerifyRemote {
+                            path: PathBuf::from(p),
+                        },
+                        None => Self::VerifyRemote {
+                            path: PathBuf::new(),
+                        },
+                    };
+                }
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -302,7 +473,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path> | --publish-remote <receipt-dir> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-remote <path>"
         );
         std::process::exit(1);
     }
@@ -456,6 +627,163 @@ impl Mode {
                 }
             }
         }
+        // STW-033: also bypass the DB open for
+        // `PublishRemote`. The publisher is
+        // read-only with respect to the
+        // receipt (it re-verifies the STW-032
+        // publish bundle as a pre-upload gate,
+        // builds an upload plan, and either
+        // writes the plan + a stub
+        // `remote_receipt.json` in dry-run or
+        // shells out to `aws s3 cp` in live
+        // mode). An empty `PathBuf` is the
+        // missing-path-arg error the mode is
+        // contractually required to convert
+        // into exit 2. An empty `bucket` is the
+        // missing-bucket-arg error the mode is
+        // contractually required to convert
+        // into exit 2.
+        if let Self::PublishRemote {
+            path,
+            bucket,
+            prefix,
+            dry_run,
+        } = Self::from_args()
+        {
+            if path.as_os_str().is_empty() {
+                eprintln!(
+                    "Usage: trainer --publish-remote <receipt-dir> --bucket <s3://...> \
+                     [--prefix <prefix/>] [--no-dry-run]"
+                );
+                std::process::exit(2);
+            }
+            if bucket.is_empty() {
+                eprintln!(
+                    "Usage: trainer --publish-remote <receipt-dir> --bucket <s3://...> \
+                     [--prefix <prefix/>] [--no-dry-run]"
+                );
+                std::process::exit(2);
+            }
+            // Compute the publish directory
+            // (where the STW-032 bundle lives)
+            // as
+            // `<parent>/publish/<basename>/` so
+            // the publish-remote step never
+            // touches the receipt directly (it
+            // reads the bundle's three sibling
+            // files instead).
+            let basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("testnet-live-proof-receipt")
+                .to_string();
+            let parent = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let bundle_dir = parent.join("publish").join(&basename);
+            // Default the prefix to
+            // `<basename>/` when the operator
+            // passes `--prefix ''` (the same
+            // `PUBLISH_DIR` choice the STW-032
+            // `trainer --publish` arm makes).
+            let effective_prefix = if prefix.is_empty() {
+                format!("{basename}/")
+            } else {
+                prefix
+            };
+            let created_at_utc =
+                std::env::var("RBP_PUBLISH_REMOTE_UTC").unwrap_or_else(|_| "<unknown>".to_string());
+            match crate::publish_remote::publish_remote_receipt(
+                &path,
+                &bundle_dir,
+                &bucket,
+                &effective_prefix,
+                dry_run,
+                Some(&created_at_utc),
+            ) {
+                Ok(out) => {
+                    println!(
+                        "{} bucket={} prefix={} files={} bytes={} bundle_sha256={} basename={} dry_run={}",
+                        crate::publish_remote::STW033_PUBLISH_REMOTE_HEADLINE_PREFIX,
+                        out.plan.bucket,
+                        out.plan.prefix,
+                        out.s3_objects.len(),
+                        out.total_bytes,
+                        out.bundle_sha256,
+                        basename,
+                        dry_run,
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // STW-033: also bypass the DB open for
+        // `VerifyRemote`. The verifier is
+        // read-only (no `DB_URL` /
+        // `tokio_postgres::Client` use); an
+        // empty `PathBuf` is the
+        // missing-path-arg error the mode is
+        // contractually required to convert
+        // into exit 2.
+        if let Self::VerifyRemote { path } = Self::from_args() {
+            if path.as_os_str().is_empty() {
+                eprintln!("Usage: trainer --verify-remote <path>");
+                std::process::exit(2);
+            }
+            // The verifier reads the
+            // `remote_receipt.json` + the local
+            // files the receipt claims to have
+            // uploaded; the parent publish
+            // directory is `<remote_dir>.parent()`
+            // (the verifier walks the receipt's
+            // `s3_objects[].local_path` and
+            // re-resolves relative paths against
+            // the publish directory). For
+            // absolute `local_path`s the parent
+            // arg is unused.
+            let parent = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            match crate::publish_remote::read_remote_receipt(&path) {
+                Ok(receipt) => match receipt.verify(&parent) {
+                    Ok(()) => {
+                        println!(
+                            "{} bucket={} prefix={} files={} bytes={} bundle_sha256={} basename={}",
+                            crate::publish_remote::STW033_VERIFY_REMOTE_HEADLINE_PREFIX,
+                            receipt.plan.bucket,
+                            receipt.plan.prefix,
+                            receipt.s3_objects.len(),
+                            receipt.total_bytes,
+                            receipt.bundle_sha256,
+                            receipt.plan.receipt_basename,
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} {}",
+                            crate::publish_remote::STW033_VERIFY_REMOTE_FAILURE_HEADLINE_PREFIX,
+                            e
+                        );
+                        std::process::exit(2);
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "{} {}",
+                        crate::publish_remote::STW033_VERIFY_REMOTE_FAILURE_HEADLINE_PREFIX,
+                        e
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
         let client = rbp_database::db().await;
         match Self::from_args() {
             Self::Fast => FastSession::new(client).await.train().await,
@@ -554,6 +882,14 @@ impl Mode {
             ),
             Self::VerifyBundle { .. } => unreachable!(
                 "Mode::VerifyBundle is dispatched before the DB open; the `Self::VerifyBundle {{ .. }}` \
+                 arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::PublishRemote { .. } => unreachable!(
+                "Mode::PublishRemote is dispatched before the DB open; the `Self::PublishRemote {{ .. }}` \
+                 arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::VerifyRemote { .. } => unreachable!(
+                "Mode::VerifyRemote is dispatched before the DB open; the `Self::VerifyRemote {{ .. }}` \
                  arm here is the compiler-required exhaustive-match catch-all"
             ),
         }

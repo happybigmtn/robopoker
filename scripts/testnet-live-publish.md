@@ -112,7 +112,7 @@ and the integration test
 `crates/autotrain/tests/publish.rs::verify_bundle_round_trips_through_real_trainer_binary`
 simultaneously.
 
-## Pushing to a remote bucket (next slice, NOT this one)
+## Pushing to a remote bucket (STW-033)
 
 The `testnet-live-publish.sh` runbook writes the bundle into a
 local `publish/` directory. A CI worker can then `aws s3 cp`
@@ -124,12 +124,27 @@ $ aws s3 cp publish/testnet-live-proof-20260604T050000Z/ \
     --recursive
 ```
 
-The push step is intentionally **out of scope** for STW-032 — a
-follow-on slice (a `scripts/testnet-live-publish-s3.sh` runbook,
-or a `trainer --publish-s3 <receipt-dir>` arm) can land the S3
-push in a single change. The STW-032 deliverable is the local
-bundle + the no-DB verifier; the S3 / GCS / git-tag push is the
-next slice.
+STW-033 lands the deterministic, plan-first `trainer
+--publish-remote <receipt-dir> --bucket <s3://...>` half of
+that push: a CI worker invokes
+
+```bash
+$ bash scripts/testnet-live-publish-s3.sh \
+    receipts/testnet-live-proof-20260604T050000Z/ \
+    s3://robopoker-testnet-dashboard
+```
+
+and the chain (a) re-verifies the receipt with `trainer
+--verify-receipt`, (b) re-verifies the STW-032 publish bundle
+with `trainer --verify-bundle`, (c) shells out to `trainer
+--publish-remote` (which writes a deterministic
+`remote_plan.json` + `remote_receipt.json` to
+`<publish>/<basename>/remote/`), and (d) re-verifies the
+post-upload receipt with `trainer --verify-remote`. The
+`PUBLISH_DRY_RUN=0` knob flips the
+`trainer --publish-remote` arm into live mode (which
+shells out to `aws s3 cp` per file). The dry-run default
+keeps `cargo test --workspace` no-network.
 
 ## What the runbook does NOT do
 
@@ -148,8 +163,12 @@ next slice.
   `cargo` + `bash` + a `trainer` binary can run the publish
   as-is.
 - It does **not** push to a remote registry. The publish step
-  writes the bundle to a local `publish/` directory; pushing
-  the bundle to a testnet dashboard bucket is the next slice.
+  writes the bundle to a local `publish/` directory. The S3 /
+  GCS / git-tag push is a *consumer* of the bundle, not part
+  of the publish step itself — see STW-033 + the
+  `scripts/testnet-live-publish-s3.sh` companion runbook for
+  the deterministic upload-plan / `remote_receipt.json`
+  surface.
 - It does **not** change the STW-019
   `scripts/testnet-live-proof.sh` runbook. The publish step
   consumes the receipt the runbook produced — a follow-on

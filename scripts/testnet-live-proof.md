@@ -239,7 +239,13 @@ and the integration test
   [`scripts/testnet-live-publish.md`](testnet-live-publish.md)
   for the publish runbook and
   [`scripts/testnet-live-publish.sh`](testnet-live-publish.sh)
-  for the bash driver.
+  for the bash driver. STW-033 lands the
+  *plan-first* `trainer --publish-remote <receipt-dir>
+  --bucket <s3://...>` half of that push (the deterministic
+  upload plan + `remote_receipt.json` manifest a CI worker
+  can re-verify without re-running the chain); see
+  [`scripts/testnet-live-publish-s3.sh`](testnet-live-publish-s3.sh)
+  for the companion bash driver.
 
 ## Pinning the runbook's shape
 
