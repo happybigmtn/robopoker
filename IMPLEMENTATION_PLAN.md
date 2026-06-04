@@ -3745,7 +3745,7 @@ bucket, AND a no-DB no-rebuild re-verify path that
 re-hashes the local `INDEX.json` + the per-entry
 `remote_receipt.json` files the STW-034 chain produced.
 
-- [ ] `STW-035` `trainer --publish-index-remote
+- [x] `STW-035` `trainer --publish-index-remote
   <publish-root> --bucket
   <s3://...> [--prefix
   <prefix/>] [--no-dry-run]`
@@ -4368,9 +4368,8 @@ follow-on) plus the operator-UX + observability + docs surfaces
 that make the chain legible to a first-time visitor and a CI
 auditor. The v9 STW-035 row that already sits in
 `## Promoted from v8 follow-on (this slice)` is the *prerequisite*
-for the v10 dashboard slice; STW-035 itself is in flight (working
-tree: `crates/autotrain/src/publish_index_remote.rs` 1710 LOC +
-mode.rs/lib.rs wiring uncommitted) and is not duplicated here.
+for the v10 dashboard slice; STW-035 is **shipped** on
+commit (see `## Recently shipped` at the top of this plan).
 
 Each row below names a single shippable slice with named files,
 verification command(s), and a `lens` tag tracing the finding it

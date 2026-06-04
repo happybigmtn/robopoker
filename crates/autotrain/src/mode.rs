@@ -336,6 +336,100 @@ pub enum Mode {
         /// `trainer --publish-index` arm wrote.
         path: PathBuf,
     },
+    /// STW-035: plan + (optionally) apply a
+    /// remote upload of the STW-034 `INDEX.json`
+    /// aggregator to a remote object store (S3 /
+    /// GCS / git-tag) bucket the operator (or a
+    /// CI worker) names. Mirrors
+    /// `Self::PublishIndex`: read-only with
+    /// respect to the underlying `INDEX.json`
+    /// + per-entry `remote_receipt.json` files,
+    /// bypasses the DB open, calls the
+    /// `crate::publish_index_remote::publish_index_remote_receipt`
+    /// handler, and prints a one-line
+    /// `live_proof publish_index_remote complete: ...`
+    /// headline a dashboard scraper can
+    /// `grep ^live_proof publish_index_remote complete:`
+    /// the log. The handler refuses to plan an
+    /// upload for a red `INDEX.json` (re-runs
+    /// the STW-034 `PublishIndex::verify` as a
+    /// pre-upload gate; a red index short-circuits
+    /// with
+    /// `PublishIndexRemoteError::IndexRed(...)`
+    /// before any plan is written — the
+    /// "refuse to paper-over a red index"
+    /// invariant the STW-028 receipt verifier +
+    /// STW-032 bundle verifier + STW-033
+    /// remote-receipt verifier + STW-034 index
+    /// verifier already enforce). The `path` is
+    /// the `<publish-root>/` directory the
+    /// STW-034 runbook produced; the `bucket` is
+    /// the bucket URI (`s3://<name>/` or bare
+    /// `<name>`); the `prefix` is the key
+    /// prefix inside the bucket (defaults to
+    /// `<root-basename>/`); the `dry_run` flag
+    /// (default `true`) skips the actual
+    /// `aws s3 cp` shell-out and only writes the
+    /// upload plan + a stub
+    /// `index_remote_receipt.json` (the
+    /// `cargo test --workspace` integration
+    /// test runs in dry-run so a regression in
+    /// the CLI surface fails CI without an
+    /// `aws` credential or a live bucket).
+    PublishIndexRemote {
+        /// Absolute or CWD-relative path to a
+        /// `<publish-root>/` directory the STW-034
+        /// `testnet-live-publish-index.sh` runbook
+        /// produced.
+        path: PathBuf,
+        /// Bucket URI (`s3://<name>/` or bare
+        /// `<name>`). The arm normalises the
+        /// bare-name form to `s3://<name>/` so
+        /// the per-file `s3_uri` is always
+        /// `s3://...`.
+        bucket: String,
+        /// Key prefix inside the bucket.
+        /// Defaults to `<root-basename>/` if the
+        /// operator passes `--prefix ''`.
+        prefix: String,
+        /// When `true` (the default), the arm
+        /// writes the upload plan + a stub
+        /// `index_remote_receipt.json` and exits
+        /// 0 without shelling out to `aws` /
+        /// `gsutil` / `git`. When `false`, the
+        /// arm shells out to `aws s3 cp` per
+        /// `s3_objects[]` entry and writes the
+        /// post-upload `index_remote_receipt.json`.
+        dry_run: bool,
+    },
+    /// STW-035: re-verify a published index
+    /// remote receipt (the
+    /// `index_remote_receipt.json` the
+    /// `trainer --publish-index-remote` arm wrote
+    /// under `<publish-root>/index_remote/`).
+    /// Mirrors `Self::VerifyIndex`: read-only +
+    /// bypasses the DB open, calls the
+    /// `crate::publish_index_remote::read_index_remote_receipt`
+    /// + `PublishedIndexRemoteReceipt::verify`
+    /// verifier pair, and prints a one-line
+    /// `live_proof index_remote verification passed: ...`
+    /// / `live_proof index_remote verification failed: ...`
+    /// line a dashboard scraper can
+    /// `grep ^live_proof index_remote verification`
+    /// the log. The verifier re-hashes the local
+    /// `INDEX.json` the receipt claims to have
+    /// uploaded, asserts every digest matches the
+    /// receipt, and rejects the receipt with a
+    /// typed `PublishIndexRemoteError` on a
+    /// mismatch.
+    VerifyIndexRemote {
+        /// Absolute or CWD-relative path to a
+        /// `<publish-root>/index_remote/`
+        /// directory the
+        /// `trainer --publish-index-remote` arm
+        /// wrote.
+        path: PathBuf,
+    },
 }
 
 impl Mode {
@@ -541,6 +635,109 @@ impl Mode {
                         },
                     };
                 }
+                "--publish-index-remote" => {
+                    // STW-035: the
+                    // publish-index-remote arm
+                    // takes a positional
+                    // `<publish-root>` followed
+                    // by `--bucket <s3://...>`
+                    // (or bare bucket name) +
+                    // optional `--prefix
+                    // <prefix/>` + optional
+                    // `--no-dry-run` (or
+                    // `--dry-run` to make the
+                    // default explicit). The
+                    // argv shape mirrors the
+                    // runbook's
+                    // `trainer
+                    // --publish-index-remote
+                    // <publish-root> --bucket
+                    // <bucket> --prefix
+                    // <prefix>
+                    // [--no-dry-run]`
+                    // invocation. We scan
+                    // ahead collecting the
+                    // optional flags; the bare
+                    // `--publish-index-remote`
+                    // with no value returns
+                    // `Self::PublishIndexRemote`
+                    // with an empty `PathBuf`;
+                    // the dispatch arm in
+                    // `run()` prints a
+                    // one-line usage and exits
+                    // 2.
+                    let publish_root = match iter.next() {
+                        Some(p) => PathBuf::from(p),
+                        None => PathBuf::new(),
+                    };
+                    let mut bucket: String = String::new();
+                    let mut prefix: String = String::new();
+                    let mut dry_run: bool = true;
+                    // The bucket / prefix /
+                    // dry-run flags can appear
+                    // in any order AFTER the
+                    // publish-root positional;
+                    // a second positional (a
+                    // future multi-positional
+                    // extension) is ignored.
+                    while let Some(flag) = iter.peek() {
+                        match flag.as_str() {
+                            "--bucket" => {
+                                iter.next();
+                                bucket = iter.next().unwrap_or_default();
+                            }
+                            "--prefix" => {
+                                iter.next();
+                                prefix = iter.next().unwrap_or_default();
+                            }
+                            "--no-dry-run" => {
+                                iter.next();
+                                dry_run = false;
+                            }
+                            "--dry-run" => {
+                                iter.next();
+                                dry_run = true;
+                            }
+                            // A non-flag token or a
+                            // different flag ends
+                            // the
+                            // publish-index-remote
+                            // argv scope; the next
+                            // iteration of the
+                            // outer loop will
+                            // dispatch it.
+                            _ => break,
+                        }
+                    }
+                    return Self::PublishIndexRemote {
+                        path: publish_root,
+                        bucket,
+                        prefix,
+                        dry_run,
+                    };
+                }
+                "--verify-index-remote" => {
+                    // STW-035: the
+                    // verify-index-remote arm's
+                    // value is the next argv.
+                    // A bare
+                    // `--verify-index-remote`
+                    // with no value returns
+                    // `Self::VerifyIndexRemote`
+                    // with an empty `PathBuf`;
+                    // the dispatch arm in
+                    // `run()` prints a
+                    // one-line usage and exits
+                    // 2.
+                    return match iter.next() {
+                        Some(p) => Self::VerifyIndexRemote {
+                            path: PathBuf::from(p),
+                        },
+                        None => Self::VerifyIndexRemote {
+                            path: PathBuf::new(),
+                        },
+                    };
+                }
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -591,7 +788,7 @@ impl Mode {
             };
         }
         eprintln!(
-            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path> | --publish-remote <receipt-dir> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-remote <path> | --publish-index <publish-root> | --verify-index <index-path>"
+            "Usage: trainer --status | --cluster | --fast | --fast2 | --fast3 | --slow | --reset | --smoke | --bench | --compare | --compare3 | --replay <path> | --verify-receipt <path> | --publish <receipt-dir> | --verify-bundle <path> | --publish-remote <receipt-dir> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-remote <path> | --publish-index <publish-root> | --verify-index <index-path> | --publish-index-remote <publish-root> --bucket <s3://...> [--prefix <prefix/>] [--no-dry-run] | --verify-index-remote <path>"
         );
         std::process::exit(1);
     }
@@ -982,6 +1179,155 @@ impl Mode {
                 }
             }
         }
+        // STW-035: also bypass the DB open for
+        // `PublishIndexRemote`. The
+        // publisher-index-remote is read-only
+        // with respect to the publish root +
+        // the `INDEX.json` (it re-verifies the
+        // `INDEX.json` as a pre-upload gate,
+        // builds an upload plan, and either
+        // writes the plan + a stub
+        // `index_remote_receipt.json` in
+        // dry-run or shells out to `aws s3 cp`
+        // in live mode). An empty `PathBuf` is
+        // the missing-path-arg error the mode
+        // is contractually required to convert
+        // into exit 2. An empty `bucket` is the
+        // missing-bucket-arg error the mode is
+        // contractually required to convert
+        // into exit 2.
+        if let Self::PublishIndexRemote {
+            path,
+            bucket,
+            prefix,
+            dry_run,
+        } = Self::from_args()
+        {
+            if path.as_os_str().is_empty() {
+                eprintln!(
+                    "Usage: trainer --publish-index-remote <publish-root> --bucket <s3://...> \
+                     [--prefix <prefix/>] [--no-dry-run]"
+                );
+                std::process::exit(2);
+            }
+            if bucket.is_empty() {
+                eprintln!(
+                    "Usage: trainer --publish-index-remote <publish-root> --bucket <s3://...> \
+                     [--prefix <prefix/>] [--no-dry-run]"
+                );
+                std::process::exit(2);
+            }
+            // Compute the publish root basename
+            // the STW-034 aggregator scanned
+            // (so the operator can pass `--prefix
+            // ''` and the arm defaults to
+            // `<root-basename>/`).
+            let root_basename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("publish-root")
+                .to_string();
+            // Default the prefix to
+            // `<root-basename>/` when the
+            // operator passes `--prefix ''`.
+            let effective_prefix = if prefix.is_empty() {
+                format!("{root_basename}/")
+            } else {
+                prefix
+            };
+            let created_at_utc = std::env::var("RBP_PUBLISH_INDEX_REMOTE_UTC")
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            match crate::publish_index_remote::publish_index_remote_receipt(
+                &path,
+                &bucket,
+                &effective_prefix,
+                dry_run,
+                Some(&created_at_utc),
+            ) {
+                Ok(out) => {
+                    println!(
+                        "{} bucket={} prefix={} files={} bytes={} index_path={} runbook_version={} dry_run={}",
+                        crate::publish_index_remote::STW035_PUBLISH_INDEX_REMOTE_HEADLINE_PREFIX,
+                        out.plan.bucket,
+                        out.plan.prefix,
+                        out.s3_objects.len(),
+                        out.total_bytes,
+                        out.index_sha256,
+                        out.runbook_version,
+                        dry_run,
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        // STW-035: also bypass the DB open for
+        // `VerifyIndexRemote`. The verifier is
+        // read-only (no `DB_URL` /
+        // `tokio_postgres::Client` use); an
+        // empty `PathBuf` is the
+        // missing-path-arg error the mode is
+        // contractually required to convert
+        // into exit 2.
+        if let Self::VerifyIndexRemote { path } = Self::from_args() {
+            if path.as_os_str().is_empty() {
+                eprintln!("Usage: trainer --verify-index-remote <path>");
+                std::process::exit(2);
+            }
+            // The verifier reads the
+            // `index_remote_receipt.json` +
+            // the local `INDEX.json` the
+            // receipt claims to have
+            // uploaded. The publish root
+            // arg is the parent of the
+            // `index_remote/` dir the
+            // publisher wrote (the
+            // verifier re-resolves relative
+            // `INDEX.json` paths against
+            // the publish root); absolute
+            // `INDEX.json` paths resolve
+            // verbatim.
+            let publish_root = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            match crate::publish_index_remote::read_index_remote_receipt(&path) {
+                Ok(receipt) => match receipt.verify(&publish_root) {
+                    Ok(()) => {
+                        println!(
+                            "{} bucket={} prefix={} files={} bytes={} index_path={} runbook_version={}",
+                            crate::publish_index_remote::STW035_VERIFY_INDEX_REMOTE_HEADLINE_PREFIX,
+                            receipt.plan.bucket,
+                            receipt.plan.prefix,
+                            receipt.s3_objects.len(),
+                            receipt.total_bytes,
+                            receipt.index_sha256,
+                            receipt.runbook_version,
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{} {}",
+                            crate::publish_index_remote::STW035_VERIFY_INDEX_REMOTE_FAILURE_HEADLINE_PREFIX,
+                            e
+                        );
+                        std::process::exit(2);
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "{} {}",
+                        crate::publish_index_remote::STW035_VERIFY_INDEX_REMOTE_FAILURE_HEADLINE_PREFIX,
+                        e
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
         let client = rbp_database::db().await;
         match Self::from_args() {
             Self::Fast => FastSession::new(client).await.train().await,
@@ -1097,6 +1443,16 @@ impl Mode {
             Self::VerifyIndex { .. } => unreachable!(
                 "Mode::VerifyIndex is dispatched before the DB open; the `Self::VerifyIndex {{ .. }}` \
                  arm here is the compiler-required exhaustive-match catch-all"
+            ),
+            Self::PublishIndexRemote { .. } => unreachable!(
+                "Mode::PublishIndexRemote is dispatched before the DB open; the \
+                 `Self::PublishIndexRemote {{ .. }}` arm here is the compiler-required \
+                 exhaustive-match catch-all"
+            ),
+            Self::VerifyIndexRemote { .. } => unreachable!(
+                "Mode::VerifyIndexRemote is dispatched before the DB open; the \
+                 `Self::VerifyIndexRemote {{ .. }}` arm here is the compiler-required \
+                 exhaustive-match catch-all"
             ),
         }
     }

@@ -959,3 +959,206 @@ fn testnet_live_publish_index_doc_references_publish_index_cli() {
         publish_index_doc_path().display()
     );
 }
+
+// ===========================================================================
+// STW-035 publish-index-remote runbook shape contract
+// ===========================================================================
+//
+// The publish-index-remote runbook
+// (`scripts/testnet-live-publish-index-s3.sh`) is a
+// pure-bash driver that consumes the `INDEX.json` the
+// STW-034 `testnet-live-publish-index.sh` runbook
+// produced and writes a deterministic remote-upload
+// plan + a post-upload
+// `index_remote_receipt.json` the testnet dashboard
+// scrapes. The four sub-tests below pin the
+// runbook's static surface (the same no-DB
+// shape-pinning pattern the STW-019 + STW-032 +
+// STW-033 + STW-034 runbooks use):
+//
+// 1. `testnet_live_publish_index_s3_script_exists_and_parses` —
+//    the s3 runbook script must be on disk, be
+//    executable, and parse with `bash -n`. Mirrors
+//    the STW-019 + STW-032 + STW-033 + STW-034
+//    file-on-disk pins.
+// 2. `testnet_live_publish_index_s3_script_has_verify_index_pre_upload_gate` —
+//    the s3 runbook script must shell out to
+//    `trainer --verify-index <index-dir>` BEFORE
+//    the `trainer --publish-index-remote` call
+//    (the "refuse to plan an upload for a red
+//    index" gate the STW-034 index verifier is the
+//    source of truth for).
+// 3. `testnet_live_publish_index_s3_script_references_publish_index_remote_cli` —
+//    the s3 runbook script must reference the
+//    `trainer --publish-index-remote
+//    <publish-root> --bucket <s3://...>` CLI
+//    subcommand STW-035 ships.
+// 4. `testnet_live_publish_index_s3_doc_references_verify_index_remote_cli` —
+//    the s3 runbook doc must reference the
+//    `trainer --verify-index-remote <path>` CLI
+//    subcommand STW-035 ships (a worker reading the
+//    doc would not know how to re-verify the index
+//    without this mention).
+
+fn publish_index_s3_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-index-s3.sh")
+}
+
+fn publish_index_s3_doc_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("testnet-live-publish-index-s3.md")
+}
+
+#[test]
+fn testnet_live_publish_index_s3_script_exists_and_parses() {
+    // The publish-index-remote s3 runbook script
+    // must be on disk, executable, and parse with
+    // `bash -n`. A regression that drops the file
+    // (or breaks the bash grammar) fails the gate
+    // at CI time before a CI worker can shell out
+    // to it. Mirrors the STW-019 + STW-032 +
+    // STW-033 + STW-034 file-on-disk pins.
+    let p = publish_index_s3_script_path();
+    assert!(
+        p.exists(),
+        "STW-035 publish-index-remote s3 runbook script missing at {}; \
+         the testnet dashboard index-remote has no shell entry point",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a
+        // future `chmod -x` regression (e.g. a
+        // cross-checkout that strips the bit) fails
+        // the test before a worker tries to shell
+        // out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-035 publish-index-remote s3 runbook script at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+    }
+    // `bash -n` parses the script without
+    // executing it. A non-zero exit (a syntax
+    // error) fails the test so a future edit that
+    // breaks the bash grammar fails CI before it
+    // reaches a live publish-index-remote step.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/testnet-live-publish-index-s3.sh");
+    assert!(
+        out.status.success(),
+        "STW-035 publish-index-remote s3 runbook script must parse with `bash -n` \
+         (got exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_s3_script_has_verify_index_pre_upload_gate() {
+    // The publish-index-remote s3 runbook script
+    // must shell out to `trainer --verify-index
+    // <index-dir>` BEFORE the
+    // `trainer --publish-index-remote` call (the
+    // "refuse to plan an upload for a red index"
+    // gate the STW-034 index verifier is the
+    // source of truth for). The pin is by byte
+    // offset: `--verify-index` must appear in
+    // the script body before `--publish-index-remote`
+    // appears. A regression that re-orders the
+    // chain (or drops the verify step) fails the
+    // gate so a CI worker that runs the script
+    // can never push a red index to the dashboard
+    // bucket. Mirrors the STW-032
+    // `testnet_live_publish_script_has_verify_receipt_pre_publish_gate`
+    // + STW-033
+    // `testnet_live_publish_s3_script_has_verify_receipt_pre_publish_gate`
+    // pinners.
+    let script = read(&publish_index_s3_script_path());
+    let verify_index_pos = script.find("--verify-index").unwrap_or_else(|| {
+        panic!(
+            "STW-035 publish-index-remote s3 runbook script at {} must reference the \
+                 `trainer --verify-index <index-dir>` CLI subcommand as the pre-upload gate",
+            publish_index_s3_script_path().display()
+        )
+    });
+    let publish_index_remote_pos = script.find("--publish-index-remote").unwrap_or_else(|| {
+        panic!(
+            "STW-035 publish-index-remote s3 runbook script at {} must reference the \
+                 `trainer --publish-index-remote` CLI subcommand",
+            publish_index_s3_script_path().display()
+        )
+    });
+    assert!(
+        verify_index_pos < publish_index_remote_pos,
+        "STW-035 publish-index-remote s3 runbook script must shell out to \
+         `--verify-index` (byte offset {verify_index_pos}) BEFORE `--publish-index-remote` \
+         (byte offset {publish_index_remote_pos}); the pre-upload gate fires before the \
+         upload step so a red index cannot reach the dashboard bucket"
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_s3_script_references_publish_index_remote_cli() {
+    // The publish-index-remote s3 runbook script
+    // must reference the
+    // `trainer --publish-index-remote
+    // <publish-root> --bucket <s3://...>` CLI
+    // subcommand STW-035 ships. We assert by
+    // flag form (`--publish-index-remote` +
+    // `--bucket`) because that is the form the
+    // operator types and the form a dashboard
+    // scraper greps. Mirrors the STW-033
+    // `testnet_live_publish_s3_script_references_publish_remote_cli`
+    // pinner.
+    let script = read(&publish_index_s3_script_path());
+    assert!(
+        script.contains("--publish-index-remote"),
+        "STW-035 publish-index-remote s3 runbook script at {} must reference the \
+         `trainer --publish-index-remote <publish-root> --bucket <s3://...>` CLI subcommand; \
+         a worker reading the script would not know how to invoke the index-remote step",
+        publish_index_s3_script_path().display()
+    );
+    assert!(
+        script.contains("--bucket"),
+        "STW-035 publish-index-remote s3 runbook script at {} must reference the \
+         `--bucket <s3://...>` flag the index-remote step requires",
+        publish_index_s3_script_path().display()
+    );
+}
+
+#[test]
+fn testnet_live_publish_index_s3_doc_references_verify_index_remote_cli() {
+    // The publish-index-remote s3 runbook doc
+    // must reference the
+    // `trainer --verify-index-remote <path>` CLI
+    // subcommand STW-035 ships (a worker reading
+    // the doc would not know how to re-verify
+    // the index-remote receipt without this
+    // mention). Mirrors the STW-033
+    // `testnet_live_publish_s3_doc_references_verify_remote_cli`
+    // pinner.
+    let doc = read(&publish_index_s3_doc_path());
+    assert!(
+        doc.contains("--verify-index-remote"),
+        "STW-035 publish-index-remote s3 runbook doc at {} must reference the \
+         `trainer --verify-index-remote <path>` CLI subcommand; a worker reading the \
+         doc would not know how to re-verify the index-remote receipt",
+        publish_index_s3_doc_path().display()
+    );
+}
