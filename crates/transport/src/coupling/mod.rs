@@ -1,6 +1,17 @@
+//! [`Coupling`] trait + concrete implementations.
+//!
+//! The trait lives at the crate root as
+//! [`crate::Coupling`]; the concrete `Sinkhorn` and `Greedy`
+//! implementations live in this submodule so they don't shadow
+//! downstream `Sinkhorn` / `Greedy` types when a consumer does
+//! `use rbp_transport::*;`.
+
 use super::density::Density;
 use super::measure::Measure;
 use super::support::Support;
+
+pub mod greedy;
+pub mod sinkhorn;
 
 /// A transport plan (coupling) between two probability distributions.
 ///

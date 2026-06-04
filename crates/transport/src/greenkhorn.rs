@@ -19,4 +19,10 @@
 /// # Complexity
 ///
 /// O(n² / ε²) iterations for ε-approximate solution, with O(n) work per iteration.
+///
+/// # Concrete implementation
+///
+/// The implementing `Coupling` type lives in
+/// [`crate::coupling::sinkhorn::Sinkhorn`]; this struct is the
+/// original crate-root marker kept for back-compat.
 pub struct GreenhornOptimalTransport;

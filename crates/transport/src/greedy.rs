@@ -14,4 +14,10 @@
 /// # Complexity
 ///
 /// O(n² log n) where n is the support size, dominated by sorting pairs.
+///
+/// # Concrete implementation
+///
+/// The implementing `Coupling` type lives in
+/// [`crate::coupling::greedy::Greedy`]; this struct is the original
+/// crate-root marker kept for back-compat.
 pub struct GreedyOptimalTransport;

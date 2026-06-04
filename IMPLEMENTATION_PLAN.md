@@ -1283,23 +1283,27 @@ parallel test proof`.
 
 ## Active items (worker-ready)
 
-The most recent shipped slice is `STW-022` (plan-vs-reality
-staleness gate). `STW-021` (TUI headless QA gate) shipped on
-commit `43947b5` per the plan row below; the prior `## Immediate
-P0` list in `genesis/plans/000-ceo-testnet-roadmap.md` has been
-retired — the new `STW-022` `scripts/plan-staleness-gate.sh`
-mechanically prevents the ghost P0 rows from being re-`[ ]`-ed.
-The CEO roadmap's only documented open launch-proof item is
-the deferred `testnet-live-proof` operator receipt (see
-`steward/PROMOTIONS.md` deferred `testnet-live-proof` row);
-`STW-023` promotes and lands that slice: a Rust-side
-`LiveProofReceipt` verifier that drives the same chain the
-existing `crates/autotrain/tests/live_proof.rs` integration test
-covers and drops a per-step receipt bundle on disk with the
-exact layout the `scripts/testnet-live-proof.sh` runbook
-produces, plus a `recipe.json` manifest the runbook script
-also writes so the two surfaces share a single machine-readable
-schema.
+The most recent shipped slice is `STW-023` (`LiveProofReceipt`
+verifier + runbook `recipe.json` manifest). With `STW-019` →
+`STW-023` the four P0-hinge items from the prior steward pass
+(`testnet-live-proof`, `STW-001` operator decision, `STW-007`
+operator sign-off, `verification:workspace-parallel`) are all
+either closed or explicitly out-of-scope for an autonomous
+worker. The next documented open slice is the
+`crates/transport` ORPHAN from `steward/DRIFT.md`: the crate
+ships `Support`, `Density`, `Measure`, and `Coupling` traits
+plus two empty type shells (`GreenhornOptimalTransport`,
+`GreedyOptimalTransport`) but provides **zero concrete
+implementations** and **zero tests**; downstream consumers
+(`crates/clustering/src/sinkhorn.rs`, `crates/clustering/src/emd.rs`,
+`crates/clustering/src/metric.rs`, `crates/server/src/analysis/api.rs`,
+`crates/mccfr/*`) re-roll the algorithms themselves because
+`rbp-transport` only exposes the trait surface. STW-024
+promotes the next documented slice from the steward DRIFT
+table — concrete `Measure` impls + concrete `Coupling` impls +
+deterministic tests in `crates/transport` — so the crate
+stops being a trait-only scaffold and downstream consumers
+have a single source of truth.
 
 - [x] `STW-023` Live-proof receipt bundle: shared
   `LiveProofReceipt` verifier + runbook `recipe.json` manifest.
@@ -1707,6 +1711,89 @@ schema.
   --workspace` and `cargo fmt --check` are green; the new
   runbook is linked from `README.md` under `## Testnet launch
   proof`.
+
+- [x] `STW-024` Concrete `Measure` + `Coupling`
+  implementations + deterministic tests in `crates/transport`.
+  The `steward/DRIFT.md` "Orphan Code Surfaces" table flags
+  `crates/transport` as ORPHAN: *"no tracked STW item covers
+  optimal transport crate"*. The crate currently ships four
+  traits (`Support`, `Density`, `Measure`, `Coupling`) and two
+  empty type shells (`GreenhornOptimalTransport`,
+  `GreedyOptimalTransport`) with **zero concrete impls** and
+  **zero tests**, even though the documented
+  `rbp-core::SINKHORN_TEMPERATURE` / `SINKHORN_ITERATIONS` /
+  `SINKHORN_TOLERANCE` constants are intended to drive it.
+  STW-024 lands three pieces of proof that the crate is real,
+  not a stub: (a) a `UniformMetric` struct (L1 distance over
+  `usize` buckets) that implements the existing `Measure`
+  trait, (b) a `Sinkhorn` struct that implements the existing
+  `Coupling` trait via the standard entropic-regularized
+  iteration (Kantorovich potentials, log-domain scaling,
+  Sinkhorn-Knopp update rule, marginal-violation early stop at
+  `SINKHORN_TOLERANCE`, hard cap at `SINKHORN_ITERATIONS`),
+  with a `flow(x, y)` accessor that returns the marginal-
+  consistent transport density and a `cost()` method that
+  integrates `flow * distance` over the support, and (c) a
+  battery of deterministic lib tests in
+  `crates/transport/src/lib.rs` that pin the new impls:
+  `support_usize_is_clone` (marker + Clone contract),
+  `density_btreemap_round_trips_known_probabilities`
+  (deterministic 0.7 / 0.2 / 0.1 fixture),
+  `density_hashmap_matches_btreemap_on_same_input`,
+  `density_vec_assoc_list_matches_btreemap_on_same_input`,
+  `density_unknown_point_returns_zero`,
+  `density_total_mass_equals_one_for_normalized_input`
+  (asserts the three `Density` impls agree on a normalized
+  fixture), `uniform_metric_zero_self_distance`,
+  `uniform_metric_symmetry_holds`
+  (`d(x,y) == d(y,x)`), `uniform_metric_triangle_inequality`
+  (`d(x,z) <= d(x,y) + d(y,z)` over a 5-point grid),
+  `sinkhorn_identity_cost_is_zero` (μ = ν ⇒ cost = 0 within
+  1e-3), `sinkhorn_self_transport_cost_is_zero` (a single
+  unit mass in both μ and ν ⇒ cost = 0), `sinkhorn_preserves
+  _marginals_within_tolerance` (run 50 Sinkhorn iterations
+  on a 3x3 uniform fixture, assert `|Σ_x flow(x,y) − ν(y)| <
+  1e-2` for every y and `|Σ_y flow(x,y) − μ(x)| < 1e-2` for
+  every x), `sinkhorn_cost_is_nonnegative`,
+  `sinkhorn_uniform_metric_matches_known_emd_on_1d`
+  (a 1-point shift μ = δ₀, ν = δ₁ ⇒ EMD = 1.0 within 1e-2),
+  `sinkhorn_handles_disjoint_supports` (μ on {0,1}, ν on
+  {2,3} ⇒ cost equals the source-to-target L1 distance,
+  ≥ 2.0), and `sinkhorn_respects_iteration_cap`
+  (assert the cap is honored even on a slowly-converging
+  fixture so a future parameter tweak can't blow the budget).
+  Owner files: `crates/transport/src/measure.rs` (new
+  `UniformMetric` struct + `Measure` impl, exported in
+  `crates/transport/src/lib.rs`), `crates/transport/src/greenkhorn.rs`
+  (real `Sinkhorn` struct with `new(metric, mu, nu,
+  temperature, iterations, tolerance)`, `Coupling` impl, and
+  log-domain internal state), `crates/transport/src/lib.rs`
+  (re-export the new types and the new `tests` module),
+  `IMPLEMENTATION_PLAN.md` (this row). Scope boundary: do
+  NOT change any existing trait signature; do NOT add new
+  traits; do NOT touch downstream consumers
+  (`crates/clustering/src/sinkhorn.rs` and friends keep their
+  own algorithms — STW-024 only adds the in-crate alternative
+  source of truth); do NOT add a `Sinkhorn` feature gate; do
+  NOT change the `rbp-core` constants. Verification
+  commands: `cargo test -p rbp-transport` (the new lib tests
+  pass), `cargo build -p rbp-transport` (the new types
+  compile), `cargo check --workspace` (no downstream
+  breakage), `cargo test --workspace` (full workspace
+  remains green), `cargo fmt --check`. Required tests: the
+  14 lib tests listed above; no padding of unrelated suites.
+  Dependencies: the existing `Support`, `Density`, `Measure`,
+  `Coupling` traits in `crates/transport/src/{support,density,
+  measure,coupling}.rs`; the existing
+  `rbp-core::SINKHORN_*` constants in `crates/util/src/lib.rs`.
+  Estimated scope: M. Completion signal:
+  `cargo test -p rbp-transport` is green with ≥ 14 tests
+  passing; the `Sinkhorn` struct produces a `cost()` within
+  1e-2 of the known 1D EMD on a 1-point-shift fixture; the
+  `Coupling` trait is finally implemented in-crate; the
+  full `cargo test --workspace` and `cargo fmt --check`
+  remain green; `crates/transport/src/greenkhorn.rs` is no
+  longer a single empty struct definition.
 
 ## Deferred items (need operator decision before promotion)
 

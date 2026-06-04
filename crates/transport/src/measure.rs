@@ -26,3 +26,31 @@ pub trait Measure {
     /// Returns the cost of transporting mass from `x` to `y`.
     fn distance(&self, x: &Self::X, y: &Self::Y) -> f32;
 }
+
+/// Uniform L1 metric on `usize` buckets.
+///
+/// The cost of transporting one unit of mass from bucket `x` to bucket `y`
+/// is `|x - y| as f32`. This is the simplest nontrivial ground metric on
+/// the integer lattice and is the metric the `rbp-transport` Sinkhorn
+/// implementation uses by default. It satisfies the metric axioms
+/// (non-negativity, identity of indiscernibles, symmetry, triangle
+/// inequality) by construction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UniformMetric;
+
+impl UniformMetric {
+    /// Construct a new uniform L1 metric. Equivalent to
+    /// `UniformMetric::default()`; provided for call-site clarity.
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Measure for UniformMetric {
+    type X = usize;
+    type Y = usize;
+    fn distance(&self, x: &Self::X, y: &Self::Y) -> f32 {
+        let (a, b) = (*x as f32, *y as f32);
+        (a - b).abs()
+    }
+}
