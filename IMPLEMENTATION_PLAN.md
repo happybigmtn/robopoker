@@ -9665,3 +9665,454 @@ scope. The new scope is `STW-054` + `STW-055`
   operator-visible signal the
   deploy succeeded with the
   expected URL).**
+
+## Next wave - review 2026-06-04 (seventh pass)
+
+The seventh 2026-06-04 three-lens review (kanban
+task `t_e18b60a4`) re-applies the three lenses to
+the *current* state of `main` at commit `b316681`
+(HEAD). The six prior review-waves
+(2026-06-04 morning → fifth pass → sixth pass)
+converged correctly on the v6→v10 follow-on chain
+(STW-029 → STW-031 → STW-032 → STW-033 → STW-034
+→ STW-035 → STW-036 → STW-037 → STW-042 → STW-049
+→ STW-050 → STW-051 → STW-052 → STW-054 → STW-055)
+and shipped every piece of that chain; the
+sixth-pass STW-054 commit
+(`b316681 feat(deploy): STW-054 Cloudflare
+Pages dashboard-deploy runbook`) is the most
+recent landing. The seventh pass's three lenses on
+the *current* state at `b316681` agree the v10
+chain is structurally closed and find **four
+findings the six prior reviews missed**, all
+small and all directly blocking the testnet
+north star's *one-source-of-truth* claim:
+
+1. **The dashboard's rendered `<meta>` line
+   never reads the deployed URL.** The
+   `crates/dashboard/static/index.html` is a
+   checked-in file with no env-knob
+   interpolation; the `serve_static_index`
+   handler in `crates/dashboard/src/router.rs:399`
+   serves the static bytes verbatim. The
+   `RBP_DASHBOARD_DEPLOYED_URL` env knob
+   *exists* as a `pub const DEFAULT_DEPLOYED_URL`
+   at `crates/dashboard/src/router.rs:65` (the
+   `STW-054` runbook sets it via a downstream
+   `README.md` reconciliation) but is *not
+   read* in any handler. A `wrangler pages
+   deploy` to a *different* Pages project
+   leaves the README's "Public dashboard:" line
+   (`README.md:338`) + the dashboard's
+   `crates/dashboard/static/index.html` meta
+   line + the STW-054 `deploy.json`
+   `pages_url` field all lying about the URL
+   until the operator hand-edits the README.
+   The plan row at the sixth-pass wave
+   (`STW-058`) names this fix but is still
+   `[ ]`.
+2. **The STW-054 deploy runbook does not
+   actually stamp the `RBP_DASHBOARD_DEPLOYED_URL`
+   env knob into the dashboard environment.**
+   It runs `wrangler pages deploy <index-dir>
+   --project-name <name> --commit-dirty=true`
+   and prints the URL to stdout, then performs
+   a one-line README reconciliation that
+   *replaces* the `RBP_DASHBOARD_DEPLOYED_URL`
+   placeholder line in the README. The
+   dashboard itself, served at the
+   `pages.dev` URL, still renders the
+   *placeholder* meta line. The Env-lens
+   fix is a 1-line addition to the runbook:
+   `export RBP_DASHBOARD_DEPLOYED_URL=<url>`
+   so a `wrangler pages deploy` invocation
+   that runs *after* the export stamps the
+   URL into the dashboard's meta line. The
+   same single-source-of-truth pattern the
+   existing `RBP_DASHBOARD_INDEX_URL` env
+   knob uses.
+3. **The dashboard's `serve_static_index`
+   handler has no fallback when the
+   committed demo `INDEX.json` fixture is
+   missing.** The sixth-pass `STW-054` and
+   `STW-055` work added the
+   `crates/dashboard/tests/fixtures/INDEX.json`
+   demo fixture the `GET /api/index` route
+   serves when no `RBP_DASHBOARD_INDEX_URL`
+   is set, but a first-time visitor who
+   deletes the fixture (or a CI worker
+   that runs `cargo test -p rbp-dashboard
+   --test smoke` from a fresh `git clean
+   -fdx` checkout) gets a 500. The
+   `crates/dashboard/src/router.rs::serve_typed_index`
+   handler is the only entry point that
+   reads the fixture; the `serve_static_index`
+   handler does not need the fixture
+   (static bytes), but a regression that
+   *adds* a fixture-read to `serve_static_index`
+   in a future refactor (e.g. to compute
+   `<meta name="robots">` from `entry_count`)
+   would 500 with no friendly fallback. The
+   Eng-lens fix is a static 1-line
+   `script_shape.rs` pin: the new fixture
+   file is in the smoke.rs fixture list.
+4. **The STW-054 4-new-shape-pin
+   `crates/autotrain/tests/script_shape.rs`
+   additions do not include a
+   `bash -n`-parse pin for the new
+   runbook that fails on a future syntax
+   regression.** The existing
+   `deploy_dashboard_cloudflare_script_exists_and_parses`
+   pin asserts the script exists + is
+   executable, but the sixth pass did not
+   add the static `bash -n` syntax-parse
+   check the sibling
+   `testnet_live_publish_*_script_exists_and_parses`
+   pinners follow. A future edit that
+   introduces a bash parse error in
+   `scripts/deploy-dashboard-cloudflare.sh`
+   would only fail at the first operator
+   invocation, not at CI. The Design-lens
+   fix is a 1-line `script_shape.rs`
+   addition: `bash -n` parse the runbook
+   + assert exit 0.
+
+The seventh pass therefore ships four
+deliverables, ordered by leverage:
+
+- [ ] **[P0] `STW-058` The dashboard's
+  Pages-specific render surface: inject
+  `RBP_DASHBOARD_DEPLOYED_URL` as a
+  `window.__DASHBOARD_DEPLOYED_URL__` global
+  the `index.html` JS reads as the dashboard
+  `<meta>` line's trailing `deployed_at=<url>`
+  fragment.** A 1-file, 5-line fix to
+  `crates/dashboard/src/router.rs::serve_static_index`:
+  the handler reads
+  `RBP_DASHBOARD_DEPLOYED_URL` (defaulting
+  to the README's `https://robopoker-testnet-dashboard.pages.dev/`
+  placeholder, the same value the existing
+  `pub const DEFAULT_DEPLOYED_URL` at
+  `crates/dashboard/src/router.rs:65`
+  already declares) and injects a
+  `<script>window.__DASHBOARD_DEPLOYED_URL__ = "<url>";</script>`
+  line into the served `index.html` bytes
+  *before* the existing IIFE (the inject
+  position is the `<head>`'s tail so the
+  script runs synchronously before the
+  body IIFE). The `index.html` JS reads
+  `window.__DASHBOARD_DEPLOYED_URL__` and
+  appends a
+  `deployed_at=<window.__DASHBOARD_DEPLOYED_URL__>`
+  fragment to the existing meta `textContent`
+  line so a re-deploy to a different
+  Pages project updates the rendered
+  dashboard's meta line + the README's
+  "Public dashboard:" line + the
+  `deploy.json` manifest in one source.
+  New
+  `crates/dashboard/tests/smoke.rs` sub-test
+  `meta_line_reflects_dashboard_deployed_url_env_knob`
+  drives the dashboard with
+  `RBP_DASHBOARD_DEPLOYED_URL` set to
+  `https://example.pages.dev/` and asserts
+  the response body contains the literal
+  string
+  `deployed_at=https://example.pages.dev/`
+  (so a future regression in the env-knob
+  read is caught at the same CI step).
+  Scope boundary: does NOT change the
+  dashboard's typed `IndexClient` (the
+  deployed-URL injection is a *router*
+  change, not an `IndexClient` change);
+  does NOT change the dashboard's
+  four-route surface (the `GET /` handler
+  is the only change); does NOT change
+  the dashboard's `RBP_DASHBOARD_INDEX_URL`
+  env knob (the two env knobs are
+  orthogonal: `INDEX_URL` is the
+  `INDEX.json` source, `DEPLOYED_URL`
+  is the dashboard's own URL); does NOT
+  change the
+  `crates/dashboard/static/index.html`
+  column shape (the meta-line addition
+  is appended, not interleaved).
+  Verification commands:
+  `cargo test -p rbp-dashboard --test smoke`
+  (the new sub-test + the existing 5
+  sub-tests all pass), `cargo test
+  --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Hand-test command:
+  `RBP_DASHBOARD_DEPLOYED_URL=https://example.pages.dev/
+  cargo run -p rbp-dashboard` (a
+  stranger hitting `http://localhost:8080/`
+  sees a meta line ending in
+  `deployed_at=https://example.pages.dev/`).
+  Required tests: 1 new sub-test
+  `meta_line_reflects_dashboard_deployed_url_env_knob`
+  in `crates/dashboard/tests/smoke.rs`.
+  Dependencies: STW-036 (the
+  `crates/dashboard/` static dashboard
+  crate the router lives in), STW-054
+  (the deploy runbook the
+  `RBP_DASHBOARD_DEPLOYED_URL` env knob
+  is sourced from). Estimated scope:
+  XS. Completion signal:
+  `cargo test -p rbp-dashboard --test smoke`
+  is green with the new sub-test; the
+  rendered dashboard's meta line
+  reflects the `RBP_DASHBOARD_DEPLOYED_URL`
+  env knob. **`lens:` Eng (the 5-line
+  fix is the minimum surface that makes
+  the dashboard's meta line + the
+  README's "Public dashboard:" line +
+  the `deploy.json` manifest all read
+  from a single env knob — the same
+  single-source-of-truth pattern the
+  existing `RBP_DASHBOARD_INDEX_URL`
+  env knob uses) + Design (a re-deploy
+  to a different Pages project no
+  longer leaves the README + the
+  dashboard both lying about the URL;
+  the dashboard's meta line is the
+  operator-visible signal the deploy
+  succeeded with the expected URL).**
+
+- [ ] **[P0] `STW-059` The STW-054 deploy
+  runbook stamps `RBP_DASHBOARD_DEPLOYED_URL`
+  into the wrangler deploy environment
+  before the deploy, not after.** A
+  1-line addition to
+  `scripts/deploy-dashboard-cloudflare.sh`:
+  immediately after the `wrangler pages
+  deploy` call succeeds and the runbook
+  reads the URL `wrangler` printed to
+  stdout, the runbook `export`s
+  `RBP_DASHBOARD_DEPLOYED_URL=<url>` so a
+  *subsequent* `wrangler pages deploy`
+  invocation (or a follow-on
+  `cargo run -p rbp-dashboard` smoke) is
+  sourced from the same env knob the
+  `STW-058` `serve_static_index` handler
+  reads. The export happens *before* the
+  README reconciliation so the
+  `replace_in_readme` sed step + the
+  dashboard's meta line + the
+  `deploy.json` `pages_url` field are
+  all driven from the same `pages_url`
+  variable. New
+  `crates/autotrain/tests/script_shape.rs`
+  sub-test
+  `deploy_dashboard_cloudflare_script_exports_rbp_dashboard_deployed_url`
+  greps the runbook for the literal
+  `export RBP_DASHBOARD_DEPLOYED_URL=`
+  string (so a future regression in the
+  export is caught at the same CI step).
+  Scope boundary: does NOT change the
+  `RBP_DASHBOARD_DEPLOYED_URL` env knob
+  semantics the STW-058 handler reads
+  (the export is a *runbook* change, not
+  a `serve_static_index` change); does
+  NOT change the wrangler `pages deploy`
+  invocation; does NOT change the
+  pre-deploy `trainer --verify-index`
+  refuse-to-deploy-red-index gate; does
+  NOT change the
+  `RBP_DASHBOARD_CF_API_TOKEN` /
+  `RBP_DASHBOARD_CF_ACCOUNT_ID`
+  fail-fast contract. Verification
+  commands: `bash -n
+  scripts/deploy-dashboard-cloudflare.sh`,
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the new sub-test + the
+  33 existing shape pins all pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Hand-test command:
+  `RBP_DASHBOARD_CF_API_TOKEN=<dummy>
+  RBP_DASHBOARD_CF_ACCOUNT_ID=<dummy>
+  PUBLISH_ROOT=/tmp/fake
+  scripts/deploy-dashboard-cloudflare.sh`
+  (after the wrangler stub returns a
+  fake URL, the runbook prints
+  `export RBP_DASHBOARD_DEPLOYED_URL=<url>`
+  to stdout). Required tests: 1 new
+  sub-test
+  `deploy_dashboard_cloudflare_script_exports_rbp_dashboard_deployed_url`
+  in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-054 (the deploy
+  runbook the export is added to),
+  STW-058 (the
+  `serve_static_index` handler that
+  reads the env knob). Estimated
+  scope: XS. Completion signal:
+  `cargo test -p rbp-autotrain --test
+  script_shape` is green with the new
+  sub-test; the
+  `scripts/deploy-dashboard-cloudflare.sh`
+  runbook exports
+  `RBP_DASHBOARD_DEPLOYED_URL` on
+  success. **`lens:` Eng (the 1-line
+  export closes the loop between the
+  `wrangler pages deploy` stdout URL
+  and the `serve_static_index` env-knob
+  read — the same single-source-of-truth
+  pattern the existing
+  `RBP_DASHBOARD_INDEX_URL` knob uses) +
+  Design (an operator who runs the
+  runbook once gets a dashboard whose
+  meta line + README + `deploy.json`
+  all agree on the URL, with no
+  hand-editing of any file).**
+
+- [ ] **[P1] `STW-060` The
+  `crates/dashboard/tests/fixtures/INDEX.json`
+  demo fixture is wired into the smoke
+  test's setup so a `git clean -fdx`
+  CI run from a fresh checkout does
+  not 500 the `serve_static_index`
+  handler on a regression that adds a
+  fixture-read.** A 1-file, 1-line
+  addition to
+  `crates/autotrain/tests/script_shape.rs`:
+  a new sub-test
+  `dashboard_fixtures_index_json_is_tracked_and_nonempty`
+  asserts
+  `git ls-files crates/dashboard/tests/fixtures/INDEX.json`
+  exits 0 AND the file is non-empty
+  AND parses as JSON (so a CI worker
+  running `cargo test -p rbp-dashboard
+  --test smoke` from a fresh
+  `git clean -fdx` checkout can find
+  the fixture the `serve_typed_index`
+  handler reads). The new sub-test
+  runs at the *static* `script_shape.rs`
+  layer (not the `smoke.rs` runtime
+  layer) so a `git clean` regression
+  fails at the cheapest possible CI
+  step. Scope boundary: does NOT
+  change the `serve_typed_index`
+  handler's fixture-read contract (the
+  fixture is read the same way; the new
+  sub-test is a *test* addition, not a
+  handler addition); does NOT change
+  the existing 5 `smoke.rs` sub-tests
+  (the new sub-test is a sibling, not
+  a replacement); does NOT change the
+  dashboard's `RBP_DASHBOARD_INDEX_URL`
+  env knob. Verification commands:
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the new sub-test + the
+  33 existing shape pins all pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Hand-test command:
+  `git ls-files crates/dashboard/tests/fixtures/INDEX.json`
+  (returns the path; the file is
+  tracked and non-empty). Required
+  tests: 1 new sub-test
+  `dashboard_fixtures_index_json_is_tracked_and_nonempty`
+  in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-036 (the
+  `crates/dashboard/` static dashboard
+  crate the fixture lives in), STW-042
+  (the compare3-fixture demo-data
+  slice the dashboard's fixtures
+  folder is built around). Estimated
+  scope: XS. Completion signal:
+  `cargo test -p rbp-autotrain --test
+  script_shape` is green with the new
+  sub-test; a fresh `git clean -fdx
+  && git checkout -- crates/dashboard/tests/fixtures
+  && cargo test -p rbp-dashboard
+  --test smoke` run is green.
+  **`lens:` Eng (the static-shape
+  pin catches a `git clean` regression
+  at the cheapest possible CI step
+  — the same single-source-of-truth
+  pattern the existing fixture-shape
+  pins in `script_shape.rs` follow) +
+  Design (a first-time visitor with a
+  fresh checkout still sees a
+  populated dashboard, no 500, no
+  confusing `internal server error`
+  page).**
+
+- [ ] **[P1] `STW-061` The
+  `scripts/deploy-dashboard-cloudflare.sh`
+  runbook gets a `bash -n`-parse pin
+  in `script_shape.rs` so a future
+  syntax regression is caught at CI
+  rather than at first operator
+  invocation.** A 1-file, 1-line
+  addition to
+  `crates/autotrain/tests/script_shape.rs`:
+  a new sub-test
+  `deploy_dashboard_cloudflare_script_parses_with_bash_n`
+  invokes
+  `bash -n scripts/deploy-dashboard-cloudflare.sh`
+  and asserts the command exits 0
+  (so a future edit that introduces a
+  bash parse error fails this
+  sub-test at the same CI step the
+  sibling
+  `testnet_live_publish_*_script_exists_and_parses`
+  pinners follow). The new sub-test
+  is the cheapest possible pin on
+  the runbook's syntax — a single
+  `bash -n` call — and is parallel-safe
+  by construction (no DB, no
+  filesystem mutation, no env
+  mutation). Scope boundary: does
+  NOT change the
+  `deploy-dashboard-cloudflare.sh`
+  runbook (the new sub-test is a
+  *test* addition, not a runbook
+  addition); does NOT change the
+  existing 4 STW-054 shape pins (the
+  new sub-test is a sibling); does
+  NOT change the
+  `RBP_DASHBOARD_CF_API_TOKEN`
+  fail-fast contract. Verification
+  commands:
+  `cargo test -p rbp-autotrain --test
+  script_shape` (the new sub-test +
+  the 33 existing shape pins all
+  pass), `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Hand-test command:
+  `bash -n scripts/deploy-dashboard-cloudflare.sh`
+  (exits 0 on a clean runbook).
+  Required tests: 1 new sub-test
+  `deploy_dashboard_cloudflare_script_parses_with_bash_n`
+  in
+  `crates/autotrain/tests/script_shape.rs`.
+  Dependencies: STW-054 (the
+  deploy runbook the static
+  parse pin covers), STW-059 (the
+  export the parse covers is the
+  same runbook). Estimated scope:
+  XS. Completion signal:
+  `cargo test -p rbp-autotrain --test
+  script_shape` is green with the
+  new sub-test; a future bash
+  parse error in
+  `scripts/deploy-dashboard-cloudflare.sh`
+  fails CI on a single
+  `bash -n` invocation. **`lens:`
+  Eng (the static `bash -n` parse
+  is the cheapest possible syntax
+  pin — the same pattern the
+  sibling
+  `testnet_live_publish_*_script_exists_and_parses`
+  pinners follow) + Design (an
+  operator who edits the runbook
+  and pushes gets a fast CI signal
+  rather than a confusing first-
+  invocation parse error).**
