@@ -140,8 +140,22 @@ fn trainer_bin_path() -> PathBuf {
     )
 }
 
+/// STW-051: every subprocess invocation
+/// inherits `RBP_PUBLISH_INDEX_UTC=2026-06-04T00:00:00Z`
+/// from the parent (the test process). The
+/// `--publish-index-remote` arm does not
+/// itself read the env knob (it is a
+/// remote-uploader, not the aggregator), but
+/// the helper pins the same env knob the
+/// `publish_index.rs` integration helper
+/// pins so a future regression that
+/// re-introduces the env-knob read in a
+/// shared helper does not silently break
+/// the integration suite.
 fn trainer_bin() -> Command {
-    Command::new(trainer_bin_path())
+    let mut cmd = Command::new(trainer_bin_path());
+    cmd.env("RBP_PUBLISH_INDEX_UTC", "2026-06-04T00:00:00Z");
+    cmd
 }
 
 /// Per-process unique temp dir for the fixture. The

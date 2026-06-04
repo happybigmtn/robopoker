@@ -254,6 +254,32 @@ async fn smoke_dashboard_routes_against_committed_fixtures() {
         !body_str.contains("console.error("),
         "GET / body must not contain `console.error(` call (the no-console-error pin); got:\n{body_str}"
     );
+    // STW-051: the literal `<unknown>`
+    // must NOT appear in the rendered
+    // `index.html` (the pre-STW-051 JS
+    // fallback in `index.html:253` was
+    // `'...' || '<unknown>'` — the
+    // string leaked to a public visitor
+    // as a "this is a test fixture"
+    // tell on the dashboard's `meta`
+    // line). The new JS uses the
+    // *friendly* `(publish_root not
+    // stamped)` / `(created_at_utc not
+    // stamped — re-run with
+    // RBP_PUBLISH_INDEX_UTC set)`
+    // fallbacks; a future regression
+    // that re-introduces the literal
+    // `<unknown>` in the JS falls at
+    // the same CI step a visitor's
+    // page-source inspection would
+    // surface the literal. The
+    // assertion uses the literal
+    // string (not a regex) so the
+    // pin is exact + cheap.
+    assert!(
+        !body_str.contains("<unknown>"),
+        "GET / body must not contain the literal `<unknown>` (the STW-051 JS-fallback fix is live); got:\n{body_str}"
+    );
 
     // 2. `GET /api/index` — typed `PublishIndex` body.
     let (status, body, content_type) = get(app.clone(), "/api/index").await;

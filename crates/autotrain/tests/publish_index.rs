@@ -148,8 +148,24 @@ fn trainer_bin_path() -> PathBuf {
     )
 }
 
+/// STW-051: every subprocess invocation
+/// inherits `RBP_PUBLISH_INDEX_UTC=2026-06-04T00:00:00Z`
+/// from the parent (the test process) so the
+/// `trainer --publish-index` arm reads a real
+/// ISO-8601 stamp and the aggregator no longer
+/// falls back to the literal `<unknown>`
+/// sentinel. The pre-STW-051 helper did not
+/// set the env knob because the aggregator
+/// accepted an `Option<&str>` + wrote the
+/// `<unknown>` sentinel; the new shape fails
+/// fast with `PublishIndexError::MissingArg` on
+/// a missing arg, so the helper is now the
+/// shared fixture for the 4 integration
+/// sub-tests the `--publish-index` arm drives.
 fn trainer_bin() -> Command {
-    Command::new(trainer_bin_path())
+    let mut cmd = Command::new(trainer_bin_path());
+    cmd.env("RBP_PUBLISH_INDEX_UTC", "2026-06-04T00:00:00Z");
+    cmd
 }
 
 /// Per-process unique temp dir for the fixture. The

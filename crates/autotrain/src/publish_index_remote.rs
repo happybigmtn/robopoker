@@ -542,6 +542,41 @@ impl From<PublishIndexError> for PublishIndexRemoteError {
             PublishIndexError::NoEntries(s) => {
                 PublishIndexRemoteError::FileUnreadable(format!("no entries: {s}"))
             }
+            // STW-051: the new
+            // `PublishIndexError::MissingArg`
+            // variant — an aggregator-side
+            // fail-fast (the operator forgot to
+            // set `RBP_PUBLISH_INDEX_UTC` at
+            // the CLI boundary) — has no
+            // direct counterpart in
+            // `PublishIndexRemoteError`. The
+            // pre-upload gate the index-remote
+            // step runs is a re-verify of an
+            // *already-written* `INDEX.json`
+            // (the aggregator wrote it; the
+            // index-remote step reads it), so
+            // the `MissingArg` case cannot
+            // surface here in practice (the
+            // aggregator would have failed
+            // fast before writing the
+            // `INDEX.json` the index-remote
+            // step reads). The `From` impl
+            // routes the variant to
+            // `FileUnreadable` with a
+            // `publish_index: missing_arg:
+            // <name>` detail so the
+            // `From<PublishIndexError> for
+            // PublishIndexRemoteError`
+            // conversion is exhaustive; the
+            // surface remains the
+            // pre-upload gate's typed
+            // `PublishIndexRemoteError`
+            // (the `index-remote` arm's
+            // per-arm error line a CI
+            // scraper greps).
+            PublishIndexError::MissingArg(name) => PublishIndexRemoteError::FileUnreadable(
+                format!("publish_index: missing_arg: {name}"),
+            ),
         }
     }
 }
@@ -1190,8 +1225,18 @@ mod tests {
         // under `<publish-root>/index/`. We call
         // the `publish_index` function directly
         // with a fixed `created_at_utc` so the
-        // lib test is byte-stable.
-        let _ = crate::publish_index::publish_index(&publish_root, Some("<unknown>"))
+        // lib test is byte-stable. STW-051: the
+        // pre-STW-051 helper passed
+        // `Some("<unknown>")` (the literal
+        // sentinel the pre-STW-051 aggregator
+        // wrote to the `created_at_utc` field
+        // on a missing env knob); the new
+        // shape requires a real ISO-8601 stamp
+        // and fails fast with
+        // `PublishIndexError::MissingArg` on a
+        // missing / empty stamp, so the helper
+        // pins `"2026-06-04T00:00:00Z"` instead.
+        let _ = crate::publish_index::publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("publish_index should drop a fresh INDEX.json");
         (publish_root, basename)
     }

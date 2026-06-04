@@ -196,15 +196,24 @@ pub const STW034_SUMMARY_FILENAME: &str = "SUMMARY.txt";
 /// aggregator JSON shape changes).
 pub const STW034_INDEX_RUNBOOK_VERSION: &str = "STW-034 v1";
 
-/// Sentinel value the indexer writes into
-/// `created_at_utc` when the
-/// `RBP_PUBLISH_INDEX_UTC` env knob is unset. The
-/// `<unknown>` sentinel is the same shape the
-/// STW-019 / STW-032 / STW-033 already use, and
-/// keeps the lib test + integration test
-/// byte-stable on a CI runner that does not
-/// stamp the env knob.
-pub const STW034_UNKNOWN_UTC: &str = "<unknown>";
+/// STW-051: the published `INDEX.json`'s
+/// `created_at_utc` is now a *required* ISO-8601
+/// string the caller stamps on the aggregator at
+/// the CLI boundary (the `RBP_PUBLISH_INDEX_UTC`
+/// env knob the `trainer --publish-index` arm
+/// reads). The pre-STW-051 aggregator accepted an
+/// `Option<&str>` + fell back to the literal
+/// `<unknown>` sentinel, which leaked to a public
+/// visitor as a "this is a test fixture" tell on
+/// the dashboard's `meta` line. The new shape
+/// fails fast with `PublishIndexError::MissingArg`
+/// when the env knob is unset so the literal
+/// `<unknown>` no longer appears in the rendered
+/// `INDEX.json` / dashboard JS / dashboard
+/// `meta` line. The pre-STW-051
+/// `STW034_UNKNOWN_UTC` constant is removed; the
+/// pre-STW-051 `Option<&str>` parameter is now a
+/// `&str` (no `unwrap_or` fallback in scope).
 
 /// The subdirectory under `<publish-root>/` the
 /// index step writes its output to. The index
@@ -448,6 +457,15 @@ pub struct PublishIndex {
 ///   zero-entry `INDEX.json` — a zero-entry
 ///   index is a signal the operator mis-pointed
 ///   the `--publish-index` flag).
+/// - `MissingArg` — STW-051: a required input
+///   (the ISO-8601 `created_at_utc` stamp the
+///   `RBP_PUBLISH_INDEX_UTC` env knob carries
+///   at the CLI boundary) was not provided. The
+///   pre-STW-051 aggregator fell back to the
+///   literal `<unknown>` sentinel for this
+///   case; the new shape fails fast so the
+///   literal `<unknown>` no longer leaks into
+///   the rendered `INDEX.json` / dashboard JS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishIndexError {
     /// A `remote_receipt.json` failed the
@@ -479,6 +497,19 @@ pub enum PublishIndexError {
     /// files. The aggregator refuses to write a
     /// zero-entry index.
     NoEntries(String),
+    /// STW-051: a required input arg was
+    /// not provided at the CLI boundary. The
+    /// `&'static str` payload is the env knob
+    /// the operator forgot to set (e.g.
+    /// `"RBP_PUBLISH_INDEX_UTC"`). The
+    /// pre-STW-051 aggregator silently fell
+    /// back to the literal `<unknown>`
+    /// sentinel in this case; the new shape
+    /// fails fast with the pinned per-arm
+    /// `live_proof publish_index error: missing
+    /// arg: <name>` line a CI scraper can
+    /// `grep`.
+    MissingArg(&'static str),
 }
 
 impl fmt::Display for PublishIndexError {
@@ -510,6 +541,9 @@ impl fmt::Display for PublishIndexError {
             }
             PublishIndexError::NoEntries(s) => {
                 write!(f, "live_proof publish_index error: no entries: {s}")
+            }
+            PublishIndexError::MissingArg(name) => {
+                write!(f, "live_proof publish_index error: missing arg: {name}")
             }
         }
     }
@@ -569,6 +603,23 @@ impl PublishIndexError {
             }
             PublishIndexError::NoEntries(s) => {
                 crate::error::TrainerError::Internal(format!("publish_index: no_entries: {s}"))
+                    .to_pinned_line()
+            }
+            PublishIndexError::MissingArg(name) => {
+                // STW-051: route the new
+                // fail-fast arm to the
+                // `Internal` kind with a
+                // pinned `publish_index:
+                // missing_arg: <name>` detail
+                // so the dashboard-greppable
+                // `trainer error: kind=...
+                // detail=...` line + the
+                // legacy `live_proof
+                // publish_index error:
+                // missing arg: <name>` line
+                // both fire on the same stderr
+                // write.
+                crate::error::TrainerError::Internal(format!("publish_index: missing_arg: {name}"))
                     .to_pinned_line()
             }
         }
@@ -678,9 +729,28 @@ pub struct PublishIndexOutput {
 /// remote-receipt verifier already enforce.
 pub fn publish_index<P: AsRef<Path>>(
     publish_root: P,
-    created_at_utc: Option<&str>,
+    created_at_utc: &str,
 ) -> Result<PublishIndexOutput, PublishIndexError> {
     let publish_root = publish_root.as_ref();
+    // STW-051: a missing / empty
+    // `created_at_utc` fails fast with the new
+    // `MissingArg` variant. The pre-STW-051
+    // shape accepted `Option<&str>` + fell back
+    // to the literal `<unknown>` sentinel, which
+    // leaked to a public visitor as a "this is a
+    // test fixture" tell on the dashboard's
+    // `meta` line. The new shape requires a
+    // non-empty ISO-8601 stamp; an empty string
+    // is the "operator forgot to set
+    // `RBP_PUBLISH_INDEX_UTC`" miss, and a
+    // whitespace-only string is the same miss
+    // (the trim-then-is-empty check is the
+    // cheapest in-CI proof a future regression
+    // that passes a placeholder through the
+    // `Mode::PublishIndex` arm fails the test).
+    if created_at_utc.trim().is_empty() {
+        return Err(PublishIndexError::MissingArg("RBP_PUBLISH_INDEX_UTC"));
+    }
     if !publish_root.is_dir() {
         return Err(PublishIndexError::PublishRoot(format!(
             "publish root {} does not exist or is not a directory",
@@ -833,9 +903,7 @@ pub fn publish_index<P: AsRef<Path>>(
     // `remote_receipt.total_bytes`).
     let total_bytes: u64 = entries.iter().map(|e| e.remote_receipt.total_bytes).sum();
     let entry_count = entries.len();
-    let created_at_utc = created_at_utc
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| STW034_UNKNOWN_UTC.to_string());
+    let created_at_utc = created_at_utc.to_string();
     let index = PublishIndex {
         publish_root: publish_root.display().to_string(),
         runbook_version: STW034_INDEX_RUNBOOK_VERSION.to_string(),
@@ -1155,9 +1223,21 @@ mod tests {
             STW034_INDEX_RUNBOOK_VERSION, "STW-034 v1",
             "runbook version string must be pinned"
         );
+        // STW-051: the pre-STW-051
+        // `STW034_UNKNOWN_UTC` sentinel
+        // constant is removed — the
+        // aggregator now requires a
+        // non-empty `created_at_utc` and
+        // fails fast with
+        // `PublishIndexError::MissingArg`
+        // on a missing arg. The new
+        // pinned surface is the
+        // `MissingArg` variant's
+        // `Display` impl, pinned below.
         assert_eq!(
-            STW034_UNKNOWN_UTC, "<unknown>",
-            "unknown-utc sentinel must be pinned"
+            PublishIndexError::MissingArg("RBP_PUBLISH_INDEX_UTC").to_string(),
+            "live_proof publish_index error: missing arg: RBP_PUBLISH_INDEX_UTC",
+            "publish-index MissingArg Display line must be pinned"
         );
         assert_eq!(
             STW034_INDEX_SUBDIR, "index",
@@ -1215,7 +1295,7 @@ mod tests {
     #[test]
     fn publish_index_writes_index_json() {
         let (publish_root, basename) = setup_publish_root("writes-index");
-        let result = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let result = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         assert!(
             result.index_path.is_file(),
@@ -1305,7 +1385,7 @@ mod tests {
             serde_json::to_string_pretty(&receipt).expect("serialise tampered receipt");
         fs::write(&remote_receipt_path, tampered_str)
             .expect("rewrite remote_receipt.json with bogus s3_objects[0].sha256");
-        let result = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"));
+        let result = publish_index(&publish_root, "2026-06-04T00:00:00Z");
         match result {
             Err(PublishIndexError::RemoteReceiptRed(_)) => {}
             other => {
@@ -1330,17 +1410,29 @@ mod tests {
     /// `publish_index_is_byte_stable_for_unchanged_root`
     /// — re-running the indexer on an
     /// unchanged publish root produces a
-    /// byte-identical `INDEX.json`. The
-    /// `created_at_utc` falls back to the
-    /// `<unknown>` sentinel when the
-    /// `created_at_utc` arg is `None` so
-    /// the lib test is byte-stable.
+    /// byte-identical `INDEX.json` when the
+    /// caller stamps the same
+    /// `created_at_utc` ISO-8601 string. STW-051
+    /// re-scoped the test from
+    /// `publish_index(&publish_root, None)` to
+    /// `publish_index(&publish_root,
+    /// "2026-06-04T00:00:00Z")` because the
+    /// pre-STW-051 `None`-fallback wrote the
+    /// literal `<unknown>` sentinel into the
+    /// `created_at_utc` field — a "this is a
+    /// test fixture" tell a public visitor saw
+    /// on the dashboard's `meta` line. The new
+    /// shape pins a fixed ISO-8601 stamp in
+    /// the test body so the byte-stability
+    /// invariant still holds.
     #[test]
     fn publish_index_is_byte_stable_for_unchanged_root() {
         let (publish_root, _basename) = setup_publish_root("byte-stable");
-        let first = publish_index(&publish_root, None).expect("first index run must succeed");
+        let first = publish_index(&publish_root, "2026-06-04T00:00:00Z")
+            .expect("first index run must succeed");
         let first_bytes = fs::read(&first.index_path).expect("read first INDEX.json");
-        let second = publish_index(&publish_root, None).expect("second index run must succeed");
+        let second = publish_index(&publish_root, "2026-06-04T00:00:00Z")
+            .expect("second index run must succeed");
         let second_bytes = fs::read(&second.index_path).expect("read second INDEX.json");
         assert_eq!(
             first_bytes, second_bytes,
@@ -1348,8 +1440,8 @@ mod tests {
              byte-identical INDEX.json"
         );
         assert_eq!(
-            first.index.created_at_utc, STW034_UNKNOWN_UTC,
-            "the created_at_utc must fall back to <unknown> when no env knob is set"
+            first.index.created_at_utc, "2026-06-04T00:00:00Z",
+            "the created_at_utc must round-trip the fixed ISO-8601 stamp"
         );
         let _ = fs::remove_dir_all(&publish_root);
     }
@@ -1435,8 +1527,8 @@ mod tests {
             }
         }
         // Re-index the merged root.
-        let result = publish_index(&root_a, Some("2026-06-04T00:00:00Z"))
-            .expect("merged publish root must index");
+        let result =
+            publish_index(&root_a, "2026-06-04T00:00:00Z").expect("merged publish root must index");
         assert_eq!(
             result.index.entry_count, 2,
             "the merged publish root has exactly two entries; got {}",
@@ -1503,7 +1595,7 @@ mod tests {
     #[test]
     fn publish_index_sorted_by_receipt_basename() {
         let (publish_root, _basename) = setup_publish_root("sort-basename");
-        let result = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let result = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         let mut sorted = result.index.entries.clone();
         sorted.sort_by(|a, b| a.receipt_basename.cmp(&b.receipt_basename));
@@ -1523,7 +1615,7 @@ mod tests {
     #[test]
     fn publish_index_io_error_propagates_for_missing_root() {
         let bogus = fresh_dir("missing-root");
-        let result = publish_index(&bogus, Some("2026-06-04T00:00:00Z"));
+        let result = publish_index(&bogus, "2026-06-04T00:00:00Z");
         match result {
             Err(PublishIndexError::PublishRoot(s)) => {
                 assert!(
@@ -1549,7 +1641,7 @@ mod tests {
         // Create the `publish/`
         // subdir but no entries.
         fs::create_dir_all(empty.join(STW034_PUBLISH_SUBDIR)).expect("mkdir publish/");
-        let result = publish_index(&empty, Some("2026-06-04T00:00:00Z"));
+        let result = publish_index(&empty, "2026-06-04T00:00:00Z");
         match result {
             Err(PublishIndexError::NoEntries(_)) => {}
             other => panic!("empty root must produce NoEntries; got: {other:?}"),
@@ -1566,7 +1658,7 @@ mod tests {
     #[test]
     fn verify_index_rehashes_every_local_file() {
         let (publish_root, _basename) = setup_publish_root("verify-rehash");
-        let indexed = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let indexed = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         let index_dir = indexed.index_path.parent().unwrap().to_path_buf();
         let round_tripped = read_publish_index(&index_dir).expect("INDEX.json must round-trip");
@@ -1597,7 +1689,7 @@ mod tests {
     #[test]
     fn verify_index_rejects_tampered_entry() {
         let (publish_root, basename) = setup_publish_root("verify-tamper");
-        let indexed = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let indexed = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         let index_dir = indexed.index_path.parent().unwrap().to_path_buf();
         // Read the on-disk
@@ -1655,7 +1747,7 @@ mod tests {
     #[test]
     fn verify_index_phantom_uri_fails_with_missing_object() {
         let (publish_root, basename) = setup_publish_root("verify-phantom");
-        let indexed = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let indexed = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         let index_dir = indexed.index_path.parent().unwrap().to_path_buf();
         // Inject a phantom `s3_uri`
@@ -1710,7 +1802,7 @@ mod tests {
     #[test]
     fn publish_index_output_display_includes_pinned_prefix() {
         let (publish_root, _basename) = setup_publish_root("display-prefix");
-        let out = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let out = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         let s = out.to_string();
         assert!(
@@ -1885,7 +1977,7 @@ mod tests {
             "{\"hands\":8,\"wins\":5,\"losses\":3,\"net_chips\":40,\"mbb_per_100\":250.0000,\"mbb_ci95\":120.0000,\"win_rate\":0.6250,\"win_rate_ci95\":0.1700,\"blind\":2,\"blueprint_trained\":true,\"blueprint\":\"v1\",\"baseline\":\"preflop\",\"transcript\":true}\n",
         )
         .expect("write bench stdout");
-        let result = publish_index(&publish_root, Some("2026-06-04T00:00:00Z"))
+        let result = publish_index(&publish_root, "2026-06-04T00:00:00Z")
             .expect("green publish root must index");
         assert_eq!(result.index.entry_count, 1);
         let entry = &result.index.entries[0];
@@ -1912,6 +2004,97 @@ mod tests {
             round_trip.entries[0].bench.as_ref(),
             Some(bench),
             "the bench field must round-trip through serde_json"
+        );
+        let _ = fs::remove_dir_all(&publish_root);
+    }
+
+    /// `publish_index_missing_env_knob_returns_missing_arg`
+    /// — STW-051: the new
+    /// `PublishIndexError::MissingArg` fail-fast
+    /// path fires when the caller passes an
+    /// empty / whitespace-only
+    /// `created_at_utc` (the shape the
+    /// `Mode::PublishIndex` arm produces when
+    /// the operator forgot to set
+    /// `RBP_PUBLISH_INDEX_UTC`). The pre-STW-051
+    /// aggregator silently fell back to the
+    /// literal `<unknown>` sentinel in this case;
+    /// the new shape returns the typed
+    /// `PublishIndexError::MissingArg("RBP_PUBLISH_INDEX_UTC")`
+    /// so the CLI arm emits the pinned per-arm
+    /// `live_proof publish_index error: missing
+    /// arg: RBP_PUBLISH_INDEX_UTC` eprintln! +
+    /// exits 2. The `Display` impl is the
+    /// greppable shape the CI scraper pins.
+    /// The test covers the three "missing
+    /// arg" shapes a regression could
+    /// re-introduce: (1) the bare empty
+    /// string the default `unwrap_or` from
+    /// the pre-STW-051 `Option<&str>` shape
+    /// produced, (2) a whitespace-only
+    /// string (a future regression that
+    /// passes `Option::None.map(|s|
+    /// s.trim()).unwrap_or_default()` would
+    /// hit this case), and (3) the same
+    /// shape with a non-empty ISO-8601
+    /// stamp must NOT fire the
+    /// `MissingArg` arm.
+    #[test]
+    fn publish_index_missing_env_knob_returns_missing_arg() {
+        // Build a green publish root so the
+        // test's only failure mode is the
+        // `MissingArg` fail-fast. A
+        // pre-existing publish root is
+        // required because the
+        // `MissingArg` check fires BEFORE
+        // the publish-root-existence check
+        // (the order is the cheapest
+        // in-CI proof the new fail-fast is
+        // the very first thing the
+        // aggregator does — a future
+        // refactor that moves the check
+        // after the publish-root check
+        // would still pass this test as
+        // long as the MissingArg path
+        // remains reachable on a green
+        // publish root).
+        let (publish_root, _basename) = setup_publish_root("missing-arg");
+        // Case 1: empty string.
+        match publish_index(&publish_root, "") {
+            Err(PublishIndexError::MissingArg(name)) => {
+                assert_eq!(
+                    name, "RBP_PUBLISH_INDEX_UTC",
+                    "the MissingArg variant's payload must name the env knob the operator forgot to set"
+                );
+            }
+            other => panic!("empty `created_at_utc` must produce MissingArg; got: {other:?}"),
+        }
+        // Case 2: whitespace-only string.
+        match publish_index(&publish_root, "   \t  ") {
+            Err(PublishIndexError::MissingArg(name)) => {
+                assert_eq!(name, "RBP_PUBLISH_INDEX_UTC");
+            }
+            other => {
+                panic!("whitespace-only `created_at_utc` must produce MissingArg; got: {other:?}")
+            }
+        }
+        // Case 3: a non-empty ISO-8601 stamp
+        // must NOT fire the MissingArg arm
+        // (a future regression that
+        // over-eagerly fires the fail-fast
+        // on a real stamp fails here).
+        let result = publish_index(&publish_root, "2026-06-04T00:00:00Z");
+        assert!(
+            result.is_ok(),
+            "a real ISO-8601 stamp must NOT fire MissingArg; got: {result:?}"
+        );
+        // The Display impl is the
+        // greppable shape the CI scraper
+        // pins.
+        assert_eq!(
+            PublishIndexError::MissingArg("RBP_PUBLISH_INDEX_UTC").to_string(),
+            "live_proof publish_index error: missing arg: RBP_PUBLISH_INDEX_UTC",
+            "the MissingArg Display line is the greppable shape the CLI arm emits"
         );
         let _ = fs::remove_dir_all(&publish_root);
     }

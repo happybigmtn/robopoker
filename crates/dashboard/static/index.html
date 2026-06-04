@@ -242,15 +242,41 @@
           return r.json();
         })
         .then(function (index) {
-          // STW-050: the meta line renders the
-          // top-level `created_at_utc` verbatim.
-          // The previous fallback (`'<unknown>'`)
-          // is gone — the committed fixture
-          // (`tests/fixtures/index.json`)
-          // carries a real ISO-8601 timestamp
-          // now — so the meta line shows a real
-          // timestamp a public visitor sees.
-          meta.textContent = 'index: ' + (index.publish_root || '<unknown>') + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + (index.created_at_utc || '<unknown>');
+          // STW-051: the meta line uses
+          // *friendly* fallbacks instead of
+          // the pre-STW-051 sentinel string.
+          // The pre-STW-051 fallback was a
+          // "this is a test fixture" tell a
+          // public visitor saw when an
+          // `INDEX.json` was published with
+          // `RBP_PUBLISH_INDEX_UTC` unset.
+          // The new fallbacks are
+          // *actionable* — each names what
+          // the visitor is missing and how
+          // to populate it. The
+          // aggregator-side fail-fast
+          // (`PublishIndexError::MissingArg`)
+          // ensures the un-stamped sentinel
+          // no longer appears in the
+          // rendered `INDEX.json` (the
+          // upstream `crates/autotrain`
+          // change shipped in the same
+          // slice), so the
+          // `(created_at_utc not stamped)`
+          // JS fallback only fires for a
+          // hand-authored fixture or a
+          // pre-STW-051 INDEX.json a
+          // reader has lying around — the
+          // friendly message is the
+          // actionable alternative either
+          // way.
+          var publishRoot = index.publish_root
+            ? index.publish_root
+            : '(publish_root not stamped)';
+          var createdAt = index.created_at_utc
+            ? index.created_at_utc
+            : '(created_at_utc not stamped — re-run with RBP_PUBLISH_INDEX_UTC set)';
+          meta.textContent = 'index: ' + publishRoot + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + createdAt;
           tableHost.appendChild(renderTable(index));
         })
         .catch(function (e) {

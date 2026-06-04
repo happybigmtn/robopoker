@@ -544,8 +544,8 @@ fn fresh_output_path() -> PathBuf {
 #[derive(Debug)]
 #[cfg(feature = "database")]
 #[allow(dead_code)] // `wins` / `losses` are parsed for shape but not asserted; the
-                    // shape contract is "every BenchReport field is present" not
-                    // "every BenchReport field is asserted".
+// shape contract is "every BenchReport field is present" not
+// "every BenchReport field is asserted".
 struct ParsedBench {
     hands: u64,
     wins: u64,

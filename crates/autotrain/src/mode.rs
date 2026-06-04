@@ -1186,16 +1186,37 @@ impl Mode {
                 eprintln!("Usage: trainer --publish-index <publish-root>");
                 std::process::exit(2);
             }
-            // The `RBP_PUBLISH_INDEX_UTC` env knob
-            // is the timestamp the indexer stamps
-            // on the `INDEX.json`'s `created_at_utc`
-            // field; the lib test + integration test
-            // run without the env knob set and fall
-            // back to the `<unknown>` sentinel so
-            // the test is byte-stable.
-            let created_at_utc =
-                std::env::var("RBP_PUBLISH_INDEX_UTC").unwrap_or_else(|_| "<unknown>".to_string());
-            match crate::publish_index::publish_index(&path, Some(&created_at_utc)) {
+            // STW-051: the `RBP_PUBLISH_INDEX_UTC`
+            // env knob is now a *required*
+            // ISO-8601 stamp the aggregator
+            // fails fast on. The pre-STW-051
+            // arm fell back to the literal
+            // `<unknown>` sentinel when the
+            // env knob was unset, which
+            // leaked to a public visitor as a
+            // "this is a test fixture" tell
+            // on the dashboard's `meta` line.
+            // The new arm reads the env knob
+            // + passes the trimmed stamp (or
+            // the empty string on a missing
+            // env knob) into the aggregator,
+            // which fails fast with the
+            // pinned per-arm
+            // `live_proof publish_index error:
+            // missing arg: RBP_PUBLISH_INDEX_UTC`
+            // eprintln! + exits 2. The
+            // `var_os()` path returns `None`
+            // for an unset env knob + returns
+            // `Some(_)` for a set-but-empty
+            // env knob — both shapes are
+            // coerced to the empty string
+            // before the aggregator sees them
+            // so the `MissingArg` fail-fast
+            // is the only failure mode.
+            let created_at_utc_owned: String =
+                std::env::var("RBP_PUBLISH_INDEX_UTC").unwrap_or_default();
+            let created_at_utc: &str = &created_at_utc_owned;
+            match crate::publish_index::publish_index(&path, created_at_utc) {
                 Ok(out) => {
                     println!("{out}");
                     std::process::exit(0);

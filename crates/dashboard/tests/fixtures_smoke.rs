@@ -235,7 +235,78 @@ async fn real_index_shadows_demo_data() {
     let shadow_index = serde_json::json!({
         "publish_root": "/tmp/shadow",
         "runbook_version": "STW-034 v1",
-        "created_at_utc": "<unknown>",
+        // STW-053: the
+        // pre-STW-053
+        // fixture carried
+        // the literal
+        // `<unknown>`
+        // sentinel in the
+        // `created_at_utc`
+        // field. The
+        // STW-051
+        // source-side
+        // fix removed
+        // the
+        // `<unknown>`
+        // fallback from
+        // the
+        // aggregator
+        // entirely
+        // (the new
+        // shape fails
+        // fast with
+        // `PublishIndexError::MissingArg`
+        // on a missing
+        // arg), but
+        // the
+        // fixtures_smoke
+        // fixture
+        // still passed
+        // the literal
+        // through to
+        // the response
+        // body — a
+        // future
+        // regression
+        // that
+        // re-introduces
+        // a
+        // `<unknown>`
+        // literal in
+        // the lib's
+        // render path
+        // would pass
+        // the
+        // fixtures_smoke
+        // test (because
+        // the test
+        // feeds a
+        // `<unknown>`
+        // literal
+        // directly into
+        // the response
+        // body). The
+        // fix is a
+        // 3-line
+        // literal swap
+        // to realistic
+        // fixed-ISO-8601
+        // timestamps;
+        // the existing
+        // `compare3_fixture_renders_bench_card`
+        // +
+        // `real_index_shadows_demo_data`
+        // sub-tests
+        // pin *shape*,
+        // not specific
+        // timestamp
+        // strings, so
+        // the
+        // timestamp
+        // change is
+        // transparent to
+        // them.
+        "created_at_utc": "2026-06-04T05:00:00Z",
         "entry_count": 1,
         "total_bytes": 0,
         "entries": [{
@@ -252,10 +323,10 @@ async fn real_index_shadows_demo_data() {
                     "bundle_bytes": 0,
                     "receipt_basename": "compare3-fixture",
                     "runbook_version": "STW-033 v1",
-                    "created_at_utc": "<unknown>",
+                    "created_at_utc": "2026-06-04T14:01:07Z",
                     "dry_run": true
                 },
-                "uploaded_at_utc": "<unknown>",
+                "uploaded_at_utc": "2026-06-04T05:00:01Z",
                 "s3_objects": [],
                 "total_bytes": 0,
                 "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",

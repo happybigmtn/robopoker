@@ -7795,7 +7795,7 @@ leverage. The `STW-044` row below is a
 is NOT new scope. The new scope is `STW-051` +
 `STW-052` + `STW-053` + `STW-054`.
 
-- [ ] **[P0] `STW-051` Close the live
+- [x] **[P0] `STW-051` Close the live
   `crates/autotrain::PublishIndex` + dashboard
   `<unknown>`-literal leakage the four prior
   reviews missed.** Three changes in one slice:
@@ -8220,7 +8220,7 @@ is NOT new scope. The new scope is `STW-051` +
   *demo-data* answer that was the wrong
   default).**
 
-- [ ] **[P0] `STW-053` Sweep the 3 remaining
+- [x] **[P0] `STW-053` Sweep the 3 remaining
   `crates/dashboard/tests/fixtures_smoke.rs`
   `created_at_utc: "<unknown>"` literals the
   fourth-pass STW-050 under-counted.** The
