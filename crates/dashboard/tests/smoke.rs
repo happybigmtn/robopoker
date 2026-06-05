@@ -1295,3 +1295,125 @@ async fn serve_static_index_invalidates_cache_on_url_change() {
          {cached_url_after_second}"
     );
 }
+
+/// STW-063: the `serve_transcript` handler caches
+/// per-`id` transcript file bytes in the
+/// `TRANSCRIPT_CACHE` thread-local `HashMap` and
+/// invalidates the entry when the on-disk `mtime`
+/// changes. The pin: drive the dashboard's
+/// `GET /transcript/:id` route twice with the same
+/// id, assert the two bodies are byte-identical and
+/// the cache is populated, then overwrite the file
+/// with new bytes, wait for the mtime to change,
+/// and assert the third request serves the new
+/// content (cache invalidated).
+#[tokio::test]
+async fn serve_transcript_caches_file_bytes_across_requests() {
+    rbp_dashboard::clear_transcript_cache_for_test();
+    assert_eq!(
+        rbp_dashboard::transcript_cache_len_for_test(),
+        0,
+        "pre-test invariant: TRANSCRIPT_CACHE must be empty after clear"
+    );
+
+    // Use a dedicated fixture file so mutations do not race
+    // with sibling tests reading the shared fixture.
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    let transcript_path = fixture_dir.join("transcript-stw063-cache-test.json");
+    let id = "stw063-cache-test";
+    let content_v1 = r#"{"hand":{"id":"v1"},"participants":[],"plays":[]}"#;
+    std::fs::write(&transcript_path, content_v1).expect("write v1 transcript");
+    // RAII cleanup so a panic does not leak the temp file.
+    struct Cleanup {
+        path: PathBuf,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    let _cleanup = Cleanup {
+        path: transcript_path.clone(),
+    };
+
+    let static_index_html = Arc::new(
+        std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("static")
+                .join("index.html"),
+        )
+        .expect("read static index.html"),
+    );
+    let app = dashboard_app(AppState {
+        index_client: IndexClient::from_path(fixture_index_path()),
+        transcript_dir: fixture_dir.clone(),
+        static_index_html,
+    });
+
+    // 1. First request: cache miss.
+    let (status1, body1, _ct1) = get(app.clone(), &format!("/transcript/{id}")).await;
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "first GET /transcript/{id} must be 200"
+    );
+    assert_eq!(
+        body1,
+        content_v1.as_bytes(),
+        "first GET /transcript/{id} must serve v1 bytes"
+    );
+    assert_eq!(
+        rbp_dashboard::transcript_cache_len_for_test(),
+        1,
+        "STW-063 TRANSCRIPT_CACHE must have 1 entry after first request"
+    );
+
+    // 2. Second request: cache hit.
+    let (status2, body2, _ct2) = get(app.clone(), &format!("/transcript/{id}")).await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "second GET /transcript/{id} must be 200"
+    );
+    assert_eq!(
+        body1, body2,
+        "STW-063: two GET /transcript/{id} requests must return byte-identical bodies"
+    );
+    assert_eq!(
+        rbp_dashboard::transcript_cache_len_for_test(),
+        1,
+        "STW-063 TRANSCRIPT_CACHE must stay at 1 entry on second request"
+    );
+
+    // 3. Cache invalidation: overwrite file and ensure mtime changes.
+    let content_v2 = r#"{"hand":{"id":"v2"},"participants":[],"plays":[]}"#;
+    let original_mtime = std::fs::metadata(&transcript_path)
+        .unwrap()
+        .modified()
+        .unwrap();
+    loop {
+        std::fs::write(&transcript_path, content_v2).expect("write v2 transcript");
+        let new_mtime = std::fs::metadata(&transcript_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        if new_mtime != original_mtime {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let (status3, body3, _ct3) = get(app.clone(), &format!("/transcript/{id}")).await;
+    assert_eq!(
+        status3,
+        StatusCode::OK,
+        "third GET /transcript/{id} must be 200 after rewrite"
+    );
+    assert_eq!(
+        body3,
+        content_v2.as_bytes(),
+        "STW-063: after file rewrite, GET /transcript/{id} must serve new content"
+    );
+}

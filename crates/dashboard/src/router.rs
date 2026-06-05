@@ -34,6 +34,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use axum::Router;
 use axum::body::Body;
@@ -163,6 +164,58 @@ pub fn inject_cache_snapshot_for_test() -> Option<(String, String)> {
 pub fn clear_inject_cache_for_test() {
     INJECT_CACHE.with(|slot| {
         let _ = slot.borrow_mut().take();
+    });
+}
+
+// STW-063: per-thread-local cache the
+// `serve_transcript` handler consults on every
+// request. The slot holds a `Vec<(String,
+// SystemTime, Arc<Vec<u8>>)>` keyed on the
+// transcript `:id` path parameter; a request
+// whose `:id` matches a cached key AND whose
+// on-disk `mtime` matches the cached `mtime`
+// serves the cached `Arc<Vec<u8>>` clone
+// verbatim instead of re-running the
+// `std::fs::read` syscall. A request whose `:id`
+// is not cached, OR whose on-disk `mtime` has
+// changed (a new `trainer --bench` run wrote a
+// new `transcript-<id>.json`), re-runs
+// `std::fs::read` and overwrites the cache entry
+// so the next request's hit is the new
+// `(mtime, bytes)` pair.
+//
+// The cache is a `RefCell<Vec<...>>`
+// thread-local (not a `static Mutex<...>`)
+// because the `cargo test --test-threads=4`
+// parallel-test seam requires per-thread
+// isolation: a `static Mutex<...>` cache would
+// let test A's first request *overwrite* test B's
+// first request's cache entry, and the second
+// test would observe a cache hit on test A's
+// bytes — failing the test. The per-thread
+// `RefCell<Vec<...>>` slot gives each test a
+// private cache.
+thread_local! {
+    static TRANSCRIPT_CACHE: std::cell::RefCell<Vec<(String, SystemTime, Arc<Vec<u8>>)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// Return the number of entries in the
+/// `TRANSCRIPT_CACHE` on this thread. Used by the
+/// STW-063 integration test to assert the cache
+/// is populated / stable / invalidated correctly.
+pub fn transcript_cache_len_for_test() -> usize {
+    TRANSCRIPT_CACHE.with(|slot| slot.borrow().len())
+}
+
+/// Clear the `TRANSCRIPT_CACHE` slot on this
+/// thread. Used by the STW-063 integration test
+/// to start with an empty cache regardless of
+/// what a parallel `cargo test --test-threads=4`
+/// run left in another thread's `RefCell`.
+pub fn clear_transcript_cache_for_test() {
+    TRANSCRIPT_CACHE.with(|slot| {
+        slot.borrow_mut().clear();
     });
 }
 
@@ -910,8 +963,46 @@ async fn serve_transcript(State(state): State<AppState>, Path(id): Path<String>)
     // at, so the on-disk file the handler reads
     // is `transcripts/transcript-<id>.json`.
     let path = state.transcript_dir.join(format!("transcript-{id}.json"));
+    // STW-063: consult the per-thread TRANSCRIPT_CACHE.
+    // A cache hit whose mtime matches the on-disk file
+    // serves the cached `Arc<Vec<u8>>` clone verbatim.
+    // A cache miss or mtime mismatch re-reads the file
+    // and overwrites the cache entry.
+    let mtime = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+
+    let cached = TRANSCRIPT_CACHE.with(|slot| {
+        let vec = slot.borrow();
+        for (cached_id, cached_mtime, cached_bytes) in vec.iter() {
+            if cached_id == &id && mtime.as_ref() == Some(cached_mtime) {
+                return Some(cached_bytes.clone());
+            }
+        }
+        None
+    });
+
+    if let Some(bytes_arc) = cached {
+        let mut response = (StatusCode::OK, Body::from((*bytes_arc).clone())).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        return response;
+    }
+
     match std::fs::read(&path) {
         Ok(bytes) => {
+            if let Some(mtime) = mtime {
+                TRANSCRIPT_CACHE.with(|slot| {
+                    let mut vec = slot.borrow_mut();
+                    if let Some(pos) = vec.iter().position(|(cached_id, _, _)| cached_id == &id) {
+                        vec[pos] = (id, mtime, Arc::new(bytes.clone()));
+                    } else {
+                        vec.push((id, mtime, Arc::new(bytes.clone())));
+                    }
+                });
+            }
             let mut response = (StatusCode::OK, Body::from(bytes)).into_response();
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
