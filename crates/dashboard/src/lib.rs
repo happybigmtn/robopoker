@@ -94,7 +94,7 @@ pub use router::{AppState, dashboard_app, serve};
 /// `remove_var` / `Mutex<Option<bool>>` lib
 /// tests use elsewhere in the workspace.
 pub use router::{
-    DeployedUrlTestGuard, EmptyStateTestGuard, clear_deployed_url_for_test,
+    DeployedUrlTestGuard, EmptyStateTestGuard, InjectError, clear_deployed_url_for_test,
     clear_empty_state_for_test, clear_inject_cache_for_test, clear_transcript_cache_for_test,
     engaged_deployed_url_for_test, engaged_empty_state_for_test, inject_cache_snapshot_for_test,
     set_deployed_url_for_test, set_empty_state_for_test, transcript_cache_len_for_test,

@@ -1417,3 +1417,35 @@ async fn serve_transcript_caches_file_bytes_across_requests() {
         "STW-063: after file rewrite, GET /transcript/{id} must serve new content"
     );
 }
+
+/// STW-064: the `serve_static_index` handler returns
+/// `500 Internal Server Error` with a diagnostic body
+/// when the static `index.html` is missing the `</head>`
+/// tag the `inject_deployed_url` helper depends on.
+/// The pin: drive the dashboard with a malformed
+/// `static_index_html` (no `</head>`), assert the
+/// response is 500 + the body contains the expected
+/// `inject failed: static index.html is missing </head>`
+/// substring.
+#[tokio::test]
+async fn serve_static_index_returns_500_on_missing_head_tag() {
+    rbp_dashboard::clear_inject_cache_for_test();
+    let app = dashboard_app(AppState {
+        index_client: IndexClient::from_path(fixture_index_path()),
+        transcript_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures"),
+        static_index_html: Arc::new("<html><body>no head tag</body></html>".to_string()),
+    });
+    let (status, body, _ct) = get(app, "/").await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "STW-064: GET / with a </head>-less index.html must return 500"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    assert!(
+        body_str.contains("inject failed: static index.html is missing </head>"),
+        "STW-064: 500 body must contain the diagnostic headline; got: {body_str}"
+    );
+}

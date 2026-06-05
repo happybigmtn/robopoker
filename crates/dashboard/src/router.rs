@@ -700,20 +700,39 @@ pub fn static_index_html_path() -> PathBuf {
 /// would notice). The injection is a *router* change,
 /// not an `IndexClient` change — the dashboard's
 /// typed-read / four-route surface is unchanged.
-fn inject_deployed_url(html: &str, deployed_url: &str) -> String {
-    // Escape the URL for embedding in a JS string
-    // literal (a `</script>` substring in the URL
-    // would otherwise close the script tag early). The
-    // escape covers the JS string-context
-    // `\` / `"` / line-terminator characters; the URL
-    // is a `https://...` token the deploy runbook
-    // produces so the `\` / `"` escapes are
-    // defensive (a future operator who passes a
-    // non-URL token would see the `\` escape engage
-    // the same defensive path the existing
-    // `crates/autotrain/src/publish_index.rs`
-    // `PublishIndexError::MissingArg` validator
-    // follows).
+/// STW-064: error type for the `inject_deployed_url`
+/// helper. A future refactor that drops the static
+/// `index.html` `</head>` tag surfaces a 500 with a
+/// clear diagnostic instead of crashing the axum
+/// server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InjectError {
+    /// The static page is missing the `</head>` tag
+    /// the injection point depends on.
+    MissingHeadTag(usize),
+}
+
+impl std::fmt::Display for InjectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InjectError::MissingHeadTag(n) => write!(
+                f,
+                "inject failed: static index.html is missing </head> ({n} bytes loaded)"
+            ),
+        }
+    }
+}
+
+/// `inject_deployed_url` — STW-058's injection helper.
+/// Escapes the URL for JS string-context safety, finds
+/// the `</head>` delimiter in the static page, and
+/// splices a `<script>` tag that sets the
+/// `window.__DASHBOARD_DEPLOYED_URL__` global before
+/// the body IIFE runs. The function returns
+/// `Result<String, InjectError>` so a `</head>`-less
+/// page surfaces as a 500 with a diagnostic body
+/// instead of panicking the axum server.
+fn inject_deployed_url(html: &str, deployed_url: &str) -> Result<String, InjectError> {
     let escaped = deployed_url
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -721,18 +740,15 @@ fn inject_deployed_url(html: &str, deployed_url: &str) -> String {
         .replace('\r', "\\r")
         .replace('<', "\\u003c");
     let tag = "</head>";
-    let idx = html.rfind(tag).unwrap_or_else(|| {
-        panic!(
-            "static index.html is missing `</head>`; cannot inject \
-             RBP_DASHBOARD_DEPLOYED_URL global"
-        )
-    });
+    let idx = html
+        .rfind(tag)
+        .ok_or_else(|| InjectError::MissingHeadTag(html.len()))?;
     let inject = format!("<script>window.__DASHBOARD_DEPLOYED_URL__ = \"{escaped}\";</script>");
     let mut out = String::with_capacity(html.len() + inject.len() + tag.len());
     out.push_str(&html[..idx]);
     out.push_str(&inject);
     out.push_str(&html[idx..]);
-    out
+    Ok(out)
 }
 
 /// `GET /` — serve the static `index.html` the
@@ -777,7 +793,19 @@ async fn serve_static_index(State(state): State<AppState>) -> Response {
     // now a `Mutex` lock + a pointer compare + a
     // `String::clone` instead of a full
     // re-inject.
-    let body = cached_inject(&deployed_url, &state.static_index_html);
+    let body = match cached_inject(&deployed_url, &state.static_index_html) {
+        Ok(body) => body,
+        Err(err) => {
+            let body = err.to_string();
+            let mut response =
+                (StatusCode::INTERNAL_SERVER_ERROR, Body::from(body)).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            return response;
+        }
+    };
     let mut response = (StatusCode::OK, Body::from(body)).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -834,7 +862,7 @@ async fn serve_static_index(State(state): State<AppState>) -> Response {
 /// RAII guard + the test holds the guard for its
 /// full scope, so a parallel test's `Drop` is
 /// what the test is *not* testing).
-fn cached_inject(deployed_url: &str, html: &str) -> String {
+fn cached_inject(deployed_url: &str, html: &str) -> Result<String, InjectError> {
     // The `RefCell<Option<...>>` borrow is held
     // only across the cache hit check (a pointer
     // compare + a `String::clone`); the borrow
@@ -850,7 +878,7 @@ fn cached_inject(deployed_url: &str, html: &str) -> String {
     // thread for the handler's lifetime).
     if let Some((cached_url, cached_body)) = INJECT_CACHE.with(|slot| slot.borrow().clone()) {
         if cached_url == deployed_url {
-            return cached_body;
+            return Ok(cached_body);
         }
     }
     // Cache miss or url mismatch: recompute and
@@ -864,11 +892,11 @@ fn cached_inject(deployed_url: &str, html: &str) -> String {
     // the cost; subsequent requests with the same
     // URL on the same worker thread are a
     // `RefCell` borrow + a `String::clone`.
-    let body = inject_deployed_url(html, deployed_url);
+    let body = inject_deployed_url(html, deployed_url)?;
     INJECT_CACHE.with(|slot| {
         *slot.borrow_mut() = Some((deployed_url.to_string(), body.clone()));
     });
-    body
+    Ok(body)
 }
 
 /// `GET /api/index` — return the typed `PublishIndex` as
