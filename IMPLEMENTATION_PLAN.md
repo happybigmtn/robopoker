@@ -10059,7 +10059,7 @@ deliverables, ordered by leverage:
   confusing `internal server error`
   page).**
 
-- [ ] **[P1] `STW-061` The
+- [x] **[P1] `STW-061` The
   `scripts/deploy-dashboard-cloudflare.sh`
   runbook gets a `bash -n`-parse pin
   in `script_shape.rs` so a future

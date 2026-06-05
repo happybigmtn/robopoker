@@ -1877,6 +1877,39 @@ fn deploy_dashboard_cloudflare_script_emits_live_proof_headline() {
     );
 }
 
+#[test]
+fn deploy_dashboard_cloudflare_script_parses_with_bash_n() {
+    // STW-061 static `bash -n` parse pin for the STW-054
+    // Cloudflare Pages dashboard-deploy runbook. A future
+    // edit that introduces a bash syntax error fails this
+    // sub-test at the same CI step the sibling
+    // `testnet_live_publish_*_script_exists_and_parses` /
+    // `workspace_parallel_proof_three_script_exists_and_parses`
+    // pinners follow, before any operator tries to invoke the
+    // runbook in production.
+    let p = deploy_dashboard_cloudflare_script_path();
+    assert!(
+        p.exists(),
+        "STW-061 Cloudflare Pages dashboard-deploy runbook script missing at {}; \
+         cannot run `bash -n` on a missing file",
+        p.display()
+    );
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/deploy-dashboard-cloudflare.sh");
+    assert!(
+        out.status.success(),
+        "STW-061 Cloudflare Pages dashboard-deploy runbook script must parse with \
+         `bash -n` (got exit {:?})\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // --- STW-037 operator-runnable 3-consecutive full-workspace
 //     proof runbook shape pins -----------------------------
 //
