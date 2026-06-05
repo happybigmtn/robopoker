@@ -344,3 +344,112 @@ fn gate_runs_end_to_end_with_clean_and_ghost_roadmaps() {
     // Cleanup the tempdir.
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+#[test]
+fn plan_staleness_gate_catches_p1_ghosts() {
+    // STW-065: the gate's new P1 pass catches unchecked [P1]
+    // rows in both the roadmap and the plan that duplicate a
+    // shipped STW. A P1 row is *not* a ghost when it carries
+    // the `RESCOPED 2026-06-05` marker.
+    let scratch =
+        std::env::temp_dir().join(format!("rbp-plan-staleness-p1-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", scratch.display()));
+
+    let roadmap = scratch.join("roadmap.md");
+    let plan = scratch.join("plan.md");
+
+    // Fabricated roadmap: one unchecked [P1] row with a STW id.
+    std::fs::write(
+        &roadmap,
+        "# fabricated roadmap\n\n\
+         - [ ] [P1] `STW-099` A ghost P1 row in the roadmap.\n",
+    )
+    .expect("write roadmap");
+
+    // Fabricated plan: the same STW is marked shipped, so the
+    // [P1] row in the roadmap is a ghost.
+    std::fs::write(
+        &plan,
+        "# fabricated plan\n\n\
+         - [x] `STW-099` shipped.\n\
+         - [ ] [P1] `STW-099` A ghost P1 row in the plan too.\n",
+    )
+    .expect("write plan");
+
+    let gate = script_path();
+    assert!(
+        gate.exists(),
+        "STW-065 gate script missing at {} (cannot drive P1 test)",
+        gate.display()
+    );
+
+    // Ghost run: the gate must exit 3 because both the roadmap
+    // and the plan have unchecked [P1] rows for a shipped STW.
+    let out = std::process::Command::new("bash")
+        .arg(&gate)
+        .env("RBP_PLAN_STALENESS_ROADMAP", &roadmap)
+        .env("RBP_PLAN_STALENESS_PLAN", &plan)
+        .env("RBP_PLAN_STALENESS_QUIET", "1")
+        .output()
+        .expect("spawn bash scripts/plan-staleness-gate.sh (p1 ghost)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "STW-065 P1 pass must exit 3 on a fabricated P1 ghost \
+         (unchecked [P1] rows duplicating a shipped STW)\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stdout.contains("plan staleness gate complete: checked=2 ghosts=2"),
+        "STW-065 P1 pass must report `ghosts=2` (one ghost in roadmap + one in plan); \
+         got stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("STW-099"),
+        "STW-065 P1 pass stderr must name the ghosted STW-099 on failure; \
+         got stderr:\n{stderr}"
+    );
+
+    // RESCOPED run: the same plan but with a RESCOPED marker
+    // on the P1 rows — the gate must exit 0.
+    std::fs::write(
+        &roadmap,
+        "# fabricated roadmap\n\n\
+         - [ ] [P1] `STW-099` A ghost P1 row RESCOPED 2026-06-05.\n",
+    )
+    .expect("write rescoped roadmap");
+    std::fs::write(
+        &plan,
+        "# fabricated plan\n\n\
+         - [x] `STW-099` shipped.\n\
+         - [ ] [P1] `STW-099` A ghost P1 row RESCOPED 2026-06-05.\n",
+    )
+    .expect("write rescoped plan");
+
+    let rescoped_out = std::process::Command::new("bash")
+        .arg(&gate)
+        .env("RBP_PLAN_STALENESS_ROADMAP", &roadmap)
+        .env("RBP_PLAN_STALENESS_PLAN", &plan)
+        .env("RBP_PLAN_STALENESS_QUIET", "1")
+        .output()
+        .expect("spawn bash scripts/plan-staleness-gate.sh (p1 rescoped)");
+    let rescoped_stdout = String::from_utf8_lossy(&rescoped_out.stdout);
+    let rescoped_stderr = String::from_utf8_lossy(&rescoped_out.stderr);
+    assert_eq!(
+        rescoped_out.status.code(),
+        Some(0),
+        "STW-065 P1 pass must exit 0 when the P1 rows carry a RESCOPED 2026-06-05 marker\n\
+         --- stdout ---\n{rescoped_stdout}\n--- stderr ---\n{rescoped_stderr}"
+    );
+    assert!(
+        rescoped_stdout.contains("plan staleness gate complete: checked=2 ghosts=0"),
+        "STW-065 P1 pass must report `ghosts=0` when RESCOPED; \
+         got stdout:\n{rescoped_stdout}\nstderr:\n{rescoped_stderr}"
+    );
+
+    // Cleanup the tempdir.
+    let _ = std::fs::remove_dir_all(&scratch);
+}

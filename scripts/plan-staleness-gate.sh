@@ -85,14 +85,6 @@ P0_TO_STW=$'Implement the `Schema`|STW-006\nAdd an end-to-end test in `crates/ga
 # scan is exact.
 P0_LINES=$(grep -nE '^- \[ \] \[P0\]' "${ROADMAP}" || true)
 
-if [ -z "${P0_LINES}" ]; then
-  # The roadmap has no unchecked P0 rows: the gate is trivially
-  # green (the retirement landed). Print the headline and exit.
-  echo "plan staleness gate: 0 unchecked [P0] rows found in ${ROADMAP}"
-  echo "plan staleness gate complete: checked=0 ghosts=0"
-  exit 0
-fi
-
 # Walk the claim map and test each P0 row individually. The
 # roadmap prose (and the worker-readable hint on line 1288) is
 # the source of truth for the token-to-STW mapping; this script
@@ -101,48 +93,99 @@ checked=0
 ghosts=0
 ghost_log=""
 
-while IFS='|' read -r CLAIM_SUB STW_ID; do
-  # Skip blank lines (the heredoc terminator produces one).
-  [ -z "${CLAIM_SUB}" ] && continue
-  checked=$((checked + 1))
-  # The P0 row is still `[ ]`. Is the STW it duplicates shipped?
-  # Shipped = `IMPLEMENTATION_PLAN.md` has `- [x] \`STW-006\``
-  # somewhere. The grep anchors on the `\`-quoted STW id and
-  # the `- [x] ` checkbox prefix to avoid matching prose that
-  # *mentions* a shipped STW id without being the shipped row
-  # itself.
-  if ! grep -qF "${CLAIM_SUB}" <<<"${P0_LINES}"; then
-    # The P0 row was rewritten / retired (e.g. claim text
-    # drifted off the published substring, or the row was
-    # removed entirely). Treat as a no-op so the gate doesn't
-    # spuriously fail when a refactor retires a row by
-    # rewriting its claim.
-    if [ "${QUIET}" != "1" ]; then
-      echo "plan staleness gate: <rewritten or retired P0 row matching '${CLAIM_SUB}'> — no current [ ] match in roadmap"
+if [ -n "${P0_LINES}" ]; then
+  while IFS='|' read -r CLAIM_SUB STW_ID; do
+    # Skip blank lines (the heredoc terminator produces one).
+    [ -z "${CLAIM_SUB}" ] && continue
+    checked=$((checked + 1))
+    # The P0 row is still `[ ]`. Is the STW it duplicates shipped?
+    # Shipped = `IMPLEMENTATION_PLAN.md` has `- [x] \`STW-006\``
+    # somewhere. The grep anchors on the `\`-quoted STW id and
+    # the `- [x] ` checkbox prefix to avoid matching prose that
+    # *mentions* a shipped STW id without being the shipped row
+    # itself.
+    if ! grep -qF "${CLAIM_SUB}" <<<"${P0_LINES}"; then
+      # The P0 row was rewritten / retired (e.g. claim text
+      # drifted off the published substring, or the row was
+      # removed entirely). Treat as a no-op so the gate doesn't
+      # spuriously fail when a refactor retires a row by
+      # rewriting its claim.
+      if [ "${QUIET}" != "1" ]; then
+        echo "plan staleness gate: <rewritten or retired P0 row matching '${CLAIM_SUB}'> — no current [ ] match in roadmap"
+      fi
+      continue
     fi
-    continue
-  fi
-  if grep -qE "^- \[x\] \`${STW_ID}\`" "${PLAN}"; then
-    ghosts=$((ghosts + 1))
-    # Capture the exact roadmap line that is GHOST so a worker
-    # reading the stderr can jump straight to the offender.
-    GHOST_LINE=$(grep -nF "${CLAIM_SUB}" <<<"${P0_LINES}" | head -n1)
-    ghost_log="${ghost_log}
+    if grep -qE "^- \[x\] \`${STW_ID}\`" "${PLAN}"; then
+      ghosts=$((ghosts + 1))
+      # Capture the exact roadmap line that is GHOST so a worker
+      # reading the stderr can jump straight to the offender.
+      GHOST_LINE=$(grep -nF "${CLAIM_SUB}" <<<"${P0_LINES}" | head -n1)
+      ghost_log="${ghost_log}
   GHOST: ${GHOST_LINE}
     duplicates shipped ${STW_ID} (see \`- [x] \`${STW_ID}\`\` in IMPLEMENTATION_PLAN.md)"
-  else
-    if [ "${QUIET}" != "1" ]; then
-      echo "plan staleness gate: <P0 row matching '${CLAIM_SUB}'> -> ${STW_ID} — not yet shipped (P0 is real)"
+    else
+      if [ "${QUIET}" != "1" ]; then
+        echo "plan staleness gate: <P0 row matching '${CLAIM_SUB}'> -> ${STW_ID} — not yet shipped (P0 is real)"
+      fi
     fi
+  done <<<"${P0_TO_STW}"
+fi
+
+# P1 pass (STW-065): scan both the roadmap and the plan for
+# unchecked `[P1]` rows that duplicate shipped STWs.
+# A `[ ] [P1]` row is a ghost when:
+#   1. It contains a `STW-NNN` id, AND
+#   2. `IMPLEMENTATION_PLAN.md` has a `- [x] \`STW-NNN\`` row, AND
+#   3. The P1 row itself does NOT carry a `RESCOPED 2026-06-05`
+#      marker (the retirement convention for deliberately
+#      re-opened or re-scoped P1 rows).
+# The pass is a sibling to the P0 pass; it contributes to the
+# same `checked` / `ghosts` / `ghost_log` accumulators and the
+# same exit-code contract (0 on green, 3 on ghost).
+
+P1_FILES=("${ROADMAP}" "${PLAN}")
+for P1_FILE in "${P1_FILES[@]}"; do
+  P1_LINES=$(grep -nE '^- \[ \] (\*\*)?\[P1\]' "${P1_FILE}" || true)
+  if [ -z "${P1_LINES}" ]; then
+    continue
   fi
-done <<<"${P0_TO_STW}"
+  while IFS= read -r P1_LINE; do
+    [ -z "${P1_LINE}" ] && continue
+    # Extract STW id from the P1 line (e.g. `STW-054`).
+    P1_STW=$(grep -oE 'STW-[0-9]+' <<<"${P1_LINE}" | head -n1 || true)
+    if [ -z "${P1_STW}" ]; then
+      # No STW id in this P1 row — the gate can't mechanically
+      # map it to a shipped item, so skip it.
+      continue
+    fi
+    checked=$((checked + 1))
+    # Is the STW shipped in the plan?
+    if grep -qE "^- \[x\].*\`${P1_STW}\`" "${PLAN}"; then
+      # Does the P1 row carry the RESCOPED marker?
+      if grep -qF 'RESCOPED 2026-06-05' <<<"${P1_LINE}"; then
+        if [ "${QUIET}" != "1" ]; then
+          echo "plan staleness gate: <P1 row ${P1_STW} in ${P1_FILE}> — shipped but RESCOPED (ok)"
+        fi
+      else
+        ghosts=$((ghosts + 1))
+        ghost_log="${ghost_log}
+  GHOST: ${P1_LINE}
+    duplicates shipped ${P1_STW} (see \`- [x] \`${P1_STW}\`\` in IMPLEMENTATION_PLAN.md)"
+      fi
+    else
+      if [ "${QUIET}" != "1" ]; then
+        echo "plan staleness gate: <P1 row ${P1_STW} in ${P1_FILE}> — not yet shipped (P1 is real)"
+      fi
+    fi
+  done <<<"${P1_LINES}"
+done
 
 # Headline line a CI dashboard greps.
 echo "plan staleness gate complete: checked=${checked} ghosts=${ghosts}"
 
 if [ "${ghosts}" -gt 0 ]; then
-  echo "plan staleness_gate FAIL: ${ghosts} ghost P0 row(s) in ${ROADMAP} duplicate shipped STW items.${ghost_log}" >&2
-  echo "plan staleness_gate hint: retire the [P0] row in ${ROADMAP} (e.g. flip to [x] or remove); the GHOST P0 list above mirrors steward/DRIFT.md." >&2
+  echo "plan staleness_gate FAIL: ${ghosts} ghost row(s) duplicate shipped STW items.${ghost_log}" >&2
+  echo "plan staleness_gate hint: retire the ghost row (e.g. flip to [x], remove, or add a RESCOPED 2026-06-05 marker); the GHOST list above mirrors steward/DRIFT.md." >&2
   exit 3
 fi
 

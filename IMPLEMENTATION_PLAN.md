@@ -5789,11 +5789,11 @@ leverage.
   changes and no per-arm grep
   prefix drift.**
 
-- [ ] **[P1] `STW-045` `scripts/trainer-observe.sh` wrapper
+- [ ] **[P1] `STW-045` `scripts/trainer-observe.sh` wrapper RESCOPED 2026-06-05**
   that prepends `date +%s%3N` to every stderr
   line the trainer emits and writes a
   `trainer.step.jsonl` per-run timeline
-  file.** Closes the "per-step machine-readable
+  file. Closes the "per-step machine-readable
   timeline" Design concern the morning wave
   named *without* the Rust `Step` enum +
   `StepLogger` refactor the morning wave
@@ -6719,11 +6719,11 @@ and `STW-048`.
   visible "this is a test fixture" tell
   in the deployed surface).**
 
-- [ ] **[P1] `STW-045` (carry-over from afternoon wave
+- [ ] **[P1] `STW-045` (carry-over from afternoon wave RESCOPED 2026-06-05**
   `t_35186537`) `scripts/trainer-observe.sh` wrapper
   that prepends `date +%s%3N` to every stderr line
   the trainer emits and writes a `trainer.step.jsonl`
-  per-run timeline file.** The third pass re-
+  per-run timeline file. The third pass re-
   confirms the morning wave's `STW-039` typed
   `Step` enum Rust module is the canonical
   "improve X" anti-pattern the task body
@@ -10192,7 +10192,7 @@ will break the test cryptically instead of gracefully.
 The ninth pass therefore ships five deliverables, ordered
 by leverage:
 
-- [ ] **[P0] `STW-065` The
+- [x] **[P0] `STW-065` The
   `scripts/plan-staleness-gate.sh` script
   extends its ghost-detection to also catch
   `[ ] [P1]` rows in both
@@ -11094,7 +11094,7 @@ deliverables, ordered by leverage:
   crash they have to read
   out of a log file).**
 
-- [ ] **[P1] `STW-065` The
+- [ ] **[P1] `STW-065` The RESCOPED 2026-06-05**
   `scripts/plan-staleness-
   gate.sh` script extends
   its ghost-detection to
