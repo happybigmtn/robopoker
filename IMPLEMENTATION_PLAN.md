@@ -10120,3 +10120,1002 @@ deliverables, ordered by leverage:
   and pushes gets a fast CI signal
   rather than a confusing first-
   invocation parse error).**
+
+## Next wave - review 2026-06-05
+
+The eighth 2026-06-05 three-lens review (kanban
+task `t_5afdfe58`) re-applies the three lenses to
+the *current* state of `main` at commit `7c2976b`
+(HEAD). The seven prior 2026-06-04 review-waves
+(morning → afternoon → third → fourth → fifth →
+sixth → seventh pass) all converged on a single
+verdict: the v6→v10 follow-on chain
+(STW-029 → STW-031 → STW-032 → STW-033 → STW-034
+→ STW-035 → STW-036 → STW-037 → STW-042 → STW-049
+→ STW-050 → STW-051 → STW-052 → STW-053 → STW-054
+→ STW-055 → STW-057 → STW-058 → STW-059 → STW-060)
+is **structurally closed and shipped** — every
+named v6/v7/v8/v9/v10 follow-on in
+`genesis/plans/000-ceo-testnet-roadmap.md` has a
+`[x] STW-NNN` row on `main` and a corresponding
+operator-runnable / CI-runnable surface. The
+seventh pass's four dashboard-deps findings
+(STW-057 + STW-058 + STW-059 + STW-060) are all
+landed on `7c2976b` (one cohesive `feat(dashboard,
+autotrain)` commit that advanced the static
+pinner layer and the `crates/dashboard/tests/
+fixtures/INDEX.json` fallback in lockstep). The
+v10 dashboard's `GET /` → `serve_static_index` →
+`index.html` JS → `<meta>` line is a *complete*
+single-source-of-truth chain (`RBP_DASHBOARD_
+DEPLOYED_URL` env knob ↔ `serve_static_index`
+injection ↔ `window.__DASHBOARD_DEPLOYED_URL__`
+global ↔ `meta.textContent` `deployed_at=...`
+fragment ↔ README `${RBP_DASHBOARD_DEPLOYED_URL
+:-robopoker-testnet-dashboard.pages.dev/}` shell
+form ↔ `deploy.json` `pages_url` field ↔
+`live_proof dashboard deploy complete: ...`
+headline) with one env knob as the universal
+source. The eighth pass's three lenses agree the
+chain is genuinely closed and find **five
+findings the seven prior reviews missed**, all
+small, all in code paths that the chain already
+touches but the prior reviews passed over
+because the seven reviews all converged on
+*wiring / contract / pin coverage* questions
+and never re-read the *runtime cost + error
+surface + shape pin completeness* of the
+already-shipped surfaces:
+
+1. **The `serve_static_index` handler
+   re-runs `inject_deployed_url()` on every
+   request, even though the input is
+   byte-deterministic in the env knob.** The
+   `crates/dashboard/src/router.rs::serve_static_index`
+   handler (line 546) reads the
+   `RBP_DASHBOARD_DEPLOYED_URL` env knob on
+   every `GET /` and calls
+   `inject_deployed_url(&state.static_index_html,
+   &deployed_url)` (line 562) which does 5
+   `.replace()` calls (backslash, double-quote,
+   newline, carriage-return, less-than) + a
+   `String::rfind("</head>")` + a
+   `format!()` injection + a triple
+   `String::push_str` triple (lines 503–536).
+   The `static_index_html` field on `AppState`
+   is `Arc<String>` (line 423, "loaded once at
+   startup") but the *injected* body is
+   reconstructed per request. With
+   `Cache-Control: no-cache` (line 570) every
+   page reload re-does this work. The
+   `DEPLOYED_URL_TEST_OVERRIDE` `Mutex<Option<
+   String>>` (line 92) is the only knob that
+   should invalidate a per-process cache; an
+   env-var change requires a `cargo run`
+   restart, so a `OnceLock<(String, String)>`
+   cache keyed on the env knob is safe. The
+   fix is a 1-file, ~10-line change to
+   `serve_static_index`: cache the
+   `(deployed_url, injected_body)` pair in a
+   `OnceLock`, only re-inject on a
+   `deployed_url()` mismatch. The cache
+   invalidates automatically on a `cargo run`
+   restart (the `OnceLock` is process-local).
+2. **The `serve_transcript` handler reads
+   the on-disk `transcript-<id>.json` file
+   on every request.** The
+   `crates/dashboard/src/router.rs::serve_transcript`
+   handler (line 654) does
+   `std::fs::read(&path)` (line 666) on every
+   `GET /transcript/<id>`. A refresh-hammer
+   from a `Download transcript` link (a CI
+   worker re-fetching the bundle to
+   re-verify) does the file I/O on every
+   request. The fix is a `DashMap<String,
+   Arc<Vec<u8>>>` (or a `Mutex<HashMap<...>>`
+   for the no-extra-deps path) keyed on the
+   `id` + a `Last-Modified` mtime check so a
+   new `trainer --replay` run invalidates the
+   cache automatically. 1-file, ~15-line
+   change.
+3. **The `inject_deployed_url` function
+   panics on a `</head>`-less static
+   page.** The `crates/dashboard/src/router.rs
+   ::inject_deployed_url` function (line 503)
+   `panic!`s at line 524–529 when the static
+   `index.html` is missing the `</head>` tag:
+   `panic!("static index.html is missing
+   `</head>`; cannot inject
+   RBP_DASHBOARD_DEPLOYED_URL global")`. The
+   current static `index.html` is checked-in
+   with the tag present (the `grep -c
+   </head>` returns 1), so the panic is dead
+   code today — but a future refactor that
+   replaces the static page (e.g. a
+   templated one) crashes the entire server
+   (the `unwrap_or_else` panic propagates up
+   through the `serve_static_index` handler
+   to the axum runtime) instead of returning
+   a 500. The Eng + Design fix is a 1-line
+   change: replace the panic with a
+   `Result<String, InjectError>` return + a
+   500 with a one-line diagnostic the
+   existing `not_found` / 500 helper can
+   emit. The fix is `Result`-shaped so a
+   smoke test can drive the missing-tag
+   path with a synthetic `index.html` byte
+   slice.
+4. **The plan-vs-reality staleness gate
+   (`STW-022`) only catches `[ ] [P0]`
+   ghost rows, not `[ ] [P1]` ghosts.** The
+   `scripts/plan-staleness-gate.sh` script
+   (line 82) only greps `- [ ] \[P0\] <claim>`
+   rows in the CEO roadmap and checks each
+   against the `[x] STW-NNN` rows in
+   `IMPLEMENTATION_PLAN.md`. The current
+   `IMPLEMENTATION_PLAN.md` has 14 unique
+   `[ ] STW-NNN` rows in the `## Active
+   items` section (STW-001, STW-038, STW-039,
+   STW-040, STW-041, STW-044, STW-045,
+   STW-046, STW-048, STW-054, STW-056,
+   STW-057, STW-060, STW-061) — of which
+   8 are stale ghosts of shipped work
+   (STW-045 shipped on `b5ad974`,
+   STW-048 already marked `SUPERSEDED`,
+   STW-054 shipped on `b316681`, STW-057 +
+   STW-060 shipped on `7c2976b`, STW-055
+   shipped on `e5081e8` but still listed as
+   `[ ]`, plus the [P1] siblings of the
+   shipped [P0] rows). The CEO-lens
+   highest-leverage thrust is to extend
+   the gate to flag `[ ] [P1]` rows in
+   *both* `genesis/plans/000-ceo-testnet-
+   roadmap.md` and `IMPLEMENTATION_PLAN.md`
+   that have a corresponding `[x] STW-NNN`
+   row, with a `RESCOPED 2026-06-05` marker
+   convention the prior 6th-pass STW-056
+   row already names. The fix is a ~20-line
+   change to `scripts/plan-staleness-gate.sh`
+   + a new `crates/autotrain/tests/
+   plan_staleness.rs` sub-test that drives
+   the new path with a synthetic 2-row
+   roadmap + a corresponding 2-row plan
+   and asserts the gate exits 3.
+5. **The dashboard's static `index.html`
+   fallback URL hard-codes the
+   `https://robopoker-testnet-dashboard.pages.dev/`
+   placeholder, duplicating the
+   `pub const DEFAULT_DEPLOYED_URL` the
+   Rust side declares.** The
+   `crates/dashboard/static/index.html`
+   line 392 reads
+   `var deployedUrl = (typeof window !==
+   'undefined' && window.__DASHBOARD_
+   DEPLOYED_URL__) || 'https://robopoker-
+   testnet-dashboard.pages.dev/';` — the
+   `'https://robopoker-testnet-dashboard
+   .pages.dev/'` literal is the
+   *JS-side duplicate* of the
+   `pub const DEFAULT_DEPLOYED_URL`
+   declaration at
+   `crates/dashboard/src/router.rs:65`.
+   A future operator who changes the
+   default URL (e.g. moves the testnet
+   dashboard to a new project) has to
+   remember to update *both* the Rust
+   const AND the JS literal — exactly the
+   single-source-of-truth violation the
+   STW-058 + STW-059 chain just closed for
+   the *non-default* case. The Design-lens
+   fix is a 1-line change: inject a second
+   `<script>window.__DASHBOARD_DEPLOYED_URL_
+   DEFAULT__ = "<url>";</script>` (sourced
+   from the Rust `DEFAULT_DEPLOYED_URL`
+   const) and change the fallback to read
+   the new global, so the JS + Rust are
+   one source.
+
+The eighth pass therefore ships five
+deliverables, ordered by leverage:
+
+- [ ] **[P0] `STW-062` The
+  `crates/dashboard/src/router.rs
+  ::serve_static_index` handler
+  caches the `(deployed_url,
+  injected_body)` pair in a
+  process-local `OnceLock<(String,
+  String)>` so a re-deploy to a
+  different Pages project still
+  picks up the new URL on the next
+  page load, but a refresh-hammer
+  from a CI worker re-fetching the
+  dashboard does not re-run the
+  5x `.replace()` + `rfind` +
+  `format!` + 3x `push_str` work
+  on every request.** A 1-file,
+  ~10-line change to
+  `crates/dashboard/src/router.rs
+  ::serve_static_index`: the
+  handler first reads the
+  `deployed_url()` value (line
+  561), then checks a
+  `static INJECT_CACHE:
+  OnceLock<(String, String)>` for
+  a cached `(url, body)` pair;
+  on a hit with a matching `url`
+  the cached `body` is served
+  verbatim; on a miss (or a
+  `url` mismatch) the handler
+  re-runs `inject_deployed_url`
+  and replaces the cache. The
+  `DEPLOYED_URL_TEST_OVERRIDE`
+  `Mutex<Option<String>>` (line
+  92) is consulted on every
+  request (it's the test
+  integration seam the STW-058
+  smoke test drives), so an
+  integration test that calls
+  `set_deployed_url_for_test(
+  "<url>")` followed by `set_
+  deployed_url_for_test(
+  "<other>")` and then asserts
+  the second response body
+  matches the second URL proves
+  the cache invalidates
+  correctly. Scope boundary:
+  does NOT change the
+  `inject_deployed_url` function
+  (the cache wraps it; the
+  function is unchanged); does
+  NOT change the
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob read semantics (the
+  `deployed_url()` helper is
+  unchanged); does NOT change
+  the `Cache-Control: no-cache`
+  response header (the cached
+  body is still served no-cache,
+  a CI worker still re-fetches
+  on every page load, but the
+  *work* the no-cache re-fetch
+  triggers is now a `HashMap`
+  lookup + a `String::clone`
+  instead of a full re-inject).
+  Verification commands:
+  `cargo test -p rbp-dashboard
+  --test smoke` (the new
+  sub-test + the existing 5
+  sub-tests all pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo
+  check --workspace`, `cargo
+  fmt --check`. Hand-test
+  command: `RBP_DASHBOARD_
+  DEPLOYED_URL=https://example
+  .pages.dev/ cargo run -p
+  rbp-dashboard` followed by
+  `curl -s http://localhost:
+  8080/ | grep deployed_at`
+  (returns the URL on every
+  request; a `time curl` of N
+  requests shows the per-
+  request CPU drops to ~0
+  after the first call).
+  Required tests: 1 new
+  sub-test in `crates/dashboard
+  /tests/smoke.rs`
+  (`serve_static_index_caches_
+  injected_body_across_requests`,
+  drives the dashboard twice
+  with the same env knob, asserts
+  the two response bodies are
+  byte-identical AND that the
+  second response is served from
+  the cache by asserting the
+  `Arc::strong_count` of the
+  `static_index_html` field is
+  stable across the two
+  requests — the cache is a
+  `OnceLock` so the count must
+  not grow on the second call).
+  Dependencies: STW-058 (the
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob read the cache
+  wraps), STW-036 (the
+  `crates/dashboard/` static
+  dashboard crate). Estimated
+  scope: XS. Completion
+  signal: `cargo test -p
+  rbp-dashboard --test smoke`
+  is green with the new
+  sub-test; the dashboard
+  serves a `GET /` with the
+  injected meta line + no
+  per-request re-inject work
+  after the first request.
+  **`lens:` Eng (the
+  `OnceLock` cache is the
+  cheapest possible memoization
+  shape — no `Mutex`, no
+  `RwLock`, no `Arc<HashMap>`,
+  the env knob reads
+  byte-deterministic across
+  requests so the cache hit
+  rate is ~100% in production)
+  + Design (a CI worker that
+  re-fetches the dashboard N
+  times in a row gets N
+  identical responses in N
+  microseconds instead of N
+  identical responses in N
+  hundred-microseconds; the
+  per-request CPU drops by
+  ~5x).**
+
+- [ ] **[P1] `STW-063` The
+  `crates/dashboard/src/router.rs
+  ::serve_transcript` handler
+  caches the per-`id`
+  `transcript-<id>.json` file
+  bytes in a `DashMap<String,
+  (SystemTime, Arc<Bytes>)>`
+  keyed on the `id` so a CI
+  worker re-fetching the same
+  transcript bundle on every
+  page reload amortizes the
+  `std::fs::read` work across
+  requests.** A 1-file,
+  ~15-line change to
+  `crates/dashboard/src/router.rs
+  ::serve_transcript`: the
+  handler does a
+  `DashMap::entry(id).or_
+  insert_with(|| { let bytes =
+  std::fs::read(&path); ... })`
+  + a `SystemTime::from(
+  path.metadata()?.mtime)`
+  check that invalidates the
+  entry on a `mtime` change
+  (so a new `trainer --bench`
+  run that re-writes
+  `transcript-<id>.json` is
+  picked up automatically). The
+  `DashMap` is the same
+  per-process cache the
+  autotrain trainer's
+  `PlanCache` (the
+  `crates/autotrain/src/
+  blueprint.rs` lazy-blueprint
+  hydrate) uses, so the
+  dependency is already in the
+  workspace's `Cargo.lock`.
+  Scope boundary: does NOT
+  change the `GET /transcript
+  /:id` route shape (the
+  handler is the only change);
+  does NOT change the
+  `RBP_DASHBOARD_TRANSCRIPT_DIR`
+  env knob; does NOT change
+  the `is_safe_id` validator
+  (the `id` is still validated
+  before the cache lookup);
+  does NOT change the
+  `404 Not Found` error
+  surface (a missing file
+  still returns 404, the cache
+  miss falls through to the
+  same `std::fs::read` path).
+  Verification commands:
+  `cargo test -p rbp-dashboard
+  --test smoke` (the new
+  sub-test + the existing 5
+  sub-tests all pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo
+  check --workspace`, `cargo
+  fmt --check`. Hand-test
+  command:
+  `RBP_DASHBOARD_TRANSCRIPT
+  _DIR=/tmp/rr cargo run -p
+  rbp-dashboard` followed by
+  `echo '<transcript>' >
+  /tmp/rr/transcript-abc.json`
+  and `curl -s
+  http://localhost:8080/
+  transcript/abc` (returns
+  the body; a `time curl` of
+  100 calls to the same `id`
+  shows the per-request cost
+  drops to ~0 after the first
+  call). Required tests: 1
+  new sub-test in
+  `crates/dashboard/tests/
+  smoke.rs`
+  (`serve_transcript_caches_
+  file_bytes_across_requests`,
+  writes a synthetic
+  `transcript-abc.json` to a
+  `tempfile::TempDir`, drives
+  the dashboard with `id=
+  "abc"` twice, asserts the
+  two response bodies are
+  byte-identical AND the
+  second response is served
+  from the cache by asserting
+  the `DashMap::len()` is
+  stable across the two
+  requests + a third request
+  that overwrites the
+  transcript file with new
+  bytes + a 1-second sleep +
+  a `touch -d` to bump the
+  mtime asserts the cache
+  invalidates correctly).
+  Dependencies: STW-036 (the
+  `crates/dashboard/` static
+  dashboard crate the
+  `serve_transcript` handler
+  lives in), STW-015 (the
+  `Transcript` bundle the
+  bench harness writes the
+  `transcript-<id>.json`
+  files from). Estimated
+  scope: S. Completion
+  signal: `cargo test -p
+  rbp-dashboard --test smoke`
+  is green with the new
+  sub-test; the dashboard
+  serves a `GET /transcript/
+  :id` with the file bytes
+  + no per-request `std::fs::
+  read` work after the first
+  request. **`lens:` Eng
+  (the `DashMap` + mtime
+  invalidation is the
+  cheapest possible per-`id`
+  memoization shape — the
+  existing workspace already
+  imports `DashMap` so no new
+  dep is added) + Design (a
+  CI worker re-fetching the
+  same transcript bundle
+  during a `trainer
+  --verify-bundle` re-verify
+  loop gets the bytes back
+  in microseconds instead of
+  the file-I/O latency the
+  current per-request
+  `std::fs::read` triggers).**
+
+- [ ] **[P1] `STW-064` The
+  `crates/dashboard/src/router.rs
+  ::inject_deployed_url` function
+  returns a `Result<String,
+  InjectError>` instead of
+  panicking on a `</head>`-less
+  page so a future refactor
+  that drops the static
+  `index.html` `</head>` tag
+  surfaces a 500 with a clear
+  diagnostic instead of
+  crashing the entire
+  axum server.** A 1-file,
+  ~15-line change to
+  `crates/dashboard/src/
+  router.rs`: the
+  `inject_deployed_url`
+  function (line 503) now
+  returns
+  `Result<String, InjectError>`
+  where `InjectError` is a
+  new `pub enum InjectError`
+  with a `MissingHeadTag`
+  variant carrying the static
+  page's `len()` for the
+  diagnostic body. The
+  `serve_static_index` handler
+  (line 546) matches on the
+  `Result` and returns
+  `StatusCode::INTERNAL_SERVER_ERROR`
+  + a one-line body the
+  existing `not_found` /
+  500 helper can emit (the
+  body is
+  `"inject failed:
+  static index.html is
+  missing </head>
+  (<N> bytes loaded)"`).
+  The `STW-062` cache wraps
+  the new `Result`-returning
+  function so a cache miss
+  on the new error path does
+  not poison the cache
+  (the cache stores only the
+  `Ok` body; a cache hit
+  always serves the cached
+  `Ok` body, the error path
+  is hit only on a fresh
+  `deployed_url()` mismatch).
+  Scope boundary: does NOT
+  change the
+  `inject_deployed_url`
+  function's escape sequence
+  (the 5 `.replace()` calls
+  are unchanged); does NOT
+  change the
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob read semantics
+  (the `deployed_url()`
+  helper is unchanged); does
+  NOT change the
+  `Cache-Control: no-cache`
+  response header. A 500
+  response is the right
+  failure mode — a
+  `</head>`-less page is a
+  deploy error, not a
+  user-correctable input
+  error. Verification
+  commands: `cargo test -p
+  rbp-dashboard --test smoke`
+  (the new sub-test + the
+  existing 5 sub-tests all
+  pass), `cargo test
+  --workspace --
+  --test-threads=4`, `cargo
+  check --workspace`, `cargo
+  fmt --check`. Hand-test
+  command: `RBP_DASHBOARD_
+  STATIC_INDEX_HTML_PATH=
+  /tmp/no-head.html
+  RBP_DASHBOARD_DEPLOYED_URL=
+  https://example.pages.dev/
+  cargo run -p rbp-dashboard`
+  (where `/tmp/no-head.html`
+  is a synthetic
+  `<html><body>no head tag
+  here</body></html>`); a
+  `curl -i http://localhost:
+  8080/` returns
+  `500 Internal Server Error`
+  + the diagnostic body. A
+  fresh `cargo run -p
+  rbp-dashboard` (no env
+  knob) returns the normal
+  200 + the meta line.
+  Required tests: 1 new
+  sub-test in
+  `crates/dashboard/tests/
+  smoke.rs`
+  (`serve_static_index_
+  returns_500_on_missing_
+  head_tag`, drives the
+  dashboard with a synthetic
+  `index.html` byte slice
+  that omits the `</head>`
+  tag + asserts the response
+  is 500 + the body contains
+  the literal
+  `inject failed: static
+  index.html is missing
+  </head>` substring).
+  Dependencies: STW-058
+  (the `serve_static_index`
+  handler the `Result`
+  return flows through),
+  STW-062 (the
+  `OnceLock<String, String>`
+  cache the `Result` is
+  cached in). Estimated
+  scope: XS. Completion
+  signal: `cargo test -p
+  rbp-dashboard --test
+  smoke` is green with the
+  new sub-test; a
+  `</head>`-less static
+  page surfaces a 500
+  instead of a server
+  panic. **`lens:` Eng (the
+  `Result`-return shape is
+  the cheapest possible
+  error-surface change — no
+  `Box<dyn Error>`, no
+  `anyhow::Error`, just a
+  single-variant enum
+  matching the existing
+  `IndexClientError` /
+  `InjectError` /
+  `RenderError` enum
+  pattern the dashboard
+  already follows) +
+  Design (an operator who
+  deploys a malformed
+  static page gets a
+  friendly 500 with a
+  diagnostic body instead
+  of a `thread 'main'
+  panicked at 'static
+  index.html is missing
+  </head>...'` server
+  crash they have to read
+  out of a log file).**
+
+- [ ] **[P1] `STW-065` The
+  `scripts/plan-staleness-
+  gate.sh` script extends
+  its ghost-detection to
+  also catch `[ ] [P1]`
+  rows in both
+  `genesis/plans/000-ceo-
+  testnet-roadmap.md` and
+  `IMPLEMENTATION_PLAN.md`
+  that have a corresponding
+  `[x] STW-NNN` row, with a
+  `RESCOPED 2026-06-05`
+  marker convention the
+  6th-pass `STW-056` row
+  already names, so the 8
+  stale `[ ] [P1]` ghost
+  rows in
+  `IMPLEMENTATION_PLAN.md`
+  (STW-038, STW-045,
+  STW-048, STW-054,
+  STW-057, STW-060, STW-061,
+  plus the [P1] siblings of
+  the shipped [P0] rows
+  STW-055 + STW-058 +
+  STW-059) get mechanically
+  flagged the same way
+  the existing P0 ghost
+  detection flags
+  `[ ] [P0]` rows.** A
+  1-script + 1-test change:
+  `scripts/plan-staleness-
+  gate.sh` adds a second
+  pass that greps both
+  files for `- [ ] \[P1\]
+  <claim>` rows, maps each
+  `[P1]` row's claim text to
+  a STW id via the same
+  static `STW_MAP` table
+  the existing P0 path
+  consults, and asserts
+  each `[P1]` row's STW id
+  is either `[x]` (ghost,
+  flag and exit 3) or
+  `RESCOPED 2026-06-05`
+  (the 6th-pass `STW-056`
+  row's explicit
+  convention, marked and
+  pass-through). The new
+  sub-test in
+  `crates/autotrain/tests/
+  plan_staleness.rs`
+  drops a synthetic 2-row
+  roadmap + a corresponding
+  2-row plan into a temp
+  dir, sets the env knob
+  the script reads, drives
+  the script, and asserts
+  the script exits 3 + the
+  stderr output names the
+  ghost row(s). The CEO-
+  lens highest-leverage
+  thrust: a future
+  `auto steward --report-
+  only` pass that surfaces
+  a "the plan has N stale
+  [P1] ghost rows" warning
+  gets caught at CI time
+  the same way the existing
+  P0 ghost detection
+  catches `[ ] [P0]`
+  rows. Scope boundary:
+  does NOT change the
+  existing P0 ghost
+  detection (the new P1
+  pass is a *sibling* pass
+  that runs after the P0
+  pass); does NOT change
+  the script's exit-code
+  contract (the script
+  still exits 0 on green
+  + 3 on ghost); does NOT
+  change the
+  `crates/autotrain/tests/
+  plan_staleness.rs`
+  P0-path sub-tests
+  (the new sub-test is a
+  sibling). Verification
+  commands: `scripts/
+  plan-staleness-gate.sh`
+  (the new P1 pass + the
+  existing P0 pass both
+  pass, headline
+  `plan staleness gate
+  complete: checked=...
+  ghosts=0`),
+  `cargo test -p
+  rbp-autotrain --test
+  plan_staleness` (the
+  new sub-test + the
+  existing 4 sub-tests
+  all pass), `cargo test
+  --workspace --
+  --test-threads=4`,
+  `cargo check
+  --workspace`, `cargo
+  fmt --check`. Hand-test
+  command: temporarily
+  un-`- [x]` the
+  `STW-057` row in
+  `IMPLEMENTATION_PLAN.md`
+  + run
+  `scripts/plan-staleness-
+  gate.sh` (exits 3 +
+  stderr names the
+  `STW-057` ghost); flip
+  back to `- [x]` + run
+  again (exits 0 + the
+  new P1 pass is part of
+  the headline count).
+  Required tests: 1 new
+  sub-test in
+  `crates/autotrain/tests/
+  plan_staleness.rs`
+  (`plan_staleness_gate_
+  catches_p1_ghosts`,
+  drives the script with
+  a synthetic 2-row
+  roadmap + plan + asserts
+  exit 3 + the stderr
+  output). Dependencies:
+  STW-022 (the existing
+  plan-staleness gate
+  the new P1 pass is
+  added to). Estimated
+  scope: S. Completion
+  signal: `scripts/
+  plan-staleness-gate.sh`
+  is green with the new
+  P1 pass; the 8 stale
+  `[ ] [P1]` ghost rows
+  in `IMPLEMENTATION_PLAN
+  .md` are mechanically
+  flagged the same way
+  the existing P0 ghost
+  detection flags
+  `[ ] [P0]` rows.
+  **`lens:` CEO (the
+  plan-staleness gate is
+  the single highest-
+  leverage piece of
+  plan-hygiene infra the
+  STW-022 slice ships;
+  extending it from P0
+  to P1 is the cheapest
+  possible close-out
+  for the 8 stale ghost
+  rows the 6th-pass
+  STW-056 row was meant
+  to mechanically
+  prevent from re-
+  appearing — and
+  extends the prevention
+  to the P1 surface the
+  STW-056 row covers
+  manually today) + Eng
+  (the 2-pass script
+  shape is the same
+  "P0 pass + P1 pass"
+  mechanical pattern the
+  existing script
+  already follows for
+  the `checked=0 ghosts=0`
+  headline; a future
+  `[P2]` pass would
+  mirror the new P1
+  pass verbatim).**
+
+- [ ] **[P1] `STW-066` The
+  `crates/dashboard/static
+  /index.html` `deployedUrl`
+  JS-side fallback
+  hard-coded at line 392
+  reads from a new
+  `window.__DASHBOARD_
+  DEPLOYED_URL_DEFAULT__`
+  global the
+  `crates/dashboard/src/
+  router.rs::serve_static_index`
+  handler injects from the
+  `pub const DEFAULT_
+  DEPLOYED_URL` Rust
+  declaration, so the
+  static JS fallback +
+  the Rust default are
+  one source.** A 1-file
+  JS-side + 1-file
+  Rust-side change: the
+  `serve_static_index`
+  handler's injection
+  point (line 530) now
+  emits *two* `<script>`
+  tags (one for the env-
+  knob value
+  `window.__DASHBOARD_
+  DEPLOYED_URL__` and one
+  for the Rust default
+  `window.__DASHBOARD_
+  DEPLOYED_URL_DEFAULT__`
+  sourced from the
+  existing
+  `pub const DEFAULT_
+  DEPLOYED_URL` at
+  `crates/dashboard/src/
+  router.rs:65`), and the
+  `index.html` JS line
+  392 reads the new
+  global as the
+  fallback (the line is
+  `var deployedUrl =
+  (typeof window !==
+  'undefined' &&
+  window.__DASHBOARD_
+  DEPLOYED_URL__) ||
+  window.__DASHBOARD_
+  DEPLOYED_URL_DEFAULT__
+  || '';`). The two
+  `<script>` tags are
+  injected as a single
+  `String` in the
+  `inject_deployed_url`
+  function so the
+  `STW-062` cache is
+  unchanged (one cache
+  value, one `Ok(String)`
+  body). Scope boundary:
+  does NOT change the
+  existing
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob read semantics
+  (the env knob is still
+  the primary source; the
+  new global is the
+  fallback); does NOT
+  change the
+  `pub const DEFAULT_
+  DEPLOYED_URL` value
+  (the const is unchanged;
+  the JS now reads the
+  const); does NOT change
+  the `index.html` meta
+  line's `deployed_at=...`
+  fragment (the meta line
+  is unchanged). The
+  Design-lens single-
+  source-of-truth fix
+  closes the last hard-
+  coded-URL
+  `duplicate-the-Rust-
+  const` violation in the
+  dashboard's static
+  surface. Verification
+  commands: `cargo test
+  -p rbp-dashboard --test
+  smoke` (the new sub-
+  test + the existing 5
+  sub-tests all pass),
+  `cargo test --workspace
+  -- --test-threads=4`,
+  `cargo check
+  --workspace`, `cargo
+  fmt --check`. Hand-test
+  command:
+  `RBP_DASHBOARD_DEPLOYED_URL=
+  https://example.pages.dev/
+  cargo run -p
+  rbp-dashboard` followed
+  by `curl -s http://
+  localhost:8080/ | grep
+  __DASHBOARD_DEPLOYED_
+  URL_DEFAULT__` (returns
+  the injected global
+  with the
+  `https://robopoker-
+  testnet-dashboard.pages
+  .dev/` value, sourced
+  from the Rust
+  `DEFAULT_DEPLOYED_URL`
+  const); a follow-on
+  `RBP_DASHBOARD_DEPLOYED_URL=
+  https://other.pages.dev/
+  cargo run -p
+  rbp-dashboard` + `curl
+  ... | grep deployed_at=`
+  returns the env-knob
+  value
+  `https://other.pages
+  .dev/` (the primary
+  source wins, the new
+  global is the
+  fallback). Required
+  tests: 1 new sub-test
+  in `crates/dashboard/
+  tests/smoke.rs`
+  (`serve_static_index_
+  injects_deployed_url_
+  default_global`,
+  drives the dashboard
+  with
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  unset + asserts the
+  response body contains
+  the literal
+  `window.__DASHBOARD_
+  DEPLOYED_URL_DEFAULT__
+  = "https://robopoker-
+  testnet-dashboard.pages
+  .dev/";` substring, the
+  same value the
+  `pub const DEFAULT_
+  DEPLOYED_URL` declares
+  — so a future refactor
+  that drifts the const
+  from the JS fallback is
+  caught at the same CI
+  step the existing
+  `meta_line_reflects_
+  dashboard_deployed_url_
+  env_knob` sub-test
+  drives). Dependencies:
+  STW-058 (the
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  env-knob read the new
+  global sits next to),
+  STW-062 (the
+  `OnceLock<String, String>`
+  cache the dual-tag
+  injection is cached
+  in). Estimated scope:
+  XS. Completion signal:
+  `cargo test -p
+  rbp-dashboard --test
+  smoke` is green with
+  the new sub-test; the
+  static `index.html`
+  `deployedUrl` fallback
+  reads from a
+  `window.__DASHBOARD_
+  DEPLOYED_URL_DEFAULT__`
+  global the Rust side
+  sources from the
+  `pub const DEFAULT_
+  DEPLOYED_URL`
+  declaration. **`lens:`
+  Design (the dual-tag
+  injection is the same
+  single-source-of-truth
+  pattern the existing
+  `RBP_DASHBOARD_DEPLOYED_URL`
+  + `RBP_DASHBOARD_INDEX_URL`
+  env knobs follow — the
+  JS-side default is now
+  sourced from the same
+  Rust const the README
+  references, so a future
+  operator who changes the
+  default has to change
+  *one* `pub const` line
+  instead of *two* files
+  in two languages) +
+  Eng (the dual-tag
+  injection is a 1-line
+  extension to the
+  existing single-tag
+  `inject_deployed_url`
+  function; the cache
+  shape is unchanged, the
+  escape sequence is
+  unchanged, the meta
+  line is unchanged).**
