@@ -1757,6 +1757,81 @@ fn deploy_dashboard_cloudflare_script_exports_rbp_dashboard_deployed_url() {
     );
 }
 
+#[test]
+fn deploy_dashboard_cloudflare_script_emits_live_proof_headline() {
+    // The STW-054 deploy runbook must append a
+    // `live_proof dashboard deploy complete: ...`
+    // headline line to its `SUMMARY.txt` after the
+    // `wrangler pages deploy` call succeeds. The
+    // headline is the same `grep ^live_proof`
+    // scrape contract the prior STW-019 + STW-032 +
+    // STW-033 + STW-034 + STW-035 + STW-036 runbooks
+    // pin (`live_proof publish ...` /
+    // `live_proof receipt verification ...` /
+    // `live_proof bundle verification ...` /
+    // `live_proof index verification ...` /
+    // `live_proof remote verification ...` /
+    // `live_proof index_remote verification ...`).
+    // A future regression that drops the
+    // `printf 'live_proof dashboard deploy complete:
+    // pages_url=%s files=%d bytes=%d\n' ... >> "$SUMMARY"`
+    // line fails this pin at the static shell-shape
+    // layer, before any Cloudflare Pages deploy
+    // is attempted.
+    let script = read(&deploy_dashboard_cloudflare_script_path());
+    assert!(
+        script.contains("live_proof dashboard deploy complete: pages_url="),
+        "STW-057 STW-054 Cloudflare Pages dashboard-deploy runbook script at {} must \
+         append a `live_proof dashboard deploy complete: pages_url=%s files=%d bytes=%d` \
+         headline to its `SUMMARY.txt` after the `wrangler pages deploy` call succeeds; \
+         a CI dashboard scraping the runbook via `grep ^live_proof` would not see the \
+         deploy step's headline, breaking the `live_proof ...` scrape contract the \
+         STW-019 + STW-032 + STW-033 + STW-034 + STW-035 + STW-036 runbooks already pin",
+        deploy_dashboard_cloudflare_script_path().display()
+    );
+    // (b) The `printf` must be ordered AFTER the
+    // `wrangler pages deploy` call site (the
+    // `PAGES_URL` / `FILES` / `BYTES` variables the
+    // printf references are computed from the deploy
+    // output). A regression that re-orders the printf
+    // above the `wrangler pages deploy` call site
+    // (e.g. a "headline-then-deploy" refactor) fails
+    // this pin. We assert by *string index* ordering
+    // (the deploy call site must appear in the
+    // script source BEFORE the printf line).
+    let deploy_idx = script
+        .find("wrangler pages deploy")
+        .expect("STW-054 deploy call site must be present in the script");
+    let printf_idx = script
+        .find("live_proof dashboard deploy complete: pages_url=")
+        .expect("STW-057 printf must be present in the script");
+    assert!(
+        deploy_idx < printf_idx,
+        "STW-057 `printf 'live_proof dashboard deploy complete: ...'` line must \
+         appear AFTER the `wrangler pages deploy` call site in the runbook source; \
+         a printf before the deploy would stamp a pre-deploy / placeholder URL into \
+         the headline (got printf at offset {printf_idx} before deploy at offset \
+         {deploy_idx})"
+    );
+    // (c) The printf must `>> "$SUMMARY"` (append,
+    // not truncate) so the runbook preserves the
+    // pre-deploy `SUMMARY.txt` content the STW-034
+    // publish-index chain wrote. A regression that
+    // rewrites the `>>` to `>` (truncate) would
+    // destroy the upstream `live_proof publish ...
+    // / live_proof index verification ...` lines
+    // a CI dashboard scrapes in the same file.
+    let printf_segment = &script[printf_idx..];
+    assert!(
+        printf_segment.contains(">> \"$SUMMARY\"") || printf_segment.contains(">>$SUMMARY"),
+        "STW-057 `printf 'live_proof dashboard deploy complete: ...'` line must \
+         `>> \"$SUMMARY\"` (append, not truncate) so the runbook preserves the \
+         pre-deploy `SUMMARY.txt` content the STW-034 publish-index chain wrote; \
+         a `>` (truncate) regression would destroy the upstream `live_proof ...` \
+         lines a CI dashboard scrapes in the same file"
+    );
+}
+
 // --- STW-037 operator-runnable 3-consecutive full-workspace
 //     proof runbook shape pins -----------------------------
 //
@@ -2188,4 +2263,116 @@ fn trainer_observe_script_summary_trailer_format_is_pinned() {
          scraper can `grep -oE 'exit=[0-9]+ cmd=.*'` and receive a stable per-run \
          summary"
     );
+}
+
+// --- STW-060 dashboard-fixtures INDEX.json tracking pin --------------
+//
+// The STW-036 dashboard crate's
+// `crates/dashboard/tests/fixtures/INDEX.json` demo
+// fixture must be tracked by `git ls-files` AND
+// non-empty AND parse as JSON, so a CI worker
+// running `cargo test -p rbp-dashboard --test smoke`
+// from a fresh `git clone` (or `git clean -fdx`
+// against a tracked-only checkout) finds the
+// fixture the smoke test's `IndexClient::from_path`
+// read expects. The pin runs at the *static*
+// `script_shape.rs` layer (not the `smoke.rs`
+// runtime layer) so a `git clean` regression
+// fails at the cheapest possible CI step —
+// the same single-source-of-truth pattern the
+// sibling
+// `testnet_live_publish_*_script_exists_and_parses`
+// pinners follow. Mirrors the STW-019 +
+// STW-032 + STW-033 + STW-034 + STW-035 +
+// STW-036 + STW-037 + STW-043 + STW-045 + STW-054
+// static-shape contract.
+
+/// Path to the STW-060 `INDEX.json` demo fixture the
+/// dashboard's `tests/fixtures/` folder ships. The
+/// path is resolved relative to the workspace root
+/// (the same convention `deploy_dashboard_cloudflare_script_path`
+/// follows) so a CI worker running
+/// `git ls-files` from any subdir lands on the
+/// right file.
+fn dashboard_fixtures_index_json_path() -> PathBuf {
+    workspace_root()
+        .join("crates")
+        .join("dashboard")
+        .join("tests")
+        .join("fixtures")
+        .join("INDEX.json")
+}
+
+#[test]
+fn dashboard_fixtures_index_json_is_tracked_and_nonempty() {
+    // (a) `git ls-files <path>` must exit 0 and print
+    // the path on stdout. A non-zero exit means the
+    // fixture is untracked / ignored / missing from
+    // the index — a future `git clean -fdx` would
+    // delete the file and the dashboard's smoke
+    // test would 500 on `IndexClient::from_path`'s
+    // `Io` error. We assert by exit code (not by
+    // stdout substring) so the test fails on a
+    // missing file regardless of the workspace's
+    // exact path layout.
+    let p = dashboard_fixtures_index_json_path();
+    let rel = p
+        .strip_prefix(&workspace_root())
+        .unwrap_or(&p)
+        .display()
+        .to_string();
+    let out = std::process::Command::new("git")
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg("--")
+        .arg(&rel)
+        .current_dir(&workspace_root())
+        .output()
+        .expect("spawn git ls-files crates/dashboard/tests/fixtures/INDEX.json");
+    assert!(
+        out.status.success(),
+        "STW-060 dashboard-fixtures `INDEX.json` must be tracked by git at {rel} \
+         (got exit {:?}); a `git clean -fdx` would delete the file and the \
+         `rbp-dashboard` smoke test would 500 on the next `IndexClient::from_path` \
+         read. Run `git add crates/dashboard/tests/fixtures/INDEX.json` to track it.\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // (b) The file must be non-empty. `git ls-files`
+    // exits 0 on a tracked empty file, so a
+    // hand-authoring regression that `git add`s an
+    // empty placeholder still fails the smoke test
+    // (an empty body fails `serde_json::from_str`
+    // with a "EOF while parsing" error). The
+    // non-empty check is the cheapest possible
+    // guard at the static layer.
+    let body = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    assert!(
+        !body.trim().is_empty(),
+        "STW-060 dashboard-fixtures `INDEX.json` at {} must be non-empty (got {} bytes); \
+         an empty fixture fails the dashboard smoke test's `IndexClient::from_path` \
+         parse with a `serde_json` EOF error",
+        p.display(),
+        body.len()
+    );
+    // (c) The body must parse as JSON. A regression
+    // that hand-edits the fixture and breaks the
+    // JSON syntax (e.g. drops a trailing comma)
+    // fails the dashboard smoke test's typed
+    // `PublishIndex` read; the static pin catches
+    // the same regression at the cheapest possible
+    // CI step. We parse via `serde_json::Value`
+    // (a shape-blind parse) so the pin is robust
+    // to future `PublishIndex` shape changes —
+    // the shape contract is the `smoke.rs`
+    // integration test's job, not this static
+    // pin's.
+    let _v: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|e| {
+        panic!(
+            "STW-060 INDEX.json at {} must parse as JSON: {e}",
+            p.display()
+        )
+    });
 }

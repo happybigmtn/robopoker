@@ -1,0 +1,59 @@
+{
+  "publish_root": "/srv/dev/repos/robopoker/publish-demo",
+  "runbook_version": "STW-034 v1",
+  "created_at_utc": "2026-06-04T05:00:00Z",
+  "entry_count": 1,
+  "total_bytes": 19784,
+  "entries": [
+    {
+      "receipt_basename": "demo-fixture",
+      "receipt_dir": "/srv/dev/repos/robopoker/publish-demo/demo-fixture",
+      "remote_receipt_path": "/srv/dev/repos/robopoker/publish-demo/demo-fixture/remote/remote_receipt.json",
+      "remote_receipt": {
+        "plan": {
+          "bucket": "robopoker-testnet-dashboard",
+          "prefix": "demo-fixture/",
+          "region": "us-east-1",
+          "s3_objects": [
+            {
+              "local_path": "/srv/dev/repos/robopoker/publish-demo/demo-fixture/bundle.tar.gz",
+              "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "bytes": 19260,
+              "s3_uri": "s3://robopoker-testnet-dashboard/demo-fixture/bundle.tar.gz"
+            }
+          ]
+        },
+        "publish_remote_receipt": {
+          "bucket": "robopoker-testnet-dashboard",
+          "prefix": "demo-fixture/",
+          "region": "us-east-1",
+          "bundle_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "bundle_bytes": 19260,
+          "receipt_basename": "demo-fixture",
+          "runbook_version": "STW-033 v1",
+          "created_at_utc": "2026-06-04T05:00:00Z",
+          "dry_run": true
+        },
+        "uploaded_at_utc": "2026-06-04T05:00:01Z",
+        "s3_objects": [
+          {
+            "local_path": "/srv/dev/repos/robopoker/publish-demo/demo-fixture/bundle.tar.gz",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "bytes": 19260,
+            "s3_uri": "s3://robopoker-testnet-dashboard/demo-fixture/bundle.tar.gz"
+          }
+        ],
+        "total_bytes": 19260,
+        "bundle_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "runbook_version": "STW-033 v1"
+      },
+      "bench": {
+        "blueprint": "v1",
+        "baseline": "fish",
+        "mbb_per_100": 12.5,
+        "mbb_ci95": 4.2,
+        "win_rate": 0.5625
+      }
+    }
+  ]
+}
