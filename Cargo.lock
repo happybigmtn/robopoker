@@ -2244,6 +2244,7 @@ dependencies = [
  "bincode",
  "const_format",
  "log",
+ "petgraph 0.7.1",
  "rand",
  "rbp-cards",
  "rbp-core",

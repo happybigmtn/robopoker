@@ -37,7 +37,8 @@ impl NlheEncoder {
         let subgame = Path::default();
         let present = self.abstraction(&game.sweat());
         let choices = game.as_ref().choices(0);
-        NlheInfo::from((subgame, present, choices))
+        let position = game.as_ref().turn().position();
+        NlheInfo::from((subgame, present, choices, position))
     }
 }
 
@@ -58,7 +59,8 @@ impl rbp_mccfr::Encoder for NlheEncoder {
         let subgame = past.iter().map(|e| Edge::from(*e)).collect::<Path>();
         let present = self.abstraction(&game.sweat());
         let choices = game.as_ref().choices(subgame.aggression());
-        NlheInfo::from((subgame, present, choices))
+        let position = game.as_ref().turn().position();
+        NlheInfo::from((subgame, present, choices, position))
     }
 }
 
@@ -77,5 +79,13 @@ impl rbp_database::Hydrate for NlheEncoder {
             .map(|(obs, abs)| (Isomorphism::from(obs), Abstraction::from(abs)))
             .collect::<BTreeMap<Isomorphism, Abstraction>>();
         Self(lookup)
+    }
+}
+
+#[cfg(test)]
+impl NlheEncoder {
+    /// Test-only constructor from a pre-built lookup map.
+    pub fn from_map(map: BTreeMap<Isomorphism, Abstraction>) -> Self {
+        Self(map)
     }
 }

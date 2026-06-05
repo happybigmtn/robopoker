@@ -3,16 +3,18 @@ use super::*;
 use rbp_gameplay::*;
 use rbp_mccfr::*;
 
-/// NLHE public state: subgame history and available actions.
+/// NLHE public state: subgame history, available choices, and acting position.
 ///
-/// Stores the current-street action sequence and the available choices at this
-/// decision point. Both are encoded as [`Path`] for compact 64-bit representation.
+/// Stores the current-street action sequence, the available choices at this
+/// decision point, and the seat/position of the player to act. All three are
+/// encoded as compact 64-bit representations where possible.
 ///
 /// # Design
 ///
 /// Only what's needed for info set indexing:
 /// - `subgame`: Current-street action history (resets on each Draw)
 /// - `choices`: Available actions at this decision point
+/// - `position`: Seat/position of the acting player (0 or 1 in heads-up)
 ///
 /// Street information comes from [`NlheSecret`] which embeds street in its encoding.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -20,12 +22,17 @@ use rbp_mccfr::*;
 pub struct NlhePublic {
     subgame: Path,
     choices: Path,
+    position: usize,
 }
 
 impl NlhePublic {
-    /// Creates a new public state from subgame history and available choices.
-    pub fn new(subgame: Path, choices: Path) -> Self {
-        Self { subgame, choices }
+    /// Creates a new public state from subgame history, available choices, and position.
+    pub fn new(subgame: Path, choices: Path, position: usize) -> Self {
+        Self {
+            subgame,
+            choices,
+            position,
+        }
     }
     /// Current-street historical edges as a Path.
     pub fn subgame(&self) -> Path {
@@ -34,6 +41,10 @@ impl NlhePublic {
     /// Aggression (trailing aggressive actions) for bet sizing grid selection.
     pub fn aggression(&self) -> usize {
         self.subgame.aggression()
+    }
+    /// Seat/position of the acting player.
+    pub fn position(&self) -> usize {
+        self.position
     }
 }
 
@@ -61,7 +72,7 @@ mod tests {
         .into_iter()
         .collect::<Path>();
         let choices = Path::default();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, 0);
         assert_eq!(public.aggression(), 2);
     }
     #[test]
@@ -70,7 +81,7 @@ mod tests {
             .into_iter()
             .collect::<Path>();
         let choices = Path::default();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, 0);
         let history = public.history();
         assert_eq!(history.len(), 2);
         assert_eq!(Edge::from(history[0]), Edge::Check);
@@ -82,7 +93,7 @@ mod tests {
         let choices = [Edge::Fold, Edge::Call, Edge::Shove]
             .into_iter()
             .collect::<Path>();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, 0);
         let available = public.choices();
         assert_eq!(available.len(), 3);
     }
@@ -90,7 +101,7 @@ mod tests {
     fn path_returns_subgame() {
         let subgame = [Edge::Check, Edge::Check].into_iter().collect::<Path>();
         let choices = Path::default();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, 0);
         assert_eq!(public.subgame(), subgame);
     }
 }

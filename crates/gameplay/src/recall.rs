@@ -29,6 +29,13 @@ pub trait Recall {
     /// The action sequence from root to current state (excludes blinds).
     fn actions(&self) -> &[Action];
 
+    /// The perspective/hero seat for this recall.
+    ///
+    /// Default is P0; `Partial` overrides with its stored POV.
+    fn pov(&self) -> Turn {
+        Turn::Choice(0)
+    }
+
     /// Complete action sequence including blinds (for client display).
     fn complete(&self) -> Vec<Action> {
         Game::blinds()

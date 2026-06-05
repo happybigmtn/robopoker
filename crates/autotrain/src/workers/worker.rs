@@ -96,7 +96,8 @@ impl Worker {
         let present = self.encode(game).await;
         let subgame = Path::default();
         let choices = game.choices(0);
-        NlheInfo::from((subgame, present, choices))
+        let position = game.turn().position();
+        NlheInfo::from((subgame, present, choices, position))
     }
 
     async fn info(
@@ -114,7 +115,8 @@ impl Worker {
             .collect::<Path>();
         let present = self.encode(game.as_ref()).await;
         let choices = game.as_ref().choices(subgame.aggression());
-        NlheInfo::from((subgame, present, choices))
+        let position = game.as_ref().turn().position();
+        NlheInfo::from((subgame, present, choices, position))
     }
 
     fn branches(

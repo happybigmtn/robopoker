@@ -14,6 +14,10 @@ impl NlheTurn {
     pub fn is_choice(&self) -> bool {
         self.0.is_choice()
     }
+    /// Extracts the player index. Panics if not a Choice.
+    pub fn position(&self) -> usize {
+        self.0.position()
+    }
     /// Returns the terminal turn indicator.
     pub fn terminal() -> Self {
         Self(Turn::Terminal)

@@ -60,11 +60,22 @@ impl NlheInfo {
     pub fn bucket(&self) -> NlheSecret {
         self.secret
     }
+    /// Seat/position of the acting player.
+    pub fn position(&self) -> usize {
+        self.public.position()
+    }
 }
 
 impl std::fmt::Display for NlheInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}>>{}", self.street(), self.subgame(), self.secret)
+        write!(
+            f,
+            "{}:{}:{}>>{}",
+            self.street(),
+            self.position(),
+            self.subgame(),
+            self.secret
+        )
     }
 }
 
@@ -98,6 +109,9 @@ where
     ///
     /// Without this, a custom raise of 19 chips (snapped to "1:2 pot" edge) would
     /// produce different `choices()` than training, causing info set mismatch.
+    ///
+    /// Position is derived from the recall's POV/hero seat so that two recalls
+    /// with identical actions but different observers produce distinct info sets.
     fn from((recall, secret): (&R, Abstraction)) -> Self {
         let subgame = recall.subgame();
         let canonical = recall
@@ -106,12 +120,21 @@ where
             .map(NlheEdge::from)
             .fold(NlheGame::root(), |game, edge| CfrGame::apply(&game, edge));
         let choices = Game::from(canonical).choices(subgame.aggression());
-        Self::from((subgame, secret, choices))
+        let position = recall.pov().position();
+        Self::from((subgame, secret, choices, position))
     }
 }
 
 impl From<(Path, Abstraction, Path)> for NlheInfo {
     fn from((subgame, secret, choices): (Path, Abstraction, Path)) -> Self {
+        // Default position to 0 for backward compatibility with DB-loaded data
+        // that does not yet store position (slice 3 will add persistence).
+        Self::from((subgame, secret, choices, 0))
+    }
+}
+
+impl From<(Path, Abstraction, Path, usize)> for NlheInfo {
+    fn from((subgame, secret, choices, position): (Path, Abstraction, Path, usize)) -> Self {
         let subgame = subgame
             .into_iter()
             .rev()
@@ -120,7 +143,7 @@ impl From<(Path, Abstraction, Path)> for NlheInfo {
             .into_iter()
             .rev()
             .collect::<Path>();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, position);
         let secret = NlheSecret::from(secret);
         Self { public, secret }
     }
@@ -130,6 +153,10 @@ impl From<(&NlheEncoder, &NlheTree, NlheBranch)> for NlheInfo {
     /// Creates an info set during tree expansion.
     /// Used by [`Encoder::info`] to compute info for new tree nodes.
     /// Collects current-street edge history from tree traversal.
+    ///
+    /// Position is derived from the node's player-to-act (`game.turn().position()`).
+    /// This MUST match the inference-path derivation for the same logical decision
+    /// point when the recall's POV equals the player-to-act.
     fn from((encoder, tree, leaf): (&NlheEncoder, &NlheTree, NlheBranch)) -> Self {
         let (edge, ref game, head) = leaf;
         let subgame = std::iter::once(edge)
@@ -142,7 +169,8 @@ impl From<(&NlheEncoder, &NlheTree, NlheBranch)> for NlheInfo {
             .collect::<Path>();
         let choices = game.as_ref().choices(subgame.aggression());
         let secret = NlheSecret::from(encoder.abstraction(&game.sweat()));
-        let public = NlhePublic::new(subgame, choices);
+        let position = game.turn().position();
+        let public = NlhePublic::new(subgame, choices, position);
         Self { public, secret }
     }
 }
@@ -184,8 +212,9 @@ impl Arbitrary for NlheInfo {
             let choices = game.choices(subgame.aggression());
             if choices.length() > 0 {
                 let secret = NlheSecret::from(Abstraction::from(street));
+                let position = game.turn().position();
                 return Self {
-                    public: NlhePublic::new(subgame, choices),
+                    public: NlhePublic::new(subgame, choices, position),
                     secret,
                 };
             }
@@ -381,5 +410,43 @@ mod tests {
         );
         // Only assert actual != canonical if they're actually different (depends on snapping)
         // The key assertion is that info uses canonical, regardless of whether they differ
+    }
+    #[test]
+    fn inference_training_path_position_consistency() {
+        use petgraph::graph::NodeIndex;
+        use std::collections::BTreeMap;
+
+        // Build a partial recall from P1's perspective after P0 called preflop.
+        let partial = Partial::initial(Turn::Choice(1)).push(Action::Call(1));
+        let abs = Abstraction::from(Street::Pref);
+        let info_inference = NlheInfo::from((&partial, abs));
+
+        // Build the same logical state via the training path.
+        let root_game = NlheGame::from(partial.root());
+        let child_game = NlheGame::from(partial.head());
+        let edge = NlheEdge::from(partial.history()[0]);
+
+        // Encoder must know the abstraction for the child state's observation.
+        let mut map = BTreeMap::new();
+        map.insert(Isomorphism::from(child_game.sweat()), abs);
+        let encoder = NlheEncoder::from_map(map);
+
+        // Seed a minimal tree with the root node.
+        let mut tree = NlheTree::default();
+        let root_info = encoder.root(&root_game);
+        tree.seed(root_info, root_game);
+
+        // The branch represents the edge from root to child.
+        let leaf = (edge, child_game, NodeIndex::new(0));
+        let info_training = NlheInfo::from((&encoder, &tree, leaf));
+
+        // The critical invariant: both paths must yield the same NlheInfo
+        // for the same logical decision point when the recall's POV matches
+        // the player-to-act.
+        assert_eq!(
+            info_inference, info_training,
+            "inference and training paths must produce identical NlheInfo for the same decision point"
+        );
+        assert_eq!(info_inference.position(), 1, "position should be P1");
     }
 }

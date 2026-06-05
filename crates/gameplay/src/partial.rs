@@ -73,6 +73,9 @@ impl Recall for Partial {
     fn actions(&self) -> &[Action] {
         &self.actions
     }
+    fn pov(&self) -> Turn {
+        self.turn()
+    }
 }
 
 /// Strategy lookup methods.
