@@ -4866,7 +4866,7 @@ single-shipment leverage.
   single pinned prefix. **`lens:` Design
   (operator-UX / error-surface audit).**
 
-- [ ] **[P1] `STW-039` `crates/autotrain/src/observe.rs` typed
+- [x] **[P1] `STW-039` `crates/autotrain/src/observe.rs` typed
   `Step` enum + `StepLogger` emitting a one-line
   `trainer step: name=<name> kind=<kind>
   duration_ms=<ms> exit=<0|1|2>` per-step

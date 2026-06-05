@@ -71,10 +71,8 @@ async fn get(router: axum::Router, uri: &str) -> (StatusCode, Vec<u8>, Option<St
 async fn seed_local_run_produces_dashboard_readable_layout() {
     // 1. Create a synthetic receipt directory with a valid bench
     //    stdout so the dashboard's /bench/:id route can render it.
-    let receipt_dir = std::env::temp_dir().join(format!(
-        "robopoker-seed-test-{}",
-        std::process::id()
-    ));
+    let receipt_dir =
+        std::env::temp_dir().join(format!("robopoker-seed-test-{}", std::process::id()));
     let _cleanup = {
         struct Cleanup {
             path: PathBuf,
@@ -179,5 +177,8 @@ async fn seed_local_run_produces_dashboard_readable_layout() {
         "GET / body must contain the table scaffold"
     );
     let ct = ct.unwrap_or_default();
-    assert!(ct.starts_with("text/html"), "GET / must be text/html; got `{ct}`");
+    assert!(
+        ct.starts_with("text/html"),
+        "GET / must be text/html; got `{ct}`"
+    );
 }

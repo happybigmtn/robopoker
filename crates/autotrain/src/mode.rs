@@ -442,9 +442,64 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// STW-039: map the current mode variant to its
+    /// corresponding `Step` variant for the
+    /// `StepLogger`. Returns `None` for variants that
+    /// do not participate in the per-step timeline
+    /// (Cluster, Fast, Fast2, Fast3, Slow, Reset,
+    /// Doctor).
+    pub fn to_step(&self) -> Option<Step> {
+        match self {
+            Self::Smoke => Some(Step::Smoke),
+            Self::Status => Some(Step::Status),
+            Self::Bench => Some(Step::Bench),
+            Self::Compare => Some(Step::Compare),
+            Self::Compare3 => Some(Step::Compare3),
+            Self::Replay { .. } => Some(Step::Replay),
+            Self::VerifyReceipt { .. } => Some(Step::VerifyReceipt),
+            Self::Publish { .. } => Some(Step::Publish),
+            Self::VerifyBundle { .. } => Some(Step::VerifyBundle),
+            Self::PublishRemote { .. } => Some(Step::PublishRemote),
+            Self::VerifyRemote { .. } => Some(Step::VerifyRemote),
+            Self::PublishIndex { .. } => Some(Step::PublishIndex),
+            Self::VerifyIndex { .. } => Some(Step::VerifyIndex),
+            Self::PublishIndexRemote { .. } => Some(Step::PublishIndexRemote),
+            Self::VerifyIndexRemote { .. } => Some(Step::VerifyIndexRemote),
+            // Variants with no Step mapping:
+            Self::Cluster
+            | Self::Fast
+            | Self::Fast2
+            | Self::Fast3
+            | Self::Slow
+            | Self::Reset
+            | Self::Doctor => None,
+        }
+    }
+
     pub fn from_args() -> Self {
         let mut positional: Option<String> = None;
         let mut iter = std::env::args().skip(1).peekable();
+        // STW-039: the `--observe-test` argv flag is a
+        // no-subcommand CI scrape helper. It prints the
+        // 15 pinned `Step::as_str` tokens in stable
+        // alphabetical order to stdout (one token per
+        // line) and exits 0. A dashboard scraper can
+        // `grep ^trainer step kind=` the shape without
+        // exercising every mode. The flag is checked
+        // *before* the subcommand match so it always
+        // wins. A no-op `Smoke` step logger is created
+        // so the output is identical to what a real
+        // observed run would emit (when
+        // `RBP_TRAINER_OBSERVE=1` the logger is active
+        // but since the program exits immediately the
+        // duration is near-zero).
+        if std::env::args().any(|a| a == "--observe-test") {
+            let _step = StepLogger::new(Step::Smoke);
+            for kind in Step::all_steps_alphabetical() {
+                println!("trainer step: kind={kind}");
+            }
+            std::process::exit(0);
+        }
         // STW-038: the `--error-shape-test` argv flag
         // is a no-subcommand CI scrape helper. It
         // prints the 11 pinned `TrainerError::as_str`
@@ -863,17 +918,21 @@ impl Mode {
         // needed. The early `match` arm keeps the cost
         // out of the hot path.
         if let Self::Replay { path } = Self::from_args() {
+            let step = StepLogger::new(Step::Replay);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --replay <path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             match crate::replay::run(&path) {
                 Ok(s) => {
                     print!("{s}");
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
                     eprintln!("{e}");
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -885,17 +944,21 @@ impl Mode {
         // error the mode is contractually required to
         // convert into exit 2.
         if let Self::VerifyReceipt { path } = Self::from_args() {
+            let step = StepLogger::new(Step::VerifyReceipt);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --verify-receipt <path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             match crate::verify_receipt::run(&path) {
                 Ok(s) => {
                     print!("{s}");
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
                     eprintln!("{e}");
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -927,8 +990,10 @@ impl Mode {
         // for the integration test that runs the
         // trainer without the env knob set.
         if let Self::Publish { path } = Self::from_args() {
+            let step = StepLogger::new(Step::Publish);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --publish <receipt-dir>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // Compute the output dir as
@@ -966,6 +1031,7 @@ impl Mode {
                         out.file_count,
                         out.receipt_basename,
                     );
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -984,6 +1050,7 @@ impl Mode {
                     // (the legacy contract).
                     eprintln!("{e}");
                     eprintln!("{}", e.to_pinned_line());
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -996,17 +1063,21 @@ impl Mode {
         // contractually required to convert into
         // exit 2.
         if let Self::VerifyBundle { path } = Self::from_args() {
+            let step = StepLogger::new(Step::VerifyBundle);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --verify-bundle <path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             match crate::verify_bundle::run(&path) {
                 Ok(s) => {
                     print!("{s}");
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
                     eprintln!("{e}");
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1034,11 +1105,13 @@ impl Mode {
             dry_run,
         } = Self::from_args()
         {
+            let step = StepLogger::new(Step::PublishRemote);
             if path.as_os_str().is_empty() {
                 eprintln!(
                     "Usage: trainer --publish-remote <receipt-dir> --bucket <s3://...> \
                      [--prefix <prefix/>] [--no-dry-run]"
                 );
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             if bucket.is_empty() {
@@ -1046,6 +1119,7 @@ impl Mode {
                     "Usage: trainer --publish-remote <receipt-dir> --bucket <s3://...> \
                      [--prefix <prefix/>] [--no-dry-run]"
                 );
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // Compute the publish directory
@@ -1098,6 +1172,7 @@ impl Mode {
                         basename,
                         dry_run,
                     );
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -1114,6 +1189,7 @@ impl Mode {
                     // error`.
                     eprintln!("{e}");
                     eprintln!("{}", e.to_pinned_line());
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1127,8 +1203,10 @@ impl Mode {
         // contractually required to convert
         // into exit 2.
         if let Self::VerifyRemote { path } = Self::from_args() {
+            let step = StepLogger::new(Step::VerifyRemote);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --verify-remote <path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // The verifier reads the
@@ -1159,6 +1237,7 @@ impl Mode {
                             receipt.bundle_sha256,
                             receipt.plan.receipt_basename,
                         );
+                        StepLogger::finish_opt(step, 0);
                         std::process::exit(0);
                     }
                     Err(e) => {
@@ -1167,6 +1246,7 @@ impl Mode {
                             crate::publish_remote::STW033_VERIFY_REMOTE_FAILURE_HEADLINE_PREFIX,
                             e
                         );
+                        StepLogger::finish_opt(step, 2);
                         std::process::exit(2);
                     }
                 },
@@ -1176,6 +1256,7 @@ impl Mode {
                         crate::publish_remote::STW033_VERIFY_REMOTE_FAILURE_HEADLINE_PREFIX,
                         e
                     );
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1192,8 +1273,10 @@ impl Mode {
         // the mode is contractually required to
         // convert into exit 2.
         if let Self::PublishIndex { path } = Self::from_args() {
+            let step = StepLogger::new(Step::PublishIndex);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --publish-index <publish-root>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // STW-051: the `RBP_PUBLISH_INDEX_UTC`
@@ -1229,6 +1312,7 @@ impl Mode {
             match crate::publish_index::publish_index(&path, created_at_utc) {
                 Ok(out) => {
                     println!("{out}");
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -1244,6 +1328,7 @@ impl Mode {
                     // `^live_proof publish_index error`.
                     eprintln!("{e}");
                     eprintln!("{}", e.to_pinned_line());
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1256,8 +1341,10 @@ impl Mode {
         // contractually required to convert into
         // exit 2.
         if let Self::VerifyIndex { path } = Self::from_args() {
+            let step = StepLogger::new(Step::VerifyIndex);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --verify-index <index-path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             match crate::publish_index::read_publish_index(&path) {
@@ -1271,6 +1358,7 @@ impl Mode {
                             index.total_bytes,
                             index.runbook_version,
                         );
+                        StepLogger::finish_opt(step, 0);
                         std::process::exit(0);
                     }
                     Err(e) => {
@@ -1279,6 +1367,7 @@ impl Mode {
                             crate::publish_index::STW034_VERIFY_INDEX_FAILURE_HEADLINE_PREFIX,
                             e
                         );
+                        StepLogger::finish_opt(step, 2);
                         std::process::exit(2);
                     }
                 },
@@ -1288,6 +1377,7 @@ impl Mode {
                         crate::publish_index::STW034_VERIFY_INDEX_FAILURE_HEADLINE_PREFIX,
                         e
                     );
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1316,11 +1406,13 @@ impl Mode {
             dry_run,
         } = Self::from_args()
         {
+            let step = StepLogger::new(Step::PublishIndexRemote);
             if path.as_os_str().is_empty() {
                 eprintln!(
                     "Usage: trainer --publish-index-remote <publish-root> --bucket <s3://...> \
                      [--prefix <prefix/>] [--no-dry-run]"
                 );
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             if bucket.is_empty() {
@@ -1328,6 +1420,7 @@ impl Mode {
                     "Usage: trainer --publish-index-remote <publish-root> --bucket <s3://...> \
                      [--prefix <prefix/>] [--no-dry-run]"
                 );
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // Compute the publish root basename
@@ -1369,6 +1462,7 @@ impl Mode {
                         out.runbook_version,
                         dry_run,
                     );
+                    StepLogger::finish_opt(step, 0);
                     std::process::exit(0);
                 }
                 Err(e) => {
@@ -1385,6 +1479,7 @@ impl Mode {
                     // error`.
                     eprintln!("{e}");
                     eprintln!("{}", e.to_pinned_line());
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1398,8 +1493,10 @@ impl Mode {
         // contractually required to convert
         // into exit 2.
         if let Self::VerifyIndexRemote { path } = Self::from_args() {
+            let step = StepLogger::new(Step::VerifyIndexRemote);
             if path.as_os_str().is_empty() {
                 eprintln!("Usage: trainer --verify-index-remote <path>");
+                StepLogger::finish_opt(step, 2);
                 std::process::exit(2);
             }
             // The verifier reads the
@@ -1432,6 +1529,7 @@ impl Mode {
                             receipt.index_sha256,
                             receipt.runbook_version,
                         );
+                        StepLogger::finish_opt(step, 0);
                         std::process::exit(0);
                     }
                     Err(e) => {
@@ -1440,6 +1538,7 @@ impl Mode {
                             crate::publish_index_remote::STW035_VERIFY_INDEX_REMOTE_FAILURE_HEADLINE_PREFIX,
                             e
                         );
+                        StepLogger::finish_opt(step, 2);
                         std::process::exit(2);
                     }
                 },
@@ -1449,6 +1548,7 @@ impl Mode {
                         crate::publish_index_remote::STW035_VERIFY_INDEX_REMOTE_FAILURE_HEADLINE_PREFIX,
                         e
                     );
+                    StepLogger::finish_opt(step, 2);
                     std::process::exit(2);
                 }
             }
@@ -1470,7 +1570,9 @@ impl Mode {
             }
         }
         let client = rbp_database::db().await;
-        match Self::from_args() {
+        let mode = Self::from_args();
+        let step = mode.to_step().and_then(StepLogger::new);
+        match mode {
             Self::Fast => FastSession::new(client).await.train().await,
             // STW-017: v2 trained config. The
             // `Fast2Session` shape is the v1 shape
@@ -1500,7 +1602,12 @@ impl Mode {
                 client.status_v3().await;
             }
             Self::Cluster => PreTraining::run(&client).await,
-            Self::Smoke => Self::smoke(client).await,
+            Self::Smoke => {
+                if let Err(()) = Self::smoke(client).await {
+                    StepLogger::finish_opt(step, 2);
+                    std::process::exit(2);
+                }
+            }
             Self::Bench => crate::bench::run(client).await,
             // STW-018: head-to-head v1-vs-v2
             // trained-config bench. Mirrors the
@@ -1663,7 +1770,7 @@ impl Mode {
     /// that a worker can complete in seconds, with the result
     /// observable through the same `Check` queries that drive
     /// `trainer --status`.
-    async fn smoke(client: std::sync::Arc<tokio_postgres::Client>) {
+    async fn smoke(client: std::sync::Arc<tokio_postgres::Client>) -> Result<(), ()> {
         let epochs = rbp_core::fast_epochs().unwrap_or(1);
         log::info!("smoke: pretraining + {epochs} epoch(s) + sync + status");
         let session = FastSession::new(client.clone()).await;
@@ -1677,7 +1784,8 @@ impl Mode {
         log::info!("smoke complete: epochs={epoch} rows={rows}");
         if rows == 0 {
             log::error!("smoke failed: blueprint row count is 0");
-            std::process::exit(2);
+            return Err(());
         }
+        Ok(())
     }
 }
