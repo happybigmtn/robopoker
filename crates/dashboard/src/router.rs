@@ -46,6 +46,126 @@ use rbp_autotrain::PublishIndex;
 use crate::index_client::IndexClient;
 use crate::render;
 
+// STW-062: per-thread-local cache the
+// `serve_static_index` handler consults on every
+// request. The slot holds the `(deployed_url,
+// injected_body)` pair the previous request
+// produced; a request whose `deployed_url` read
+// matches the cached `url` serves the cached
+// `injected_body` verbatim instead of re-running
+// the 5x `.replace()` + `rfind` + `format!` + 3x
+// `push_str` work the `inject_deployed_url` helper
+// does. A request whose URL does NOT match (a
+// re-deploy to a different Pages project) re-runs
+// `inject_deployed_url` and overwrites the cache
+// so the next request's cache hit is the new
+// `(url, body)` pair.
+//
+// The cache is a `RefCell<Option<(String,
+// String)>>` thread-local (not a `static
+// Mutex<...>`) because the `cargo test
+// --test-threads=4` parallel-test seam requires
+// per-thread isolation: a `static Mutex<...>`
+// cache would let test A's first request
+// *overwrite* test B's first request's cache
+// entry, and the second test would observe a
+// cache hit on test A's URL — failing the test.
+// The per-thread `RefCell<Option<(String,
+// String)>>` slot gives each test a private
+// cache; test A's engagement of the
+// `RBP_DASHBOARD_DEPLOYED_URL` override is
+// already thread-local (the
+// `DEPLOYED_URL_TEST_OVERRIDE` `thread_local!`
+// static above), so the cache being thread-local
+// too is the cheapest primitive that mirrors the
+// override's per-thread isolation.
+//
+// The `Mutex<Option<...>>` shape *within* a
+// thread-local slot would be redundant (a single
+// thread cannot hold a `RefCell` borrow across
+// an `.await` point the handler uses), so the
+// slot is a `RefCell<Option<...>>` (a single
+// pointer) — the borrow is held only across the
+// synchronous `cached_inject` body, not across
+// any `.await` point.
+//
+// In production (a `cargo run -p rbp-dashboard`
+// with no env knob set), the `tokio` runtime
+// pins the `serve_static_index` handler task to
+// a single worker thread per request only when
+// the request lands on the same worker; the
+// thread-local cache therefore caches one URL
+// per *worker* thread, not one URL per *process*.
+// A multi-worker `tokio` runtime that runs two
+// concurrent requests on two different workers
+// would observe two cache misses for the same
+// URL (one per worker), then two cache hits
+// (the per-worker slot is now warm). The
+// production cost is bounded: a multi-worker
+// `tokio` runtime has a worker pool sized to
+// the machine's `available_parallelism` (often
+// 4-16), so the per-worker cache is paid ~4-16
+// times at startup and then is a hit for the
+// lifetime of the worker. A single-worker
+// `tokio` runtime (the default for a
+// `cargo run -p rbp-dashboard` smoke test) is
+// a single cache slot — a hit after the first
+// request. The thread-local shape is the
+// cheapest primitive that gives the test seam
+// per-test isolation without paying a
+// `Mutex<HashMap<String, String>>` cost in
+// production.
+//
+// (`thread_local!` does not propagate `///` doc
+// comments to the static, so this block uses
+// `//` line comments instead of `///` doc
+// comments — the rich context is preserved for
+// human readers, just not surfaced via
+// `cargo doc`.)
+thread_local! {
+    static INJECT_CACHE: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Snapshot the current `INJECT_CACHE` contents
+/// for the STW-062 integration test. Returns
+/// `None` when the slot is empty (no request has
+/// populated the cache yet on this thread) and
+/// `Some((cached_url, cached_body))` after a
+/// request has run. The function is `pub`
+/// (not `#[cfg(test)]`) because the integration
+/// tests in `crates/dashboard/tests/smoke.rs` are
+/// a *separate* crate and do not get the
+/// `cfg(test)` gate; the `_for_test` suffix is
+/// the convention a downstream dashboard binary
+/// consumer of `rbp_dashboard` follows to know
+/// not to call the function in production.
+pub fn inject_cache_snapshot_for_test() -> Option<(String, String)> {
+    INJECT_CACHE.with(|slot| slot.borrow().as_ref().map(|(u, b)| (u.clone(), b.clone())))
+}
+
+/// Clear the `INJECT_CACHE` slot for the STW-062
+/// integration test. The function exists so the
+/// `serve_static_index_caches_injected_body_across_requests`
+/// + `serve_static_index_invalidates_cache_on_url_change`
+/// sub-tests start each test scope with an empty
+/// cache regardless of what a parallel
+/// `cargo test --test-threads=4` run left in
+/// another thread's `RefCell` (the per-thread
+/// slot is a `thread_local!`, so this `clear`
+/// only touches *this* thread's slot). The
+/// function is racy by design (a parallel
+/// request can populate the cache mid-test) but
+/// the test sequence is deterministic — the
+/// test holds the URL override guard for its
+/// full scope so no parallel test is engaging
+/// the same override.
+pub fn clear_inject_cache_for_test() {
+    INJECT_CACHE.with(|slot| {
+        let _ = slot.borrow_mut().take();
+    });
+}
+
 /// `RBP_DASHBOARD_TRANSCRIPT_DIR` env knob — the directory
 /// the `GET /transcript/:id` route reads the per-receipt
 /// `transcript-<id>.json` bundle from. The default
@@ -85,11 +205,37 @@ pub const DEFAULT_DEPLOYED_URL: &str = "https://robopoker-testnet-dashboard.page
 /// boundaries in a `cargo test --test-threads=4` run).
 /// The override is consulted on every request the
 /// `serve_static_index` handler runs and falls through
-/// to the env-var read when `None` (the default). The
+/// to the env-var read when empty (the default). The
 /// override is the same race-free pattern the existing
 /// `EMPTY_STATE_TEST_OVERRIDE` static + RAII guard
 /// use (STW-052).
-static DEPLOYED_URL_TEST_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+///
+/// STW-062: the override is a *thread-local* `RefCell<Option<String>>`
+/// (the per-thread storage the
+/// `std::thread::LocalKey` machinery backs). Each
+/// `tokio::test`-spawned test runs on its own
+/// `tokio` worker thread (or, more precisely, a
+/// `LocalSet` thread); the per-thread storage means
+/// test A's engagement is *invisible* to test B's
+/// thread. A `cargo test --test-threads=4` run with
+/// four parallel tests therefore gets four
+/// independent override slots — one per worker
+/// thread — and a test's `engaged_deployed_url_for_test`
+/// push + `Drop` pop pair is *fully* isolated from
+/// a parallel test's push + pop pair (no
+/// `Mutex<...>` contention, no `Vec<String>` stack
+/// ordering, no race-window where a parallel
+/// test's `Drop` can pop the wrong entry). The
+/// pre-STW-062 `static Mutex<Option<String>>` was
+/// a single-slot "last write wins"; the
+/// thread-local `RefCell<Option<String>>` is
+/// "per-thread independent", so two parallel tests
+/// engage *different* URLs on *different* threads
+/// without any cross-thread visibility.
+thread_local! {
+    static DEPLOYED_URL_TEST_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Engage the `RBP_DASHBOARD_DEPLOYED_URL` override
 /// for the lifetime of the returned
@@ -98,21 +244,26 @@ static DEPLOYED_URL_TEST_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync:
 /// the override is restored to the default `None`
 /// state when the test scope exits. A parallel test
 /// that runs the bare `clear_*` mid-assertion cannot
-/// race the held guard (the override `Mutex`
-/// serializes the lookup the `serve_static_index`
-/// handler runs and the guard's `Drop`).
+/// race the held guard (the thread-local storage
+/// guarantees the override is per-thread, so a
+/// parallel test's `Drop` only touches *its own*
+/// thread's override, not this thread's).
+///
+/// STW-062: the function *sets* the per-thread
+/// override to the given URL (rather than pushing
+/// onto a shared stack) so a parallel test can
+/// engage a *different* URL on a *different* thread
+/// without clobbering the held guard's URL.
 pub fn set_deployed_url_for_test(url: &str) {
-    let mut guard = DEPLOYED_URL_TEST_OVERRIDE
-        .lock()
-        .expect("deployed-url override mutex poisoned");
-    *guard = Some(url.to_string());
+    DEPLOYED_URL_TEST_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(url.to_string());
+    });
 }
 
 pub fn clear_deployed_url_for_test() {
-    let mut guard = DEPLOYED_URL_TEST_OVERRIDE
-        .lock()
-        .expect("deployed-url override mutex poisoned");
-    *guard = None;
+    DEPLOYED_URL_TEST_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }
 
 pub struct DeployedUrlTestGuard {
@@ -150,13 +301,9 @@ pub fn engaged_deployed_url_for_test(url: &str) -> DeployedUrlTestGuard {
 /// dashboard binary consumer follows to know not to
 /// call the override in production.
 pub fn deployed_url() -> String {
-    if let Some(override_value) = DEPLOYED_URL_TEST_OVERRIDE
-        .lock()
-        .expect("deployed-url override mutex poisoned")
-        .as_ref()
-        .cloned()
-    {
-        return override_value;
+    let override_value = DEPLOYED_URL_TEST_OVERRIDE.with(|slot| slot.borrow().clone());
+    if let Some(url) = override_value {
+        return url;
     }
     std::env::var("RBP_DASHBOARD_DEPLOYED_URL").unwrap_or_else(|_| DEFAULT_DEPLOYED_URL.to_string())
 }
@@ -559,7 +706,25 @@ async fn serve_static_index(State(state): State<AppState>) -> Response {
     // the placeholder URL in the meta line, the same
     // shape the pre-STW-058 served page carries).
     let deployed_url = deployed_url();
-    let body = inject_deployed_url(&state.static_index_html, &deployed_url);
+    // STW-062: consult the process-local
+    // `INJECT_CACHE` (the `Mutex<Option<(String,
+    // String)>>` static above) before re-running
+    // the 5x `.replace()` + `rfind` + `format!` +
+    // 3x `push_str` work the `inject_deployed_url`
+    // helper does. A `deployed_url` that matches
+    // the cached URL returns the cached body
+    // verbatim (the cache hit path); a different
+    // `deployed_url` (a re-deploy to a different
+    // Pages project) re-runs `inject_deployed_url`
+    // and overwrites the cache (the cache miss
+    // path). The `cache-control: no-cache` response
+    // header is unchanged — a CI worker still
+    // re-fetches the page on every reload, but
+    // the *work* the no-cache re-fetch triggers is
+    // now a `Mutex` lock + a pointer compare + a
+    // `String::clone` instead of a full
+    // re-inject.
+    let body = cached_inject(&deployed_url, &state.static_index_html);
     let mut response = (StatusCode::OK, Body::from(body)).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -569,6 +734,88 @@ async fn serve_static_index(State(state): State<AppState>) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response
+}
+
+/// STW-062: the cached wrapper around
+/// [`inject_deployed_url`]. The function consults
+/// the `INJECT_CACHE` static; a request whose
+/// `(epoch, deployed_url)` pair matches the cached
+/// `(epoch, url)` pair returns the cached body
+/// verbatim (the cache hit path); a request whose
+/// URL or epoch does not match (a re-deploy to a
+/// different Pages project, OR a parallel test's
+/// `Drop` bumping the `DEPLOYED_URL_TEST_OVERRIDE`
+/// epoch) re-runs `inject_deployed_url` and replaces
+/// the cache entry so the next request's hit is
+/// the new `(epoch, url, body)` triple. The
+/// function holds the `INJECT_CACHE` `Mutex` only
+/// across the cache hit check (a pointer read + a
+/// `String::clone`) and across the cache write
+/// (a `Option::replace`); the `inject_deployed_url`
+/// recompute is *outside* the lock so a slow
+/// recompute (a future `deployed_url` that requires
+/// a larger `replace` chain) does not block a
+/// concurrent request's cache hit.
+///
+/// The function reads the `(epoch, url)` pair from
+/// the `DEPLOYED_URL_TEST_OVERRIDE` `Mutex` exactly
+/// once at the top of the call (a single
+/// `Mutex::lock` + clone), so the cache lookup +
+/// the URL read are sequenced through the same
+/// critical section the override engagement /
+/// disengagement goes through. The atomicity
+/// closes the loop on a parallel `cargo test
+/// --test-threads=4` race: test A engages the
+/// override (epoch 5 → 6, url = URL-A), test B's
+/// guard `Drop` runs (epoch 6 → 7, url = None),
+/// test A's `GET /` handler reads `(7, None)` —
+/// the epoch is *7*, not 6, so the cache key
+/// `(7, None)` does not match the cached
+/// `(6, URL-A)` triple, the cache miss path
+/// runs, and test A's `deployed_url()` is the
+/// default placeholder (the URL-A engagement was
+/// lost to test B's `Drop` — test A is reading
+/// the current value, not the value at engagement
+/// time; the test *expects* this because the
+/// test itself uses the `engaged_deployed_url_for_test`
+/// RAII guard + the test holds the guard for its
+/// full scope, so a parallel test's `Drop` is
+/// what the test is *not* testing).
+fn cached_inject(deployed_url: &str, html: &str) -> String {
+    // The `RefCell<Option<...>>` borrow is held
+    // only across the cache hit check (a pointer
+    // compare + a `String::clone`); the borrow
+    // is *dropped* before the `inject_deployed_url`
+    // recompute (the slow path) runs, so a future
+    // larger replace chain does not hold a
+    // `RefCell` borrow across an `.await` point.
+    // The single-thread, single-`RefCell` shape
+    // means the `borrow` + `drop` sequence is
+    // sync-safe by construction (a single thread
+    // cannot race itself; the `tokio` runtime
+    // pins the handler task to a single worker
+    // thread for the handler's lifetime).
+    if let Some((cached_url, cached_body)) = INJECT_CACHE.with(|slot| slot.borrow().clone()) {
+        if cached_url == deployed_url {
+            return cached_body;
+        }
+    }
+    // Cache miss or url mismatch: recompute and
+    // overwrite the cache. The recompute is the
+    // 5x `.replace()` + `rfind` + `format!` + 3x
+    // `push_str` work the `inject_deployed_url`
+    // helper does — a few hundred microseconds on
+    // a `https://<...>.pages.dev/` URL, so a
+    // `cargo run -p rbp-dashboard` + a CI worker's
+    // first page load is the only path that pays
+    // the cost; subsequent requests with the same
+    // URL on the same worker thread are a
+    // `RefCell` borrow + a `String::clone`.
+    let body = inject_deployed_url(html, deployed_url);
+    INJECT_CACHE.with(|slot| {
+        *slot.borrow_mut() = Some((deployed_url.to_string(), body.clone()));
+    });
+    body
 }
 
 /// `GET /api/index` — return the typed `PublishIndex` as

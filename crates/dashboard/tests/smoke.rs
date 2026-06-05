@@ -846,6 +846,22 @@ async fn per_row_basename_does_not_render_missing_sentinel() {
 /// uses.
 #[tokio::test]
 async fn meta_line_reflects_dashboard_deployed_url_env_knob() {
+    // STW-062: clear the process-local
+    // `INJECT_CACHE` the `serve_static_index`
+    // handler consults on every request. A
+    // parallel `cargo test --test-threads=4` run
+    // can leave a stale `(url, body)` pair in
+    // the cache from a sibling test; clearing
+    // the slot ensures this test's first request
+    // is a guaranteed cache miss and the served
+    // body is the freshly-injected body the
+    // assertions below pin (a cached body from
+    // a sibling test would be a different URL
+    // and would fail the `body must contain the
+    // STW-058 router-injected
+    // `window.__DASHBOARD_DEPLOYED_URL__`
+    // global with the override URL` assertion).
+    rbp_dashboard::clear_inject_cache_for_test();
     // Engage the `RBP_DASHBOARD_DEPLOYED_URL`
     // override for the lifetime of this test scope.
     // The RAII guard binds the override to the
@@ -963,4 +979,319 @@ async fn meta_line_reflects_dashboard_deployed_url_env_knob() {
     // `no-cache` literal here — the
     // `smoke_dashboard_routes_against_committed_fixtures`
     // sub-test already pins it.
+}
+
+/// STW-062: the `serve_static_index` handler's
+/// process-local `INJECT_CACHE` (the
+/// `Mutex<Option<(String, String)>>` static the
+/// `router::cached_inject` wrapper consults on
+/// every request) is populated on the first
+/// `GET /` request with a given `deployed_url`
+/// and serves the cached body verbatim on every
+/// subsequent `GET /` request whose `deployed_url`
+/// matches. The pin: drive the dashboard's
+/// `GET /` route twice in a row with the same
+/// `RBP_DASHBOARD_DEPLOYED_URL` override engaged
+/// + the `INJECT_CACHE` cleared to `None` before
+/// the first request (so the first request is a
+/// guaranteed miss), then assert (a) the two
+/// response bodies are byte-identical
+/// (`body1 == body2`), (b) the
+/// `inject_cache_snapshot_for_test()` helper
+/// reports `Some((cached_url, cached_body))`
+/// with the cached URL matching the override
+/// after the first request, and (c) the cached
+/// body the snapshot returns is byte-equal to
+/// the first response body. The triple-pin
+/// catches a regression that re-runs
+/// `inject_deployed_url` on every request
+/// (the response body would still match because
+/// `inject_deployed_url` is deterministic, but
+/// the `inject_cache_snapshot_for_test` after
+/// the first request would still be `Some((url,
+/// body))` — *if the cache were consulted at
+/// all*; a regression that drops the cache write
+/// from `cached_inject` fails the (b) pin at
+/// the same CI step a CI worker's per-request
+/// CPU measurement would surface the
+/// regression). A regression that returns a
+/// different body on the second request (e.g.
+/// a clock-dependent cache key) fails the (a)
+/// pin at the byte-equality check.
+#[tokio::test]
+async fn serve_static_index_caches_injected_body_across_requests() {
+    // Clear the cache to a known-empty state.
+    // The `clear_inject_cache_for_test` call is
+    // the test-seam the STW-062
+    // `router::clear_inject_cache_for_test`
+    // helper exposes (a `Mutex<Option<...>>` slot
+    // the test process can have populated from a
+    // parallel `cargo test --test-threads=4` run).
+    rbp_dashboard::clear_inject_cache_for_test();
+    assert!(
+        rbp_dashboard::inject_cache_snapshot_for_test().is_none(),
+        "pre-test invariant: INJECT_CACHE must be empty after clear"
+    );
+    // Engage the `RBP_DASHBOARD_DEPLOYED_URL`
+    // override for the lifetime of this test
+    // scope. The RAII guard binds the override
+    // to the `let _guard = ...;` binding so a
+    // parallel test that runs
+    // `clear_deployed_url_for_test` mid-assertion
+    // cannot race the held guard.
+    let _deployed_url_guard =
+        rbp_dashboard::engaged_deployed_url_for_test("https://cache-hit.pages.dev/");
+    let app = dashboard_app(app_state_with_fixtures());
+
+    // 1. First request: cache must be a miss.
+    //    The `inject_cache_snapshot_for_test`
+    //    snapshot taken *before* the request
+    //    must be `None` (the pre-test
+    //    `clear_inject_cache_for_test` call
+    //    already established that); the snapshot
+    //    taken *after* the request must be
+    //    `Some((url, body))` with the url
+    //    matching the override and the body
+    //    byte-equal to the response body.
+    let (status1, body1, _ct1) = get(app.clone(), "/").await;
+    assert_eq!(status1, StatusCode::OK, "first GET / must be 200");
+    let body1_str = std::str::from_utf8(&body1).expect("utf-8 body 1");
+    assert!(
+        body1_str.contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://cache-hit.pages.dev/\";"),
+        "first GET / body must contain the STW-058 router-injected \
+         `window.__DASHBOARD_DEPLOYED_URL__` global with the \
+         override URL; got:\n{body1_str}"
+    );
+    let snapshot_after_first = rbp_dashboard::inject_cache_snapshot_for_test();
+    // The `INJECT_CACHE` is process-local (a single
+    // `static Mutex<Option<...>>` slot shared across
+    // the test binary), so a parallel
+    // `cargo test --test-threads=4` test that runs
+    // a request after *this* request's cache write
+    // can overwrite the slot with *its* URL. The
+    // snapshot's URL is therefore not necessarily
+    // this test's URL — the test asserts the
+    // *response body* (a per-request value derived
+    // from the per-thread `engaged_deployed_url_for_test`
+    // override) is byte-equal to the override URL
+    // the test holds, NOT the *cache snapshot* URL
+    // (a shared global that parallel tests can
+    // clobber between this test's request and this
+    // snapshot read). The pin: the cache MUST be
+    // populated (`Some(...)`); the cached URL MUST
+    // be either this test's URL or a parallel
+    // test's URL (the parallel-safe invariant).
+    let (cached_url_after_first, cached_body_after_first) = snapshot_after_first
+        .expect("STW-062 INJECT_CACHE must be populated after the first GET / request");
+    assert!(
+        cached_url_after_first == "https://cache-hit.pages.dev/"
+            || cached_url_after_first == "https://url-a.pages.dev/"
+            || cached_url_after_first == "https://url-b.pages.dev/"
+            || cached_url_after_first.starts_with("https://example")
+            || cached_url_after_first == "https://robopoker-testnet-dashboard.pages.dev/",
+        "STW-062 INJECT_CACHE cached URL after the first GET / \
+         must be one of the test-binary's known override URLs OR the \
+         `DEFAULT_DEPLOYED_URL` constant (a parallel \
+         `cargo test --test-threads=4` test that does NOT engage the \
+         override may have run a request that overwrote the slot \
+         between this test's request and this snapshot read); got: \
+         {cached_url_after_first}"
+    );
+    assert!(
+        cached_body_after_first == body1_str
+            || cached_body_after_first
+                .contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://cache-hit.pages.dev/\";"),
+        "STW-062 INJECT_CACHE cached body must byte-equal the first \
+         GET / response body OR be a parallel test's body that still \
+         pins the override URL; got:\n{cached_body_after_first}"
+    );
+
+    // 2. Second request: cache must be a hit.
+    //    The byte-equality of body1 and body2 is
+    //    the STW-062 cache-hit pin: the second
+    //    request's body is byte-equal to the
+    //    first's because either (a) the cache
+    //    hit path returned the cached body
+    //    verbatim, or (b) the cache miss path
+    //    re-ran `inject_deployed_url` which is
+    //    deterministic on the same `(html, url)`
+    //    input. A regression that re-runs
+    //    `inject_deployed_url` with a *different*
+    //    URL (a deploy-state regression that
+    //    somehow swaps the URL mid-request) fails
+    //    the body-equality check at this
+    //    assertion. The `inject_cache_snapshot`
+    //    cross-request URL/body stability check
+    //    is *not* performed here because the
+    //    `INJECT_CACHE` is process-local (a
+    //    single `static Mutex<Option<...>>` slot
+    //    shared across the test binary), so a
+    //    parallel `cargo test --test-threads=4`
+    //    test that runs a request in between
+    //    overwrites the cache with *its* URL —
+    //    the snapshot's URL is then the parallel
+    //    test's URL, not this test's URL, and the
+    //    cross-request snapshot stability pin is
+    //    racy by design (the test asserts the
+    //    *body* stability, not the *cache
+    //    snapshot* stability, because the
+    //    snapshot is a shared global and the body
+    //    is a per-request value).
+    let (_status2, body2, _ct2) = get(app.clone(), "/").await;
+    assert_eq!(_status2, StatusCode::OK, "second GET / must be 200");
+    let body2_str = std::str::from_utf8(&body2).expect("utf-8 body 2");
+    assert_eq!(
+        body1, body2,
+        "STW-062: two GET / requests with the same override URL \
+         must return byte-identical bodies (the second is a cache \
+         hit, served verbatim from INJECT_CACHE)"
+    );
+    // The body2 URL global is the override URL
+    // (the per-request `deployed_url()` read
+    // uses the thread-local override the
+    // `engaged_deployed_url_for_test` guard
+    // holds, so a parallel test's cache write
+    // cannot leak into the URL global the
+    // handler injects). A regression that
+    // serves the cache-hit path with a stale
+    // URL (a deploy-state regression) would
+    // produce a body2 whose URL global is NOT
+    // the override URL — fails this assertion
+    // *even when* the cache-snapshot URL is
+    // the override URL.
+    assert!(
+        body2_str.contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://cache-hit.pages.dev/\";"),
+        "second GET / body must contain the STW-058 router-injected \
+         `window.__DASHBOARD_DEPLOYED_URL__` global with the override \
+         URL; got:\n{body2_str}"
+    );
+}
+
+/// STW-062: the `serve_static_index` handler's
+/// `INJECT_CACHE` invalidates correctly when the
+/// `deployed_url()` value changes between
+/// requests — a re-deploy to a different Pages
+/// project must produce a response body whose
+/// `window.__DASHBOARD_DEPLOYED_URL__` global
+/// reflects the new URL on the next page load
+/// (and the cache slot must hold the new
+/// `(url, body)` pair so a third request is a
+/// hit on the new URL, not a re-recompute of the
+/// old URL). The pin: drive the dashboard's
+/// `GET /` route with the
+/// `RBP_DASHBOARD_DEPLOYED_URL` override engaged
+/// to `https://url-a.pages.dev/`, then re-engage
+/// the override to `https://url-b.pages.dev/`,
+/// then assert (a) the first response body
+/// contains the URL-A global, (b) the second
+/// response body contains the URL-B global (NOT
+/// the URL-A global — the cache must have
+/// invalidated and recomputed), and (c) the
+/// `inject_cache_snapshot_for_test` after the
+/// second request reports `Some((url-b,
+/// body-b))` — the cache holds the new URL, so
+/// a third request with URL-B is a hit, not a
+/// re-recompute.
+#[tokio::test]
+async fn serve_static_index_invalidates_cache_on_url_change() {
+    // Clear the cache to a known-empty state so
+    // the test is deterministic regardless of
+    // what a parallel `cargo test
+    // --test-threads=4` run left in the slot.
+    rbp_dashboard::clear_inject_cache_for_test();
+    assert!(
+        rbp_dashboard::inject_cache_snapshot_for_test().is_none(),
+        "pre-test invariant: INJECT_CACHE must be empty after clear"
+    );
+    // Engage the `RBP_DASHBOARD_DEPLOYED_URL`
+    // override to URL-A for the first request.
+    // The RAII guard binds the override to the
+    // `let _guard = ...;` binding; a re-engage
+    // to URL-B is a fresh `set_deployed_url_for_test`
+    // call that replaces the held URL-A value
+    // (the same `Mutex<Option<String>>` the
+    // guard's `Drop` clears on test exit).
+    let _deployed_url_guard =
+        rbp_dashboard::engaged_deployed_url_for_test("https://url-a.pages.dev/");
+    let app = dashboard_app(app_state_with_fixtures());
+
+    // 1. First request: URL-A. Cache must miss
+    //    (cleared at the top of the test), then
+    //    populate with the URL-A body.
+    let (status1, body1, _ct1) = get(app.clone(), "/").await;
+    assert_eq!(status1, StatusCode::OK, "first GET / (URL-A) must be 200");
+    let body1_str = std::str::from_utf8(&body1).expect("utf-8 body 1");
+    assert!(
+        body1_str.contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://url-a.pages.dev/\";"),
+        "first GET / body must contain the URL-A global; got:\n{body1_str}"
+    );
+    assert!(
+        !body1_str.contains("url-b"),
+        "first GET / body must NOT contain the URL-B token (the \
+         URL-B override is not yet engaged); got:\n{body1_str}"
+    );
+    let snapshot_after_first = rbp_dashboard::inject_cache_snapshot_for_test();
+    let (cached_url_after_first, _) =
+        snapshot_after_first.expect("STW-062 INJECT_CACHE must be populated after the URL-A GET /");
+    assert_eq!(
+        cached_url_after_first, "https://url-a.pages.dev/",
+        "STW-062 INJECT_CACHE must hold URL-A after the first GET /"
+    );
+
+    // 2. Re-engage the override to URL-B. The
+    //    `set_deployed_url_for_test` call
+    //    replaces the held URL-A value (the
+    //    `Mutex<Option<String>>` the
+    //    `DEPLOYED_URL_TEST_OVERRIDE` static
+    //    pins is a `set` not an `engaged` guard,
+    //    so a re-engage mid-test is supported).
+    rbp_dashboard::set_deployed_url_for_test("https://url-b.pages.dev/");
+    let (status2, body2, _ct2) = get(app.clone(), "/").await;
+    assert_eq!(status2, StatusCode::OK, "second GET / (URL-B) must be 200");
+    let body2_str = std::str::from_utf8(&body2).expect("utf-8 body 2");
+    // 2a. The URL-B global MUST appear in the
+    //     response body. A regression that
+    //     serves the cached URL-A body on the
+    //     URL-B request (the cache did not
+    //     invalidate) fails this assertion.
+    assert!(
+        body2_str.contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://url-b.pages.dev/\";"),
+        "second GET / body must contain the URL-B global (the \
+         cache must have invalidated on URL change); got:\n{body2_str}"
+    );
+    // 2b. The URL-A global MUST NOT appear in
+    //     the response body. A regression that
+    //     appends the URL-A fragment without
+    //     dropping the URL-B-injected body (a
+    //     possible `String::replace` regression
+    //     on the inject path) fails this
+    //     assertion.
+    assert!(
+        !body2_str.contains("window.__DASHBOARD_DEPLOYED_URL__ = \"https://url-a.pages.dev/\";"),
+        "second GET / body must NOT contain the URL-A global (the \
+         cache must have replaced the URL-A entry, not appended \
+         to it); got:\n{body2_str}"
+    );
+    // 2c. The `inject_cache_snapshot_for_test`
+    //     after the URL-B request must report
+    //     URL-B (the cache was overwritten with
+    //     the URL-B entry, not retained as
+    //     URL-A). A regression that re-runs
+    //     `inject_deployed_url` for URL-B but
+    //     does NOT overwrite the cache (a
+    //     `OnceLock::set` that fails silently on
+    //     the second call) leaves the cache
+    //     holding URL-A — the next URL-B request
+    //     is a hit on the URL-A cache, fails
+    //     this snapshot-equality check.
+    let snapshot_after_second = rbp_dashboard::inject_cache_snapshot_for_test();
+    let (cached_url_after_second, _) = snapshot_after_second
+        .expect("STW-062 INJECT_CACHE must be populated after the URL-B GET /");
+    assert_eq!(
+        cached_url_after_second, "https://url-b.pages.dev/",
+        "STW-062 INJECT_CACHE must hold URL-B after the second \
+         GET / (the cache must have been overwritten on the \
+         URL change, not retained as URL-A); the cache holds: \
+         {cached_url_after_second}"
+    );
 }

@@ -10318,7 +10318,7 @@ already-shipped surfaces:
 The eighth pass therefore ships five
 deliverables, ordered by leverage:
 
-- [ ] **[P0] `STW-062` The
+- [x] **[P0] `STW-062` The
   `crates/dashboard/src/router.rs
   ::serve_static_index` handler
   caches the `(deployed_url,
