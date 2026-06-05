@@ -4987,11 +4987,18 @@ single-shipment leverage.
   pinned prefix. **`lens:` Design
   (observability audit).**
 
-- [ ] **[P1] `STW-040` `README.md` `## Try it now` + `##
-  Public dashboard` first-class sections + a
-  one-command `scripts/replay-locally.sh` operator
-  shim that exercises the STW-016 + STW-019
-  runbook chain end-to-end with no Postgres.** The
+- [ ] **[P1] ~~`STW-040`~~ `README.md` `## Try it now` —
+  DROPPED 2026-06-04 by STW-046.** The morning wave's
+  `## Try it now` + `## Public dashboard` section add +
+  `scripts/replay-locally.sh` shim is busywork the
+  testnet north star does not need; the existing
+  `## Quick Start` + `## TUI Preview` + `## Testnet
+  launch proof` + `## Testnet publish bundle` + `##
+  Public dashboard` sections already answer the
+  first-time-visitor questions. A static-shape pin in
+  `crates/autotrain/tests/script_shape.rs` enforces
+  the drop (fails CI if the section or shim
+  re-appears). The
   first impression. A first-time visitor opening
   `README.md` currently sees: (1) a `Visual Tour`
   with 2 training-curve screenshots, (2) a
@@ -5126,16 +5133,20 @@ single-shipment leverage.
   north star's "publicly visible"
   requirement).**
 
-- [ ] **[P1] `STW-041` Close the `STW-001` deferred row
-  with a single operator decision: retire the
-  "regenerate executable planning surface"
-  framing as already satisfied by the
-  `genesis/plans/000-ceo-testnet-roadmap.md` +
-  `IMPLEMENTATION_PLAN.md` pair, and add a
-  checked-in `genesis/AUTHORED-QUEUE.md`
-  operator-owned backstop queue the auto-loop
-  can fall back to if `gbrain doctor` is
-  unconfigured.** Closes the last
+- [ ] **[P1] ~~`STW-041`~~ Close the `STW-001` deferred row
+  — DROPPED 2026-06-04 by STW-046.** The morning
+  wave's planning-surface retirement task (retire
+  the `STW-001` deferred row + add a
+  `genesis/AUTHORED-QUEUE.md` fallback queue) is
+  busywork the testnet north star does not need.
+  The existing `genesis/plans/000-ceo-testnet-
+  roadmap.md` + `IMPLEMENTATION_PLAN.md` pair has
+  proved sufficient for 35+ shipped STW rows; the
+  `STW-001` operator-decision deferred row remains
+  in the plan as the sign-off blocker it already
+  is. No `AUTHORED-QUEUE.md` fallback queue is
+  added. The drop is enforced by the same
+  static-shape pin that guards STW-040. Close the
   `verification:workspace-parallel`-shaped
   decision loop the testnet north star does
   not actually need. The CEO sign-off's testnet

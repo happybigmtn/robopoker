@@ -2421,3 +2421,49 @@ fn dashboard_fixtures_index_json_is_tracked_and_nonempty() {
         )
     });
 }
+
+// ===========================================================================
+// STW-046 dropped-work enforcement
+// ===========================================================================
+//
+// The afternoon 2026-06-04 three-lens review (kanban task
+// `t_35186537`) found the morning wave's `STW-040` README
+// `## Try it now` section + `scripts/replay-locally.sh` shim and
+// the companion `STW-041` planning-surface retirement were
+// busywork the testnet north star does not need. STW-046 drops
+// both rows. These negative shape pins ensure the dropped work
+// does not re-enter the tree silently — a future refactor that
+// re-adds the README section or the bash shim fails CI at the
+// cheapest static-check step.
+
+fn readme_path() -> PathBuf {
+    workspace_root().join("README.md")
+}
+
+fn replay_locally_script_path() -> PathBuf {
+    workspace_root().join("scripts").join("replay-locally.sh")
+}
+
+#[test]
+fn stw_046_replay_locally_script_remains_dropped() {
+    let p = replay_locally_script_path();
+    assert!(
+        !p.exists(),
+        "STW-046 dropped the `scripts/replay-locally.sh` shim as busywork; \
+         a regression that re-adds it fails this static pin. \
+         Remove the file or update this test if the drop decision is reversed."
+    );
+}
+
+#[test]
+fn stw_046_readme_try_it_now_section_remains_dropped() {
+    let readme = read(&readme_path());
+    assert!(
+        !readme.contains("## Try it now"),
+        "STW-046 dropped the README `## Try it now` section as busywork; \
+         the existing `## Quick Start` + `## TUI Preview` + `## Testnet launch proof` \
+         + `## Testnet publish bundle` + `## Public dashboard` sections already cover \
+         the first-time-visitor path. A regression that re-adds `## Try it now` \
+         fails this static pin."
+    );
+}
