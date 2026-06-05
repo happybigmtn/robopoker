@@ -723,27 +723,38 @@ impl std::fmt::Display for InjectError {
     }
 }
 
-/// `inject_deployed_url` — STW-058's injection helper.
-/// Escapes the URL for JS string-context safety, finds
+/// `inject_deployed_url` — STW-058's injection helper,
+/// extended by STW-066 to inject *two* `<script>` tags:
+/// one for the env-knob value (`window.__DASHBOARD_DEPLOYED_URL__`)
+/// and one for the Rust default (`window.__DASHBOARD_DEPLOYED_URL_DEFAULT__`).
+/// Escapes both URLs for JS string-context safety, finds
 /// the `</head>` delimiter in the static page, and
-/// splices a `<script>` tag that sets the
-/// `window.__DASHBOARD_DEPLOYED_URL__` global before
-/// the body IIFE runs. The function returns
+/// splices the tags before the body IIFE runs. The function returns
 /// `Result<String, InjectError>` so a `</head>`-less
 /// page surfaces as a 500 with a diagnostic body
 /// instead of panicking the axum server.
-fn inject_deployed_url(html: &str, deployed_url: &str) -> Result<String, InjectError> {
-    let escaped = deployed_url
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('<', "\\u003c");
+fn inject_deployed_url(
+    html: &str,
+    deployed_url: &str,
+    default_url: &str,
+) -> Result<String, InjectError> {
+    let escape = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('<', "\\u003c")
+    };
+    let escaped = escape(deployed_url);
+    let escaped_default = escape(default_url);
     let tag = "</head>";
     let idx = html
         .rfind(tag)
         .ok_or_else(|| InjectError::MissingHeadTag(html.len()))?;
-    let inject = format!("<script>window.__DASHBOARD_DEPLOYED_URL__ = \"{escaped}\";</script>");
+    let inject = format!(
+        "<script>window.__DASHBOARD_DEPLOYED_URL__ = \"{escaped}\";</script>\
+         <script>window.__DASHBOARD_DEPLOYED_URL_DEFAULT__ = \"{escaped_default}\";</script>"
+    );
     let mut out = String::with_capacity(html.len() + inject.len() + tag.len());
     out.push_str(&html[..idx]);
     out.push_str(&inject);
@@ -892,7 +903,7 @@ fn cached_inject(deployed_url: &str, html: &str) -> Result<String, InjectError> 
     // the cost; subsequent requests with the same
     // URL on the same worker thread are a
     // `RefCell` borrow + a `String::clone`.
-    let body = inject_deployed_url(html, deployed_url)?;
+    let body = inject_deployed_url(html, deployed_url, DEFAULT_DEPLOYED_URL)?;
     INJECT_CACHE.with(|slot| {
         *slot.borrow_mut() = Some((deployed_url.to_string(), body.clone()));
     });

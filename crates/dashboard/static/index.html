@@ -389,7 +389,7 @@
           // meta line + the README +
           // the manifest all read from
           // a single source.
-          var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || 'https://robopoker-testnet-dashboard.pages.dev/';
+          var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL_DEFAULT__) || 'https://robopoker-testnet-dashboard.pages.dev/';
           meta.textContent = 'index: ' + publishRoot + ' entries=' + (index.entry_count || 0) + ' total_bytes=' + (index.total_bytes || 0) + ' created_at=' + createdAt + ' deployed_at=' + deployedUrl;
           // STW-052: the empty-state paragraph
           // is hidden by default; the JS flips

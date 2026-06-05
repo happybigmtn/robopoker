@@ -959,7 +959,7 @@ async fn meta_line_reflects_dashboard_deployed_url_env_knob() {
     // STW-059 fixes via the deploy-runbook
     // export.
     assert!(
-        body_str.contains("var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || 'https://robopoker-testnet-dashboard.pages.dev/';"),
+        body_str.contains("var deployedUrl = (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL__) || (typeof window !== 'undefined' && window.__DASHBOARD_DEPLOYED_URL_DEFAULT__) || 'https://robopoker-testnet-dashboard.pages.dev/';"),
         "GET / body must contain the STW-058 JS `deployedUrl` \
          read source (the consume side); got:\n{body_str}"
     );
@@ -1447,5 +1447,48 @@ async fn serve_static_index_returns_500_on_missing_head_tag() {
     assert!(
         body_str.contains("inject failed: static index.html is missing </head>"),
         "STW-064: 500 body must contain the diagnostic headline; got: {body_str}"
+    );
+}
+
+/// STW-066: the `serve_static_index` handler injects
+/// a second `<script>` tag that sets
+/// `window.__DASHBOARD_DEPLOYED_URL_DEFAULT__` from the
+/// Rust `pub const DEFAULT_DEPLOYED_URL`, so the static
+/// JS fallback + the Rust default are one source. The
+/// pin: drive `GET /` with no env override engaged (the
+/// default path), assert the response body contains the
+/// literal `window.__DASHBOARD_DEPLOYED_URL_DEFAULT__ =
+/// "https://robopoker-testnet-dashboard.pages.dev/";`
+/// substring (the STW-066 router-injected default
+/// global) AND the sibling
+/// `window.__DASHBOARD_DEPLOYED_URL__` global with the
+/// same value (since no override is engaged, both
+/// globals resolve to `DEFAULT_DEPLOYED_URL`).
+#[tokio::test]
+async fn serve_static_index_injects_deployed_url_default_global() {
+    rbp_dashboard::clear_inject_cache_for_test();
+    let app = dashboard_app(app_state_with_fixtures());
+
+    let (status, body, _ct) = get(app, "/").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET / must return 200; got {status}"
+    );
+    let body_str = std::str::from_utf8(&body).expect("utf-8 body");
+    let default_url = rbp_dashboard::DEFAULT_DEPLOYED_URL;
+    assert!(
+        body_str.contains(&format!(
+            "window.__DASHBOARD_DEPLOYED_URL_DEFAULT__ = \"{default_url}\";"
+        )),
+        "GET / body must contain the STW-066 router-injected \
+         `window.__DASHBOARD_DEPLOYED_URL_DEFAULT__` global; got:\n{body_str}"
+    );
+    assert!(
+        body_str.contains(&format!(
+            "window.__DASHBOARD_DEPLOYED_URL__ = \"{default_url}\";"
+        )),
+        "GET / body must contain the STW-058 router-injected \
+         `window.__DASHBOARD_DEPLOYED_URL__` global (default path); got:\n{body_str}"
     );
 }
