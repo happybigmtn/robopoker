@@ -103,7 +103,11 @@ Prerequisites:
   `target/release/trainer` to skip the debug build.
 
 ```sh
-# One-shot, debug build:
+# One-shot, debug build, fast mode (minutes):
+DATABASE_URL=postgres://user:***@host:5432/dbname \
+    RBP_TESTNET_FAST=1 bash scripts/testnet-live-proof.sh
+
+# One-shot, debug build, full budget (hours):
 DATABASE_URL=postgres://user:***@host:5432/dbname \
     bash scripts/testnet-live-proof.sh
 
@@ -113,11 +117,13 @@ DATABASE_URL=postgres://user:***@host:5432/dbname \
     bash scripts/testnet-live-proof.sh
 ```
 
-The script defaults to a small-budget chain (2 smoke epochs, 4 bench
-hands, 4 compare hands) so a complete run finishes in seconds, not
-minutes. Override the env knobs to scale up; the chain is
-structurally identical to the production launch path so a large
-budget is just "more hands, more epochs".
+The script runs in **fast mode** when `RBP_TESTNET_FAST=1` is set,
+using a small-budget chain (2 smoke epochs, 4 bench hands,
+4 compare hands) so a complete run finishes in minutes rather than
+hours. Without the flag the trainer uses its own defaults (larger
+budgets). Override individual env knobs to scale up or down; the
+chain is structurally identical to the production launch path so a
+large budget is just "more hands, more epochs".
 
 ## Environment knobs honoured
 
@@ -129,12 +135,13 @@ for `cargo test -p rbp-autotrain --features database --test live_proof`:
 |---|---|---|
 | `DATABASE_URL` | (required) | Postgres URL. Forwarded as `DB_URL` (the trainer's actual env name). |
 | `DB_URL` | (inherits from `DATABASE_URL`) | Direct override. |
-| `RBP_FAST_EPOCHS` | 2 | smoke step epoch count |
-| `RBP_FAST_BATCH` | 16 | smoke step batch size |
-| `RBP_BENCH_HANDS` | 4 | bench step hand count |
-| `RBP_BENCH_BLIND` | 2 | bench step blind size |
-| `RBP_COMPARE_HANDS` | 4 | compare step hand count |
-| `RBP_COMPARE_BLIND` | 2 | compare step blind size |
+| `RBP_TESTNET_FAST` | (unset) | Set to `1` to auto-select minimal epochs/hands/batch for a fast validation run. |
+| `RBP_FAST_EPOCHS` | 2 (when `RBP_TESTNET_FAST=1`) | smoke step epoch count |
+| `RBP_FAST_BATCH` | 16 (when `RBP_TESTNET_FAST=1`) | smoke step batch size |
+| `RBP_BENCH_HANDS` | 4 (when `RBP_TESTNET_FAST=1`) | bench step hand count |
+| `RBP_BENCH_BLIND` | 2 (when `RBP_TESTNET_FAST=1`) | bench step blind size |
+| `RBP_COMPARE_HANDS` | 4 (when `RBP_TESTNET_FAST=1`) | compare step hand count |
+| `RBP_COMPARE_BLIND` | 2 (when `RBP_TESTNET_FAST=1`) | compare step blind size |
 | `RBP_BENCH_TRANSCRIPT_DIR` | (set by runbook) | bench's transcript writer location |
 | `TRAINER_BIN` | `<workspace>/target/debug/trainer` | trainer binary path |
 

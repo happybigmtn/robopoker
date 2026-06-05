@@ -7,7 +7,7 @@
 //! broken, executable bit cleared, doc drift) fails CI before it
 //! ever reaches a live DB.
 //!
-//! The five sub-tests assert the runbook's static contract:
+//! The six sub-tests assert the runbook's static contract:
 //!
 //! 1. `script_exists_and_is_executable` — the runbook is on disk
 //!    and has its executable bit set (a worker can invoke it via
@@ -37,6 +37,9 @@
 //!    `crates/autotrain/tests/live_proof_receipt.rs` integration
 //!    test simultaneously — the operator-visible receipt and
 //!    the CI-visible receipt share one source of truth.
+//! 6. `testnet_live_proof_script_documents_fast_mode` (STW-069) —
+//!    the runbook script contains the `RBP_TESTNET_FAST` string
+//!    and the runbook doc documents the fast-mode env knob.
 //!
 //! The test deliberately does **not** shell out to the runbook
 //! itself: that would require `DATABASE_URL` and would be a
@@ -152,6 +155,7 @@ fn runbook_doc_lists_every_env_knob() {
     // internally (a future refactor that adds a knob must also
     // add it here, or this test will fail).
     let required_knobs = [
+        "RBP_TESTNET_FAST",
         "RBP_FAST_EPOCHS",
         "RBP_FAST_BATCH",
         "RBP_BENCH_HANDS",
@@ -457,6 +461,47 @@ fn extract_heredoc_body(script: &str, tag: &str) -> Option<String> {
         body.push(line);
     }
     None
+}
+
+// ===========================================================================
+// STW-069 fast-mode shape pin
+// ===========================================================================
+//
+// The STW-069 fast-mode knob (`RBP_TESTNET_FAST=1`) lets an operator
+// collapse the testnet-live-proof chain from hours to minutes by
+// auto-selecting minimal epochs/hands/batch. The shape pin asserts
+// the runbook script contains the knob string and the runbook doc
+// documents it, so a future refactor that drops the fast-mode path
+// fails CI before it reaches a live Postgres.
+
+#[test]
+fn testnet_live_proof_script_documents_fast_mode() {
+    let script = read(&script_path());
+    assert!(
+        script.contains("RBP_TESTNET_FAST"),
+        "STW-069 runbook script must contain the `RBP_TESTNET_FAST` string; \
+         the fast-mode contract must be present in the source"
+    );
+    // The script must conditionally set the minimal values when
+    // RBP_TESTNET_FAST=1 is set. We assert the conditional block
+    // shape (an `if` test on the env var) so a future refactor
+    // that drops the conditional fails here.
+    assert!(
+        script.contains("RBP_TESTNET_FAST")
+            && (script.contains("[[ \"${RBP_TESTNET_FAST:-}\" == \"1\" ]]")
+                || script.contains("[[ \"${RBP_TESTNET_FAST:-}\" == \"1\" ]]")),
+        "STW-069 runbook script must conditionally honour RBP_TESTNET_FAST=1; \
+         a future refactor that drops the conditional breaks the fast-mode contract"
+    );
+    // The runbook doc must mention the knob so an operator reading
+    // the doc knows how to invoke fast mode.
+    let doc = read(&runbook_doc_path());
+    assert!(
+        doc.contains("RBP_TESTNET_FAST"),
+        "STW-069 runbook doc at {} must document the RBP_TESTNET_FAST knob; \
+         an operator would not know how to invoke fast mode",
+        runbook_doc_path().display()
+    );
 }
 
 // ===========================================================================

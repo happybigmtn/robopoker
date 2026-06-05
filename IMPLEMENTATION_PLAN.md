@@ -8989,7 +8989,7 @@ highest single-shipment leverage. The
 scope. The new scope is `STW-054` + `STW-055`
 + `STW-056` + `STW-044` + `STW-057` + `STW-058`.
 
-- [ ] **[P0] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
+- [x] **[P0] `STW-054` `scripts/deploy-dashboard-cloudflare.sh`
   + committed `wrangler.toml` +
   `scripts/deploy-dashboard-cloudflare.md`
   runbook doc + README "Public dashboard:"
@@ -10427,7 +10427,7 @@ by leverage:
   locally without running the full expensive
   chain).**
 
-- [ ] **[P1] `STW-069` Add
+- [x] **[P1] `STW-069` Add
   `RBP_TESTNET_FAST=1` support to
   `scripts/testnet-live-proof.sh` that auto-
   sets minimal env vars (`RBP_FAST_EPOCHS=2`,

@@ -40,13 +40,22 @@
 #                 set and `DB_URL` is not, the script forwards
 #                 `DATABASE_URL` → `DB_URL` so the trainer finds the
 #                 same Postgres the rest of the chain sees.
-#   RBP_FAST_EPOCHS       (default 2)   smoke step epoch count
-#   RBP_FAST_BATCH        (default 16)  smoke step batch size
-#   RBP_BENCH_HANDS       (default 4)   bench step hand count
-#   RBP_BENCH_BLIND       (default 2)   bench step blind size
+#   RBP_TESTNET_FAST      (unset)     Set to 1 to auto-select minimal
+#                                     epochs/hands/batch for a fast
+#                                     validation run.
+#   RBP_FAST_EPOCHS       (2 when     smoke step epoch count
+#                          fast)
+#   RBP_FAST_BATCH        (16 when    smoke step batch size
+#                          fast)
+#   RBP_BENCH_HANDS       (4 when     bench step hand count
+#                          fast)
+#   RBP_BENCH_BLIND       (2 when     bench step blind size
+#                          fast)
 #   RBP_BENCH_TRANSCRIPT_DIR  (set by the script; do not override)
-#   RBP_COMPARE_HANDS     (default 4)   compare step hand count
-#   RBP_COMPARE_BLIND     (default 2)   compare step blind size
+#   RBP_COMPARE_HANDS     (4 when     compare step hand count
+#                          fast)
+#   RBP_COMPARE_BLIND     (2 when     compare step blind size
+#                          fast)
 #   TRAINER_BIN           (default <workspace>/target/debug/trainer)
 #                 Path to the trainer binary. If the file is missing
 #                 the script runs `cargo build --bin trainer` first.
@@ -89,13 +98,18 @@ if [[ -n "${DATABASE_URL:-}" && -z "${DB_URL:-}" ]]; then
     export DB_URL="$DATABASE_URL"
 fi
 
-# --- small-budget defaults so the chain finishes in seconds --------------
-: "${RBP_FAST_EPOCHS:=2}"
-: "${RBP_FAST_BATCH:=16}"
-: "${RBP_BENCH_HANDS:=4}"
-: "${RBP_BENCH_BLIND:=2}"
-: "${RBP_COMPARE_HANDS:=4}"
-: "${RBP_COMPARE_BLIND:=2}"
+# --- fast mode ------------------------------------------------------------
+# RBP_TESTNET_FAST=1 auto-sets minimal epochs/hands so an operator can
+# validate the full chain end-to-end in minutes rather than hours.
+# When unset, the trainer uses its own defaults (larger budgets).
+if [[ "${RBP_TESTNET_FAST:-}" == "1" ]]; then
+    : "${RBP_FAST_EPOCHS:=2}"
+    : "${RBP_FAST_BATCH:=16}"
+    : "${RBP_BENCH_HANDS:=4}"
+    : "${RBP_BENCH_BLIND:=2}"
+    : "${RBP_COMPARE_HANDS:=4}"
+    : "${RBP_COMPARE_BLIND:=2}"
+fi
 
 # --- trainer binary path + on-demand build -------------------------------
 TRAINER_BIN="${TRAINER_BIN:-$WORKSPACE_ROOT/target/debug/trainer}"
@@ -118,12 +132,13 @@ mkdir -p "$RECEIPT_DIR"
 {
     echo "WORKSPACE_ROOT=$WORKSPACE_ROOT"
     echo "TRAINER_BIN=$TRAINER_BIN"
-    echo "RBP_FAST_EPOCHS=$RBP_FAST_EPOCHS"
-    echo "RBP_FAST_BATCH=$RBP_FAST_BATCH"
-    echo "RBP_BENCH_HANDS=$RBP_BENCH_HANDS"
-    echo "RBP_BENCH_BLIND=$RBP_BENCH_BLIND"
-    echo "RBP_COMPARE_HANDS=$RBP_COMPARE_HANDS"
-    echo "RBP_COMPARE_BLIND=$RBP_COMPARE_BLIND"
+    echo "RBP_TESTNET_FAST=${RBP_TESTNET_FAST:-<unset>}"
+    echo "RBP_FAST_EPOCHS=${RBP_FAST_EPOCHS:-<unset>}"
+    echo "RBP_FAST_BATCH=${RBP_FAST_BATCH:-<unset>}"
+    echo "RBP_BENCH_HANDS=${RBP_BENCH_HANDS:-<unset>}"
+    echo "RBP_BENCH_BLIND=${RBP_BENCH_BLIND:-<unset>}"
+    echo "RBP_COMPARE_HANDS=${RBP_COMPARE_HANDS:-<unset>}"
+    echo "RBP_COMPARE_BLIND=${RBP_COMPARE_BLIND:-<unset>}"
     if [[ -n "${DATABASE_URL:-}" ]]; then
         echo "DATABASE_URL=<redacted: ${#DATABASE_URL} chars>"
     else
