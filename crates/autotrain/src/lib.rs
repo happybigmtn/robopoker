@@ -22,6 +22,7 @@ mod bench;
 mod doctor;
 mod epoch;
 mod error;
+mod error_audit;
 mod fast;
 mod fast2;
 mod fast3;

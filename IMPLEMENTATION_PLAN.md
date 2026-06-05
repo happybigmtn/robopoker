@@ -5621,16 +5621,17 @@ leverage.
   the chain produces, not just the
   chain's per-step exit codes).**
 
-- [ ] **[P1] `STW-044` Re-scope the morning-wave `STW-038`
+- [x] **[P1] `STW-044` Re-scope the morning-wave `STW-038`
   `TrainerError` slice to a *per-arm error-shape
   audit*: one new lib test per existing
   eprintln! error line, no new `TrainerError`
   enum, no new `to_pinned_line` method, no
-  routing refactor.** Closes the
-  "every error must be greppable" Design
-  concern the morning wave named *without*
-  the AI-slop refactor the morning wave
-  proposed. The afternoon review finds the
+  routing refactor.** **SHIPPED** — the
+  `crates/autotrain/src/error_audit.rs` module
+  landed with 11 static-grep lib tests pinning
+  the per-arm `live_proof ...` error-line shape
+  across the 7 source files the morning wave's
+  STW-038 listed. The afternoon review found the
   existing per-arm `live_proof ...` /
   `live_proof publish error: receipt is
   red: ...` / `live_proof publish_remote
@@ -8361,14 +8362,14 @@ is NOT new scope. The new scope is `STW-051` +
   assertion once the fixtures_smoke
   fixtures are also clean).**
 
-- [ ] **[P1] `STW-044` (re-affirmation of the
+- [x] **[P1] `STW-044` (re-affirmation of the
   fourth-pass open row)
   `crates/autotrain/src/error_audit.rs`
-  per-arm error-shape audit: 10 new
+  per-arm error-shape audit: 11 new
   static-grep lib tests pinning the
   existing per-arm
   `live_proof ...` error-line text
-  without rewriting it.** The fifth
+  without rewriting it.** **SHIPPED**. The fifth
   pass re-confirms the fourth-pass's
   finding: the morning wave's
   `TrainerError` enum refactor was
@@ -9354,7 +9355,7 @@ scope. The new scope is `STW-054` + `STW-055`
   not in the code, it's in the
   plan's own signal-to-noise ratio).**
 
-- [ ] **[P1] `STW-044` Re-affirmation of
+- [x] **[P1] `STW-044` Re-affirmation of
   the morning + afternoon + third +
   fourth + fifth pass's re-scoped
   shape: a 10-lib-test static-grep
