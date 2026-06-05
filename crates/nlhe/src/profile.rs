@@ -99,11 +99,12 @@ impl rbp_database::Schema for NlheProfile {
                 past       BIGINT,
                 present    SMALLINT,
                 choices    BIGINT,
+                position   SMALLINT,
                 weight     REAL,
                 regret     REAL,
                 evalue     REAL,
                 counts     INT DEFAULT 0,
-                UNIQUE     (past, present, choices, edge)
+                UNIQUE     (past, present, choices, edge, position)
             );"
         )
     }
@@ -111,7 +112,7 @@ impl rbp_database::Schema for NlheProfile {
         const_format::concatcp!(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_blueprint_upsert  ON ",
             rbp_database::BLUEPRINT,
-            " (present, past, choices, edge);
+            " (present, past, choices, edge, position);
              CREATE        INDEX IF NOT EXISTS idx_blueprint_bucket  ON ",
             rbp_database::BLUEPRINT,
             " (present, past, choices);
@@ -148,6 +149,7 @@ impl rbp_database::BulkSchema for NlheProfile {
             tokio_postgres::types::Type::INT8,   // past (subgame path)
             tokio_postgres::types::Type::INT2,   // present (abstraction bucket)
             tokio_postgres::types::Type::INT8,   // choices (available edges)
+            tokio_postgres::types::Type::INT2,   // position
             tokio_postgres::types::Type::INT8,   // edge (action taken)
             tokio_postgres::types::Type::FLOAT4, // weight
             tokio_postgres::types::Type::FLOAT4, // regret
@@ -159,7 +161,7 @@ impl rbp_database::BulkSchema for NlheProfile {
         const_format::concatcp!(
             "COPY ",
             rbp_database::BLUEPRINT,
-            " (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
+            " (past, present, choices, position, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
         )
     }
 }
@@ -182,7 +184,7 @@ impl rbp_database::Hydrate for NlheProfile {
             .map(|r| r.get::<_, i64>(0) as usize)
             .expect("to have already created epoch metadata");
         const BLUEPRINT_SQL: &str = const_format::concatcp!(
-            "SELECT past, present, choices, edge, weight, regret, evalue, counts FROM ",
+            "SELECT past, present, choices, position, edge, weight, regret, evalue, counts FROM ",
             rbp_database::BLUEPRINT
         );
         let mut encounters = BTreeMap::new();
@@ -194,12 +196,13 @@ impl rbp_database::Hydrate for NlheProfile {
             let subgame = rbp_gameplay::Path::from(row.get::<_, i64>(0) as u64);
             let present = rbp_gameplay::Abstraction::from(row.get::<_, i16>(1));
             let choices = rbp_gameplay::Path::from(row.get::<_, i64>(2) as u64);
-            let edge = NlheEdge::from(row.get::<_, i64>(3) as u64);
-            let weight = row.get::<_, f32>(4);
-            let regret = row.get::<_, f32>(5);
-            let evalue = row.get::<_, f32>(6);
-            let counts = row.get::<_, i32>(7) as u32;
-            let bucket = NlheInfo::from((subgame, present, choices));
+            let position = row.get::<_, i16>(3) as u8;
+            let edge = NlheEdge::from(row.get::<_, i64>(4) as u64);
+            let weight = row.get::<_, f32>(5);
+            let regret = row.get::<_, f32>(6);
+            let evalue = row.get::<_, f32>(7);
+            let counts = row.get::<_, i32>(8) as u32;
+            let bucket = NlheInfo::from((subgame, present, choices, position));
             encounters
                 .entry(bucket)
                 .or_insert_with(BTreeMap::default)
@@ -226,16 +229,18 @@ impl rbp_database::Hydrate for NlheProfile {
 
 #[cfg(feature = "database")]
 impl NlheProfile {
-    pub fn rows(self) -> impl Iterator<Item = (i64, i16, i64, i64, f32, f32, f32, i32)> {
+    pub fn rows(self) -> impl Iterator<Item = (i64, i16, i64, i16, i64, f32, f32, f32, i32)> {
         self.encounters.into_iter().flat_map(|(info, edges)| {
             let subgame = i64::from(info.subgame());
             let present = i16::from(info.bucket());
             let choices = i64::from(info.choices());
+            let position = info.position() as i16;
             edges.into_iter().map(move |(edge, encounter)| {
                 (
                     subgame,
                     present,
                     choices,
+                    position,
                     u64::from(edge) as i64,
                     encounter.weight,
                     encounter.regret,

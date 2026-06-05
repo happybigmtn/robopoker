@@ -60,6 +60,10 @@ impl NlheInfo {
     pub fn bucket(&self) -> NlheSecret {
         self.secret
     }
+    /// The relative position (0 = BTN/SB, 1 = BB).
+    pub fn position(&self) -> u8 {
+        self.public.position()
+    }
 }
 
 impl std::fmt::Display for NlheInfo {
@@ -106,12 +110,17 @@ where
             .map(NlheEdge::from)
             .fold(NlheGame::root(), |game, edge| CfrGame::apply(&game, edge));
         let choices = Game::from(canonical).choices(subgame.aggression());
-        Self::from((subgame, secret, choices))
+        let position = if canonical.turn().position() == canonical.dealer().position() {
+            0
+        } else {
+            1
+        };
+        Self::from((subgame, secret, choices, position))
     }
 }
 
-impl From<(Path, Abstraction, Path)> for NlheInfo {
-    fn from((subgame, secret, choices): (Path, Abstraction, Path)) -> Self {
+impl From<(Path, Abstraction, Path, u8)> for NlheInfo {
+    fn from((subgame, secret, choices, position): (Path, Abstraction, Path, u8)) -> Self {
         let subgame = subgame
             .into_iter()
             .rev()
@@ -120,7 +129,7 @@ impl From<(Path, Abstraction, Path)> for NlheInfo {
             .into_iter()
             .rev()
             .collect::<Path>();
-        let public = NlhePublic::new(subgame, choices);
+        let public = NlhePublic::new(subgame, choices, position);
         let secret = NlheSecret::from(secret);
         Self { public, secret }
     }
@@ -142,7 +151,12 @@ impl From<(&NlheEncoder, &NlheTree, NlheBranch)> for NlheInfo {
             .collect::<Path>();
         let choices = game.as_ref().choices(subgame.aggression());
         let secret = NlheSecret::from(encoder.abstraction(&game.sweat()));
-        let public = NlhePublic::new(subgame, choices);
+        let position = if game.as_ref().turn().position() == game.as_ref().dealer().position() {
+            0
+        } else {
+            1
+        };
+        let public = NlhePublic::new(subgame, choices, position);
         Self { public, secret }
     }
 }
@@ -184,8 +198,13 @@ impl Arbitrary for NlheInfo {
             let choices = game.choices(subgame.aggression());
             if choices.length() > 0 {
                 let secret = NlheSecret::from(Abstraction::from(street));
+                let position = if game.turn().position() == game.dealer().position() {
+                    0
+                } else {
+                    1
+                };
                 return Self {
-                    public: NlhePublic::new(subgame, choices),
+                    public: NlhePublic::new(subgame, choices, position),
                     secret,
                 };
             }
@@ -296,11 +315,13 @@ mod tests {
             Path::from(i64::from(info.subgame())),
             Abstraction::from(i16::from(info.bucket())),
             Path::from(i64::from(info.choices())),
+            info.position(),
         ));
         assert_eq!(info.subgame(), deserialized.subgame());
         assert_eq!(info.street(), deserialized.street());
         assert_eq!(info.bucket(), deserialized.bucket());
         assert_eq!(info.choices(), deserialized.choices());
+        assert_eq!(info.position(), deserialized.position());
     }
 
     #[test]
@@ -344,7 +365,7 @@ mod tests {
             .push(Action::Raise(9))
             .push(Action::Call(6));
         let abs = Abstraction::random();
-        let info = NlheInfo::from((recall.subgame(), abs, recall.choices()));
+        let info = NlheInfo::from((recall.subgame(), abs, recall.choices(), 0));
         let current = recall
             .subgame()
             .into_iter()
@@ -381,5 +402,14 @@ mod tests {
         );
         // Only assert actual != canonical if they're actually different (depends on snapping)
         // The key assertion is that info uses canonical, regardless of whether they differ
+    }
+    #[test]
+    fn position_distinguishes_seats() {
+        let subgame = Path::default();
+        let choices = Path::default();
+        let abs = Abstraction::from(Street::Pref);
+        let btn = NlheInfo::from((subgame, abs, choices, 0));
+        let bb = NlheInfo::from((subgame, abs, choices, 1));
+        assert_ne!(btn, bb, "same subgame/abs/choices but different position must be distinct");
     }
 }

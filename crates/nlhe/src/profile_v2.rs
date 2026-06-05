@@ -74,7 +74,7 @@ impl NlheProfileV2 {
     /// identical to [`NlheProfile::rows`]. Used by
     /// `Fast2Session::sync` to drive the binary `COPY`
     /// stream into [`rbp_database::BLUEPRINT2`].
-    pub fn into_rows(self) -> impl Iterator<Item = (i64, i16, i64, i64, f32, f32, f32, i32)> {
+    pub fn into_rows(self) -> impl Iterator<Item = (i64, i16, i64, i16, i64, f32, f32, f32, i32)> {
         self.0.rows()
     }
     /// Borrow the inner profile. `DatabasePlayer2::decide`
@@ -120,11 +120,12 @@ impl Schema for NlheProfileV2 {
                 past       BIGINT,
                 present    SMALLINT,
                 choices    BIGINT,
+                position   SMALLINT,
                 weight     REAL,
                 regret     REAL,
                 evalue     REAL,
                 counts     INT DEFAULT 0,
-                UNIQUE     (past, present, choices, edge)
+                UNIQUE     (past, present, choices, edge, position)
             );"
         )
     }
@@ -136,7 +137,7 @@ impl Schema for NlheProfileV2 {
         const_format::concatcp!(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_blueprint_v2_upsert  ON ",
             BLUEPRINT2,
-            " (present, past, choices, edge);
+            " (present, past, choices, edge, position);
              CREATE        INDEX IF NOT EXISTS idx_blueprint_v2_bucket  ON ",
             BLUEPRINT2,
             " (present, past, choices);
@@ -177,6 +178,7 @@ impl BulkSchema for NlheProfileV2 {
             tokio_postgres::types::Type::INT8,   // past
             tokio_postgres::types::Type::INT2,   // present
             tokio_postgres::types::Type::INT8,   // choices
+            tokio_postgres::types::Type::INT2,   // position
             tokio_postgres::types::Type::INT8,   // edge
             tokio_postgres::types::Type::FLOAT4, // weight
             tokio_postgres::types::Type::FLOAT4, // regret
@@ -190,7 +192,7 @@ impl BulkSchema for NlheProfileV2 {
         const_format::concatcp!(
             "COPY ",
             BLUEPRINT2,
-            " (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
+            " (past, present, choices, position, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
         )
     }
 }
@@ -219,7 +221,7 @@ impl Hydrate for NlheProfileV2 {
             .map(|r| r.get::<_, i64>(0) as usize)
             .unwrap_or(0);
         const BLUEPRINT_SQL: &str = const_format::concatcp!(
-            "SELECT past, present, choices, edge, weight, regret, evalue, counts FROM ",
+            "SELECT past, present, choices, position, edge, weight, regret, evalue, counts FROM ",
             BLUEPRINT2
         );
         let mut encounters = std::collections::BTreeMap::new();
@@ -228,12 +230,13 @@ impl Hydrate for NlheProfileV2 {
                 let subgame = rbp_gameplay::Path::from(row.get::<_, i64>(0) as u64);
                 let present = rbp_gameplay::Abstraction::from(row.get::<_, i16>(1));
                 let choices = rbp_gameplay::Path::from(row.get::<_, i64>(2) as u64);
-                let edge = NlheEdge::from(row.get::<_, i64>(3) as u64);
-                let weight = row.get::<_, f32>(4);
-                let regret = row.get::<_, f32>(5);
-                let evalue = row.get::<_, f32>(6);
-                let counts = row.get::<_, i32>(7) as u32;
-                let bucket = NlheInfo::from((subgame, present, choices));
+                let position = row.get::<_, i16>(3) as u8;
+                let edge = NlheEdge::from(row.get::<_, i64>(4) as u64);
+                let weight = row.get::<_, f32>(5);
+                let regret = row.get::<_, f32>(6);
+                let evalue = row.get::<_, f32>(7);
+                let counts = row.get::<_, i32>(8) as u32;
+                let bucket = NlheInfo::from((subgame, present, choices, position));
                 encounters
                     .entry(bucket)
                     .or_insert_with(std::collections::BTreeMap::default)

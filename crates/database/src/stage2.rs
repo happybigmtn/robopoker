@@ -67,7 +67,7 @@ impl Stage2 for Client {
     async fn merge2(&self) {
         // Same upsert-then-drop recipe as v1
         // `Stage::merge`. The `ON CONFLICT (past,
-        // present, choices, edge)` is the v2
+        // present, choices, edge, position)` is the v2
         // `NlheProfileV2::creates()` UNIQUE constraint;
         // the column list is byte-for-byte the v1
         // blueprint column list, so the v2 binary COPY
@@ -75,9 +75,9 @@ impl Stage2 for Client {
         // through the staging table without any further
         // conversion.
         let sql = format!(
-            "INSERT INTO   {t1} (past, present, choices, edge, weight, regret, evalue, counts)
-             SELECT              past, present, choices, edge, weight, regret, evalue, counts FROM {t2}
-             ON CONFLICT  (past, present, choices, edge)
+            "INSERT INTO   {t1} (past, present, choices, position, edge, weight, regret, evalue, counts)
+             SELECT              past, present, choices, position, edge, weight, regret, evalue, counts FROM {t2}
+             ON CONFLICT  (past, present, choices, edge, position)
              DO UPDATE SET
                  weight = EXCLUDED.weight,
                  regret = EXCLUDED.regret,

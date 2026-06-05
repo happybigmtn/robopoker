@@ -37,7 +37,12 @@ impl NlheEncoder {
         let subgame = Path::default();
         let present = self.abstraction(&game.sweat());
         let choices = game.as_ref().choices(0);
-        NlheInfo::from((subgame, present, choices))
+        let position = if game.as_ref().turn().position() == game.as_ref().dealer().position() {
+            0
+        } else {
+            1
+        };
+        NlheInfo::from((subgame, present, choices, position))
     }
 }
 
@@ -58,7 +63,12 @@ impl rbp_mccfr::Encoder for NlheEncoder {
         let subgame = past.iter().map(|e| Edge::from(*e)).collect::<Path>();
         let present = self.abstraction(&game.sweat());
         let choices = game.as_ref().choices(subgame.aggression());
-        NlheInfo::from((subgame, present, choices))
+        let position = if game.as_ref().turn().position() == game.as_ref().dealer().position() {
+            0
+        } else {
+            1
+        };
+        NlheInfo::from((subgame, present, choices, position))
     }
 }
 
