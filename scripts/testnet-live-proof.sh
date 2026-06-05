@@ -56,7 +56,8 @@
 # Exit codes:
 #   0  chain completed end-to-end
 #   3  DATABASE_URL not set (refuse-to-run gate)
-#   4  trainer binary not found and `cargo build` failed
+#   4  trainer binary not found and `cargo build` failed,
+#      or `trainer --doctor` reported unhealthy prerequisites
 #   5+ chain step N exited non-zero (5 = cluster, 6 = reset, 7 = smoke,
 #      8 = status, 9 = bench, 10 = compare, 11 = replay)
 #
@@ -197,6 +198,12 @@ REPLAY_BYTES=0
 
 # --- the chain -----------------------------------------------------------
 echo "testnet-live-proof: chain starting ($RECEIPT_DIR)"
+
+# (0) --doctor — pre-flight all prerequisites before the
+# expensive `--cluster` step. A red doctor report exits
+# cleanly with a diagnostic so the operator sees the
+# failure in <1 s instead of after minutes of wasted work.
+run_step doctor 4 --doctor
 
 # (1) --cluster — bootstrap pretraining + schema. Idempotent on a
 # warmed DB. Must come first; --reset truncates tables that need to

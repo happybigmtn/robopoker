@@ -10247,7 +10247,7 @@ by leverage:
   mirrors the existing P0 pass verbatim) +
   Design (a readable plan is a usable plan).**
 
-- [ ] **[P0] `STW-067` A new
+- [x] **[P0] `STW-067` A new
   `Mode::Doctor` CLI arm (`trainer --doctor`)
   that pre-flights all testnet-live-proof
   prerequisites (DB connectivity via a

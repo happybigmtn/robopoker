@@ -19,6 +19,7 @@
 //!
 //! - [`workers`] — Distributed training workers for MCCFR
 mod bench;
+mod doctor;
 mod epoch;
 mod error;
 mod fast;
@@ -40,6 +41,7 @@ mod verify_receipt;
 pub mod workers;
 
 pub use bench::*;
+pub use doctor::{DoctorCheck, DoctorReport};
 pub use epoch::*;
 pub use error::*;
 pub use fast::*;

@@ -430,6 +430,15 @@ pub enum Mode {
         /// wrote.
         path: PathBuf,
     },
+    /// STW-067: pre-flight diagnostic. Checks all
+    /// testnet-live-proof prerequisites (DB
+    /// connectivity, required env vars, trainer
+    /// binary sanity) and prints a one-line JSON
+    /// `DoctorReport` plus human-readable
+    /// diagnostics. Read-only + bypasses the DB
+    /// open so a bad `DB_URL` is reported as a
+    /// clean diagnostic instead of a panic.
+    Doctor,
 }
 
 impl Mode {
@@ -758,6 +767,7 @@ impl Mode {
                         },
                     };
                 }
+                "--doctor" => return Self::Doctor,
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -834,7 +844,7 @@ impl Mode {
         eprintln!(
             "  PUBLISH:    publish | verify-receipt | publish-remote | verify-remote | publish-index | verify-index | publish-index-remote | verify-index-remote"
         );
-        eprintln!("  UTIL:       status | reset");
+        eprintln!("  UTIL:       status | reset | doctor");
         std::process::exit(1);
     }
 
@@ -1443,6 +1453,22 @@ impl Mode {
                 }
             }
         }
+        // STW-067: bypass the DB open for `Doctor`.
+        // The doctor is a read-only pre-flight that
+        // checks DB connectivity via a `psql` subprocess
+        // (not a `tokio_postgres::Client` open) so a
+        // bad `DB_URL` is reported as a clean diagnostic
+        // instead of a panic.
+        if let Self::Doctor = Self::from_args() {
+            let report = crate::doctor::run();
+            report.print_diagnostics();
+            println!("{}", report.to_json());
+            if report.healthy {
+                std::process::exit(0);
+            } else {
+                std::process::exit(2);
+            }
+        }
         let client = rbp_database::db().await;
         match Self::from_args() {
             Self::Fast => FastSession::new(client).await.train().await,
@@ -1568,6 +1594,10 @@ impl Mode {
                 "Mode::VerifyIndexRemote is dispatched before the DB open; the \
                  `Self::VerifyIndexRemote {{ .. }}` arm here is the compiler-required \
                  exhaustive-match catch-all"
+            ),
+            Self::Doctor => unreachable!(
+                "Mode::Doctor is dispatched before the DB open; the `Self::Doctor` \
+                 arm here is the compiler-required exhaustive-match catch-all"
             ),
         }
     }
