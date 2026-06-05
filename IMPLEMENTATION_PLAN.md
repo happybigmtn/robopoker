@@ -10123,6 +10123,360 @@ deliverables, ordered by leverage:
 
 ## Next wave - review 2026-06-05
 
+The ninth 2026-06-05 three-lens review (kanban task
+`t_425ba9f4`) re-applies the three lenses to the
+current state of `main` at commit `f56d11c` (HEAD).
+The eighth review-wave (`7462dbc`) correctly identified
+STW-062/063/064/065/066 as the next dashboard-polish
+cluster, and three of those (STW-062/063/064) have since
+shipped on `main`. However, the testnet-live-proof runbook
+— the backbone of the entire testnet north star — has
+**never produced a complete receipt** on this machine:
+every receipt directory under `receipts/` stops at the
+`cluster/` step with exit code `101` (`database connection
+failed: password missing`). The runbook therefore fails
+*late* (after the expensive `--cluster` step) with a Rust
+panic buried in `cluster/stderr.txt`, leaving the operator
+with an incomplete receipt and no `SUMMARY.txt`. The three
+lenses agree this late failure is the single biggest
+blocker to testnet readiness, and that further dashboard
+polish is busywork until the chain actually runs
+end-to-end.
+
+**LENS 1 — CEO / strategic.** The north star is a public,
+reproducible testnet benchmark. The repo has built every
+infrastructure piece (trained configs, bench, compare3,
+transcripts, receipts, publish, dashboard, deploy runbooks),
+but the backbone runbook has never completed. The single
+highest-leverage thrust is to make the runbook **fail fast**
+with a clear diagnostic, and to provide a **fast mode** so
+an operator can validate the full chain in minutes rather
+than hours. Further dashboard caching (beyond STW-062/063/
+064) is busywork to drop until real data flows through.
+Plan hygiene is also strategic: `IMPLEMENTATION_PLAN.md` is
+435 KB with 8+ stale P1 ghost rows, creating a false
+backlog signal that misdirects every future worker.
+
+**LENS 2 — Engineering / feasibility.** A `trainer --doctor`
+pre-flight mode is trivial to implement (~1 file, ~50
+lines) and can be called by the runbook before `--cluster`.
+The runbook's current failure mode (panic after expensive
+work) is the worst possible shape. A fast mode
+(`RBP_TESTNET_FAST=1`) that auto-sets minimal epochs/hands
+is a ~10-line script change and collapses validation time
+from hours to minutes. The dashboard's `read_bench_json_line`
+expects `RBP_DASHBOARD_RECEIPT_DIR/<id>/bench/stdout.txt`,
+but no completed receipt exists to populate it; a
+`scripts/seed-dashboard-local.sh` bridge runbook that
+re-uses existing partial receipt data for local dashboard
+development is a low-risk shell script. STW-065 (plan
+staleness P1 extension) and STW-066 (JS fallback single-
+source-of-truth) are genuine remaining engineering items
+from the eighth pass and should ship.
+
+**LENS 3 — Design / product + UX.** The operator experience
+of the testnet-live-proof runbook is poor: no pre-flight
+check, no fast mode, a panic buried in stderr, and an
+incomplete receipt directory with no SUMMARY. The dashboard
+empty state already tells the operator to run the runbook,
+but when the runbook fails the operator is left with no
+diagnostic guidance. A `--doctor` mode with human-readable
+output fixes this. The `IMPLEMENTATION_PLAN.md` at 11k lines
+is a terrible developer experience — finding the active
+queue requires scrolling through pages of stale ghosts.
+The Design lens also flags that the `compare3.rs`
+integration test parser returns `None` on any unknown JSON
+key, which means a future addition to `Compare3Report::to_json`
+will break the test cryptically instead of gracefully.
+
+The ninth pass therefore ships five deliverables, ordered
+by leverage:
+
+- [ ] **[P0] `STW-065` The
+  `scripts/plan-staleness-gate.sh` script
+  extends its ghost-detection to also catch
+  `[ ] [P1]` rows in both
+  `genesis/plans/000-ceo-testnet-roadmap.md`
+  and `IMPLEMENTATION_PLAN.md` that have a
+  corresponding `[x] STW-NNN` row, with a
+  `RESCOPED 2026-06-05` marker convention, so
+  the 8+ stale `[ ] [P1]` ghost rows (STW-038,
+  STW-045, STW-048, STW-054, STW-057, STW-060,
+  STW-061, plus the [P1] siblings of shipped
+  [P0] rows) get mechanically flagged and
+  retired the same way the existing P0 ghost
+  detection flags `[ ] [P0]` rows.** A
+  1-script + 1-test change:
+  `scripts/plan-staleness-gate.sh` adds a
+  second pass that greps both files for
+  `- [ ] \[P1\] <claim>` rows, maps each
+  claim text to a STW id, and asserts each
+  is either `[x]` (ghost, flag and exit 3)
+  or carries a `RESCOPED 2026-06-05` marker.
+  The new sub-test in
+  `crates/autotrain/tests/plan_staleness.rs`
+  drives the new path with a synthetic 2-row
+  roadmap + plan and asserts the gate exits
+  3 on a P1 ghost. Scope boundary: does NOT
+  change the existing P0 ghost detection (the
+  new P1 pass is a sibling); does NOT change
+  the script's exit-code contract (still exits
+  0 on green, 3 on ghost). Verification
+  commands: `scripts/plan-staleness-gate.sh`
+  (new P1 pass + existing P0 pass both pass,
+  headline `plan staleness gate complete:
+  checked=... ghosts=0`), `cargo test -p
+  rbp-autotrain --test plan_staleness` (new
+  sub-test + existing 4 sub-tests pass),
+  `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`.
+  Required tests: 1 new sub-test in
+  `crates/autotrain/tests/plan_staleness.rs`
+  (`plan_staleness_gate_catches_p1_ghosts`).
+  Dependencies: STW-022 (the existing plan-
+  staleness gate). Estimated scope: S.
+  Completion signal: `scripts/plan-staleness-
+  gate.sh` is green with the new P1 pass; the
+  8+ stale `[ ] [P1]` ghost rows in
+  `IMPLEMENTATION_PLAN.md` are mechanically
+  flagged. **`lens:` CEO (plan hygiene is the
+  cheapest strategic unblocker — every future
+  worker starts with 11k lines of noise
+  without it) + Eng (the 2-pass script shape
+  mirrors the existing P0 pass verbatim) +
+  Design (a readable plan is a usable plan).**
+
+- [ ] **[P0] `STW-067` A new
+  `Mode::Doctor` CLI arm (`trainer --doctor`)
+  that pre-flights all testnet-live-proof
+  prerequisites (DB connectivity via a
+  `SELECT 1` ping, required env vars
+  `DATABASE_URL`, `RBP_FAST_EPOCHS`,
+  `RBP_BENCH_HANDS`, etc., and trainer binary
+  sanity) and prints a one-line JSON
+  `DoctorReport` plus human-readable
+  diagnostics.** Update
+  `scripts/testnet-live-proof.sh` to run
+  `trainer --doctor` as step 0 and exit
+  cleanly with a diagnostic if prerequisites
+  fail, **before** running the expensive
+  `--cluster` step. Owner files:
+  `crates/autotrain/src/doctor.rs` (new
+  `DoctorReport` struct + `run` helper + 4
+  lib tests: `doctor_db_ping_succeeds_on_
+  valid_url`, `doctor_db_ping_fails_on_
+  bad_password`, `doctor_env_report_lists_
+  all_required_vars`, `doctor_json_output_
+  is_parseable`), `crates/autotrain/src/
+  mode.rs` (new `Mode::Doctor` arm + argv
+  handling + `--doctor` in the `Usage:`
+  line), `scripts/testnet-live-proof.sh`
+  (new step-0 `--doctor` invocation + exit
+  on red doctor report), `crates/autotrain/
+  tests/doctor.rs` (new integration test:
+  `doctor_run_exits_zero_on_valid_db` +
+  `doctor_run_exits_nonzero_on_bad_db`,
+  gated on `database` feature + `DATABASE_URL`
+  like sibling integration tests). Scope
+  boundary: does NOT change the existing
+  `--cluster` / `--smoke` / `--bench` / `--compare`
+  / `--compare3` / `--replay` code paths (the
+  doctor is read-only and pre-flight); does
+  NOT change the runbook's receipt layout or
+  SUMMARY.txt format (the doctor failure is a
+  pre-receipt exit); does NOT require a new
+  dependency (uses the existing `tokio_postgres`
+  or `sqlx` connection path the database crate
+  already imports, or a standalone `psql`
+  subprocess fallback for the no-DB doctor
+  path). Verification commands: `cargo test -p
+  rbp-autotrain --test doctor` (2 new sub-
+  tests pass), `cargo test --workspace --
+  --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`. Hand-
+  test: `DB_URL=postgres://bad:bad@localhost/
+  db trainer --doctor` exits non-zero with a
+  clear diagnostic; `DB_URL=<good> trainer
+  --doctor` exits 0 with JSON. Required
+  tests: 4 lib tests in `doctor.rs` + 2
+  integration tests in `tests/doctor.rs`.
+  Dependencies: STW-019 (the testnet-live-
+  proof runbook the doctor pre-flights).
+  Estimated scope: M. Completion signal:
+  `cargo test -p rbp-autotrain --test doctor`
+  is green; a runbook invocation with a bad
+  DB URL exits in <1 s with a clear
+  diagnostic instead of panicking after the
+  `--cluster` step. **`lens:` CEO (the
+  runbook is the backbone of the testnet
+  north star; making it fail-fast is the
+  highest-leverage move toward a real
+  receipt) + Eng (the doctor is a read-only
+  pre-flight; zero risk to existing code
+  paths) + Design (an operator gets a human-
+  readable diagnostic in 1 s instead of a
+  panic in a log file after minutes of
+  wasted work).**
+
+- [ ] **[P1] `STW-066` The
+  `crates/dashboard/static/index.html`
+  `deployedUrl` JS-side fallback
+  hard-coded at line 392 reads from a new
+  `window.__DASHBOARD_DEPLOYED_URL_DEFAULT__`
+  global the
+  `crates/dashboard/src/router.rs::serve_static_index`
+  handler injects from the `pub const
+  DEFAULT_DEPLOYED_URL` Rust declaration,
+  so the static JS fallback + the Rust
+  default are one source.** A 1-file JS-
+  side + 1-file Rust-side change: the
+  `serve_static_index` handler's injection
+  point now emits *two* `<script>` tags
+  (one for the env-knob value and one for
+  the Rust default), and the `index.html`
+  JS line 392 reads the new global as the
+  fallback. The two tags are injected as a
+  single `String` so the STW-062 cache is
+  unchanged. Scope boundary: does NOT
+  change the existing `RBP_DASHBOARD_
+  DEPLOYED_URL` env-knob read semantics;
+  does NOT change the `pub const DEFAULT_
+  DEPLOYED_URL` value; does NOT change the
+  meta line's `deployed_at=...` fragment.
+  Verification commands: `cargo test -p
+  rbp-dashboard --test smoke` (new sub-test
+  + existing 9 sub-tests pass), `cargo test
+  --workspace -- --test-threads=4`, `cargo
+  check --workspace`, `cargo fmt --check`.
+  Hand-test: `cargo run -p rbp-dashboard`
+  + `curl -s http://localhost:8080/ | grep
+  __DASHBOARD_DEPLOYED_URL_DEFAULT__`
+  returns the injected global with the Rust
+  const value. Required tests: 1 new sub-
+  test in `crates/dashboard/tests/smoke.rs`
+  (`serve_static_index_injects_deployed_url_
+  default_global`). Dependencies: STW-058
+  (the env-knob read), STW-062 (the cache
+  the dual-tag injection is cached in).
+  Estimated scope: XS. Completion signal:
+  `cargo test -p rbp-dashboard --test smoke`
+  is green with the new sub-test; the static
+  JS fallback reads from a Rust-sourced
+  global. **`lens:` Design (single source of
+  truth: one `pub const` line instead of two
+  files in two languages) + Eng (1-line
+  extension to existing injection function;
+  cache shape unchanged).**
+
+- [ ] **[P1] `STW-068` A new
+  `scripts/seed-dashboard-local.sh` runbook
+  that takes an existing (even incomplete)
+  testnet-live-proof receipt directory and
+  produces a local dashboard-compatible layout
+  under `.auto/dashboard-seed/` — copying or
+  symlinking `bench/stdout.txt`,
+  `compare/stdout.txt`, and any
+  `transcript-*.json` files into the
+  `RBP_DASHBOARD_RECEIPT_DIR` expected
+  structure, plus generating a minimal
+  `INDEX.json` with one entry — so a
+  developer can `cargo run -p rbp-dashboard`
+  and see real receipt data structures
+  instead of only the compare3 fixture.**
+  The script is pure bash (mirrors the
+  `scripts/testnet-live-proof.sh` shape:
+  exists + executable + parses with `bash
+  -n`), takes a receipt directory as argv[1],
+  validates the directory contains at least
+  one step subdir, and writes the seed layout.
+  A new integration test in
+  `crates/dashboard/tests/seed_local.rs`
+  drives the script against a synthetic
+  receipt directory and asserts the dashboard
+  renders a non-empty table. Scope boundary:
+  does NOT change the dashboard's router or
+  render code (the script produces data the
+  dashboard already knows how to read); does
+  NOT change the testnet-live-proof runbook;
+  does NOT upload to any remote bucket.
+  Verification commands: `bash -n scripts/
+  seed-dashboard-local.sh`, `cargo test -p
+  rbp-dashboard --test seed_local`, `cargo
+  test --workspace -- --test-threads=4`,
+  `cargo check --workspace`, `cargo fmt
+  --check`. Hand-test: `bash scripts/seed-
+  dashboard-local.sh receipts/testnet-live-
+  proof-20260604T052134Z` produces `.auto/
+  dashboard-seed/`; `RBP_DASHBOARD_RECEIPT_
+  DIR=.auto/dashboard-seed cargo run -p
+  rbp-dashboard` shows a populated table.
+  Required tests: 1 integration test in
+  `crates/dashboard/tests/seed_local.rs`
+  (`seed_local_run_produces_dashboard_
+  readable_layout`). Dependencies: STW-019
+  (receipt layout), STW-036 (dashboard read
+  paths). Estimated scope: S. Completion
+  signal: script exists, parses, and produces
+  a dashboard-readable layout from an existing
+  receipt dir. **`lens:` CEO (closes the loop
+  between "we have receipts" and "the
+  dashboard shows something real") + Eng (a
+  pure bash bridge script; zero risk to core
+  code) + Design (developer can see real data
+  locally without running the full expensive
+  chain).**
+
+- [ ] **[P1] `STW-069` Add
+  `RBP_TESTNET_FAST=1` support to
+  `scripts/testnet-live-proof.sh` that auto-
+  sets minimal env vars (`RBP_FAST_EPOCHS=2`,
+  `RBP_FAST_BATCH=16`, `RBP_BENCH_HANDS=4`,
+  `RBP_COMPARE_HANDS=4`, etc.) so an operator
+  can validate the full chain end-to-end in
+  minutes rather than hours, and document the
+  fast mode in `scripts/testnet-live-proof.md`.**
+  The script change is a ~15-line env-knob
+  block at the top: if `RBP_TESTNET_FAST=1`,
+  export the minimal values (only for vars
+  not already set by the operator, so an
+  explicit override still wins). A new sub-
+  test in `crates/autotrain/tests/script_
+  shape.rs` asserts the script contains the
+  `RBP_TESTNET_FAST` string and that the
+  documented env vars appear in the script.
+  Scope boundary: does NOT change the default
+  runbook behavior (fast mode is opt-in via
+  env knob); does NOT change the step order
+  or receipt layout; does NOT reduce the
+  verification rigor of a normal run.
+  Verification commands: `bash -n scripts/
+  testnet-live-proof.sh`, `cargo test -p
+  rbp-autotrain --test script_shape` (new
+  sub-test passes), `cargo test --workspace
+  -- --test-threads=4`, `cargo check
+  --workspace`, `cargo fmt --check`. Hand-
+  test: `RBP_TESTNET_FAST=1 bash scripts/
+  testnet-live-proof.sh` with a working DB
+  completes in <5 min. Required tests: 1 new
+  sub-test in `crates/autotrain/tests/script_
+  shape.rs` (`testnet_live_proof_script_
+  documents_fast_mode`). Dependencies:
+  STW-019 (the runbook being extended).
+  Estimated scope: XS. Completion signal:
+  script documents and honours
+  `RBP_TESTNET_FAST=1`; a fast-mode runbook
+  invocation completes in minutes. **`lens:`
+  CEO (collapses validation time from hours to
+  minutes, making the north star actually
+  reachable in a single work session) + Eng
+  (pure env-knob convention; no code-path
+  changes) + Design (operator can iterate
+  quickly without waiting for a full train).**
+
+
+## Next wave - review 2026-06-05
+
 The eighth 2026-06-05 three-lens review (kanban
 task `t_5afdfe58`) re-applies the three lenses to
 the *current* state of `main` at commit `7c2976b`
