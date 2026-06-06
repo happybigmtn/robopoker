@@ -49,6 +49,10 @@ impl Trainer for FastSession {
         let client = self.client;
         let epochs = self.solver.profile.epochs();
         let profile = self.solver.profile;
+        if let Err(e) = crate::check_integrity(&profile) {
+            log::error!("integrity gate failed: {}", e);
+            std::process::exit(2);
+        }
         client.stage().await;
         let copy = format!(
             "COPY {t} (past, present, choices, position, edge, weight, regret, evalue, counts) FROM STDIN BINARY",

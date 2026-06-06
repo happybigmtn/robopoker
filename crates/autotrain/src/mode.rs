@@ -439,6 +439,13 @@ pub enum Mode {
     /// open so a bad `DB_URL` is reported as a
     /// clean diagnostic instead of a panic.
     Doctor,
+    /// Slice 4: standalone integrity gate. Loads the
+    /// v1 blueprint from the database, runs the
+    /// per-position open / 3-bet frequency check, and
+    /// exits 0 on green or 2 on red.  This is the CI
+    /// hook that lets a worker verify a blueprint
+    /// without running a full training loop.
+    Integrity,
 }
 
 impl Mode {
@@ -472,7 +479,8 @@ impl Mode {
             | Self::Fast3
             | Self::Slow
             | Self::Reset
-            | Self::Doctor => None,
+            | Self::Doctor
+            | Self::Integrity => None,
         }
     }
 
@@ -823,6 +831,7 @@ impl Mode {
                     };
                 }
                 "--doctor" => return Self::Doctor,
+                "--integrity" => return Self::Integrity,
                 "--replay" => {
                     // The value is the next argv (matches
                     // the `trainer --smoke` style of not
@@ -899,7 +908,7 @@ impl Mode {
         eprintln!(
             "  PUBLISH:    publish | verify-receipt | publish-remote | verify-remote | publish-index | verify-index | publish-index-remote | verify-index-remote"
         );
-        eprintln!("  UTIL:       status | reset | doctor");
+        eprintln!("  UTIL:       status | reset | doctor | integrity");
         std::process::exit(1);
     }
 
@@ -1652,6 +1661,32 @@ impl Mode {
             // compare3 integration tests in the
             // same CI run.
             Self::Compare3 => crate::bench::run_compare3(client).await,
+            // Slice 4: standalone integrity gate. Loads the v1
+            // blueprint from DB and runs the seat-aware sanity
+            // check. Exits 0 on green, 2 on red.
+            #[cfg(feature = "database")]
+            Self::Integrity => {
+                let profile = NlheProfile::hydrate(client.clone()).await;
+                match crate::check_integrity(&profile) {
+                    Ok(report) => {
+                        println!(
+                            "integrity check passed: early_open={:.1}% late_open={:.1}% threebet={:.1}%",
+                            report.open_freq[0] * 100.0,
+                            report.open_freq[1] * 100.0,
+                            (report.threebet_freq[0] + report.threebet_freq[1]) / 2.0 * 100.0,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("integrity check failed: {}", e);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            #[cfg(not(feature = "database"))]
+            Self::Integrity => {
+                eprintln!("integrity check requires database feature");
+                std::process::exit(2);
+            }
             // The `Replay` / `VerifyReceipt` /
             // `Publish` / `VerifyBundle` arms are
             // handled above; the compiler still

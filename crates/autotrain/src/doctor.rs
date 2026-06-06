@@ -113,7 +113,17 @@ pub fn run() -> DoctorReport {
     let mut env_ok = true;
     for &(name, required) in REQUIRED_VARS {
         let set = std::env::var(name).is_ok();
-        let passed = if required { set } else { true };
+        // DB_URL and DATABASE_URL are mutually substitutable:
+        // the runbook forwards DATABASE_URL → DB_URL, and the
+        // `db_url_set` check above already validates that at
+        // least one is present. Treat either as sufficient.
+        let passed = if name == "DB_URL" || name == "DATABASE_URL" {
+            db_url_set
+        } else if required {
+            set
+        } else {
+            true
+        };
         if !passed {
             env_ok = false;
         }
@@ -125,6 +135,8 @@ pub fn run() -> DoctorReport {
             passed,
             detail: if set {
                 format!("{name} is set")
+            } else if required && passed {
+                format!("{name} is optional (DATABASE_URL/DB_URL mutual fallback)")
             } else if required {
                 format!("{name} is required but unset")
             } else {
@@ -260,5 +272,58 @@ mod tests {
         assert_eq!(parsed["env_ok"], true);
         assert_eq!(parsed["trainer_bin_ok"], true);
         assert!(parsed["checks"].is_array());
+    }
+
+    /// DATABASE_URL fallback: when only DATABASE_URL is set,
+    /// both the DB_URL and DATABASE_URL env checks report
+    /// passed=true so the runbook's DATABASE_URL → DB_URL
+    /// forward does not trigger a false-negative doctor.
+    #[test]
+    fn doctor_env_db_url_passes_when_only_database_url_set() {
+        // Snapshot the current env so we can restore it.
+        let old_db_url = std::env::var("DB_URL").ok();
+        let old_database_url = std::env::var("DATABASE_URL").ok();
+
+        // Clear DB_URL, set only DATABASE_URL.
+        unsafe { std::env::remove_var("DB_URL"); }
+        unsafe { std::env::set_var("DATABASE_URL", "postgres://user:***@localhost:1/db"); }
+
+        let report = run();
+
+        // Restore env.
+        match old_db_url {
+            Some(v) => unsafe { std::env::set_var("DB_URL", v) },
+            None => unsafe { std::env::remove_var("DB_URL") },
+        }
+        match old_database_url {
+            Some(v) => unsafe { std::env::set_var("DATABASE_URL", v) },
+            None => unsafe { std::env::remove_var("DATABASE_URL") },
+        }
+
+        let db_url_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "env_DB_URL")
+            .expect("env_DB_URL check must exist");
+        let database_url_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "env_DATABASE_URL")
+            .expect("env_DATABASE_URL check must exist");
+
+        assert!(
+            db_url_check.passed,
+            "env_DB_URL must pass when DATABASE_URL is set (mutual fallback)"
+        );
+        assert!(
+            database_url_check.passed,
+            "env_DATABASE_URL must pass when DATABASE_URL is set"
+        );
+        assert!(
+            db_url_check.detail.contains("mutual fallback")
+                || db_url_check.detail.contains("is set"),
+            "env_DB_URL detail should indicate fallback: got '{}'",
+            db_url_check.detail
+        );
     }
 }

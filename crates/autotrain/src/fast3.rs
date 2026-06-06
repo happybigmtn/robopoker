@@ -139,16 +139,11 @@ impl Trainer for Fast3Session {
         //    sync cannot collide on the epoch row.
         let client = self.client;
         let epochs = self.solver.profile.epochs();
-        // The v3 `NlheProfileV3::rows()` is a
-        // type-aliased row iterator that hands back
-        // `(i64, i16, i64, i64, f32, f32, f32, i32)`
-        // tuples — the v1 / v2 `NlheProfile::rows()`
-        // shape verbatim. The `BinaryCopyInWriter` is
-        // parameterised on `NlheProfileV3::columns()`,
-        // which is the v3 `BulkSchema::columns` impl
-        // (same arity + same Postgres types as the v1
-        // / v2 `NlheProfile::columns()`).
         let profile = self.solver.profile;
+        if let Err(e) = crate::check_integrity(&profile) {
+            log::error!("integrity gate failed (v3): {}", e);
+            std::process::exit(2);
+        }
         client.stage3().await;
         let writer = BinaryCopyInWriter::new(
             client
