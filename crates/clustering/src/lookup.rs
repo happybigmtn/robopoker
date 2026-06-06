@@ -124,13 +124,14 @@ impl rbp_database::BulkSchema for Lookup {
         &[
             tokio_postgres::types::Type::INT8, // obs (observation/isomorphism)
             tokio_postgres::types::Type::INT2, // abs (abstraction bucket)
+            tokio_postgres::types::Type::INT4, // position (acting player)
         ]
     }
     fn copy() -> &'static str {
         const_format::concatcp!(
             "COPY ",
             rbp_database::ISOMORPHISM,
-            " (obs, abs) FROM STDIN BINARY"
+            " (obs, abs, position) FROM STDIN BINARY"
         )
     }
 }
@@ -138,26 +139,27 @@ impl rbp_database::BulkSchema for Lookup {
 #[cfg(feature = "database")]
 #[async_trait::async_trait]
 impl rbp_database::Streamable for Lookup {
-    type Row = (i64, i16);
+    type Row = (i64, i16, i32);
     fn rows(self) -> impl Iterator<Item = Self::Row> + Send {
         self.0
             .into_iter()
-            .map(|(iso, abs)| (i64::from(iso), i16::from(abs)))
+            .map(|(iso, abs)| (i64::from(iso), i16::from(abs), 0i32))
     }
 }
 
 #[cfg(feature = "database")]
 impl Lookup {
     pub async fn from_street(client: &tokio_postgres::Client, street: Street) -> Self {
-        let sql = const_format::concatcp!("SELECT obs, abs FROM ", rbp_database::ISOMORPHISM);
+        let sql =
+            const_format::concatcp!("SELECT obs, abs, position FROM ", rbp_database::ISOMORPHISM);
         client
             .query(sql, &[])
             .await
             .expect("query")
             .into_iter()
-            .map(|row| (row.get::<_, i64>(0), row.get::<_, i16>(1)))
-            .filter(|(obs, _)| Street::from(*obs) == street)
-            .map(|(obs, abs)| (Isomorphism::from(obs), Abstraction::from(abs)))
+            .map(|row| (row.get::<_, i64>(0), row.get::<_, i16>(1), row.get::<_, i32>(2)))
+            .filter(|(obs, _, _)| Street::from(*obs) == street)
+            .map(|(obs, abs, _position)| (Isomorphism::from(obs), Abstraction::from(abs)))
             .collect::<BTreeMap<_, _>>()
             .into()
     }

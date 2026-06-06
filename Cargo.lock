@@ -2254,6 +2254,7 @@ dependencies = [
  "rbp-transport",
  "serde",
  "serde_json",
+ "tokio",
  "tokio-postgres",
 ]
 

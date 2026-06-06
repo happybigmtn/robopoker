@@ -19,9 +19,9 @@ impl Sink for Client {
     async fn submit(&self, records: Vec<Record>) {
         #[rustfmt::skip]
         const SQL: &str = const_format::concatcp!(
-            "INSERT INTO ", BLUEPRINT, " (past, present, choices, edge, weight, regret, evalue, counts) ",
-            "VALUES                      ($1,   $2,      $3,      $4,   $5,     $6,     $7,     $8) ",
-            "ON CONFLICT (past, present, choices, edge) ",
+            "INSERT INTO ", BLUEPRINT, " (past, present, choices, position, edge, weight, regret, evalue, counts) ",
+            "VALUES                      ($1,   $2,      $3,       $4,       $5,   $6,     $7,     $8,     $9) ",
+            "ON CONFLICT (past, present, choices, position, edge) ",
             "DO UPDATE SET ",
                 "weight = EXCLUDED.weight, ",
                 "regret = EXCLUDED.regret, ",
@@ -35,6 +35,7 @@ impl Sink for Client {
                     &i64::from(record.info.subgame()),
                     &i16::from(record.info.bucket()),
                     &i64::from(record.info.choices()),
+                    &(record.info.position() as i16),
                     &(u64::from(record.edge) as i64),
                     &record.weight,
                     &record.regret,

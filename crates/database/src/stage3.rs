@@ -78,7 +78,7 @@ impl Stage3 for Client {
     async fn merge3(&self) {
         // Same upsert-then-drop recipe as v1
         // `Stage::merge` and v2 `Stage2::merge2`. The
-        // `ON CONFLICT (past, present, choices, edge)`
+        // `ON CONFLICT (past, present, choices, position, edge)`
         // is the v3 `NlheProfileV3::creates()` UNIQUE
         // constraint; the column list is
         // byte-for-byte the v1 / v2 blueprint column
@@ -87,9 +87,9 @@ impl Stage3 for Client {
         // through the staging table without any
         // further conversion.
         let sql = format!(
-            "INSERT INTO   {t1} (past, present, choices, edge, weight, regret, evalue, counts)
-             SELECT              past, present, choices, edge, weight, regret, evalue, counts FROM {t2}
-             ON CONFLICT  (past, present, choices, edge)
+            "INSERT INTO   {t1} (past, present, choices, position, edge, weight, regret, evalue, counts)
+             SELECT              past, present, choices, position, edge, weight, regret, evalue, counts FROM {t2}
+             ON CONFLICT  (past, present, choices, position, edge)
              DO UPDATE SET
                  weight = EXCLUDED.weight,
                  regret = EXCLUDED.regret,

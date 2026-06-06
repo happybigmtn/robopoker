@@ -24,9 +24,9 @@ impl Stage for Client {
     }
     async fn merge(&self) {
         let sql = format!(
-            "INSERT INTO   {t1} (past, present, choices, edge, weight, regret, evalue, counts)
-             SELECT              past, present, choices, edge, weight, regret, evalue, counts FROM {t2}
-             ON CONFLICT  (past, present, choices, edge)
+            "INSERT INTO   {t1} (past, present, choices, position, edge, weight, regret, evalue, counts)
+             SELECT              past, present, choices, position, edge, weight, regret, evalue, counts FROM {t2}
+             ON CONFLICT  (past, present, choices, position, edge)
              DO UPDATE SET
                  weight = EXCLUDED.weight,
                  regret = EXCLUDED.regret,

@@ -51,7 +51,7 @@ impl Trainer for FastSession {
         let profile = self.solver.profile;
         client.stage().await;
         let copy = format!(
-            "COPY {t} (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY",
+            "COPY {t} (past, present, choices, position, edge, weight, regret, evalue, counts) FROM STDIN BINARY",
             t = rbp_database::STAGING
         );
         let writer = BinaryCopyInWriter::new(

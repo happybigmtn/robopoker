@@ -99,11 +99,12 @@ impl rbp_database::Schema for NlheProfile {
                 past       BIGINT,
                 present    SMALLINT,
                 choices    BIGINT,
+                position   SMALLINT,
                 weight     REAL,
                 regret     REAL,
                 evalue     REAL,
                 counts     INT DEFAULT 0,
-                UNIQUE     (past, present, choices, edge)
+                UNIQUE     (past, present, choices, position, edge)
             );"
         )
     }
@@ -111,7 +112,7 @@ impl rbp_database::Schema for NlheProfile {
         const_format::concatcp!(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_blueprint_upsert  ON ",
             rbp_database::BLUEPRINT,
-            " (present, past, choices, edge);
+            " (present, past, choices, position, edge);
              CREATE        INDEX IF NOT EXISTS idx_blueprint_bucket  ON ",
             rbp_database::BLUEPRINT,
             " (present, past, choices);
@@ -148,6 +149,7 @@ impl rbp_database::BulkSchema for NlheProfile {
             tokio_postgres::types::Type::INT8,   // past (subgame path)
             tokio_postgres::types::Type::INT2,   // present (abstraction bucket)
             tokio_postgres::types::Type::INT8,   // choices (available edges)
+            tokio_postgres::types::Type::INT2,   // position (acting player)
             tokio_postgres::types::Type::INT8,   // edge (action taken)
             tokio_postgres::types::Type::FLOAT4, // weight
             tokio_postgres::types::Type::FLOAT4, // regret
@@ -159,7 +161,7 @@ impl rbp_database::BulkSchema for NlheProfile {
         const_format::concatcp!(
             "COPY ",
             rbp_database::BLUEPRINT,
-            " (past, present, choices, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
+            " (past, present, choices, position, edge, weight, regret, evalue, counts) FROM STDIN BINARY"
         )
     }
 }
@@ -182,7 +184,7 @@ impl rbp_database::Hydrate for NlheProfile {
             .map(|r| r.get::<_, i64>(0) as usize)
             .expect("to have already created epoch metadata");
         const BLUEPRINT_SQL: &str = const_format::concatcp!(
-            "SELECT past, present, choices, edge, weight, regret, evalue, counts FROM ",
+            "SELECT past, present, choices, position, edge, weight, regret, evalue, counts FROM ",
             rbp_database::BLUEPRINT
         );
         let mut encounters = BTreeMap::new();
@@ -194,12 +196,13 @@ impl rbp_database::Hydrate for NlheProfile {
             let subgame = rbp_gameplay::Path::from(row.get::<_, i64>(0) as u64);
             let present = rbp_gameplay::Abstraction::from(row.get::<_, i16>(1));
             let choices = rbp_gameplay::Path::from(row.get::<_, i64>(2) as u64);
-            let edge = NlheEdge::from(row.get::<_, i64>(3) as u64);
-            let weight = row.get::<_, f32>(4);
-            let regret = row.get::<_, f32>(5);
-            let evalue = row.get::<_, f32>(6);
-            let counts = row.get::<_, i32>(7) as u32;
-            let bucket = NlheInfo::from((subgame, present, choices));
+            let position = row.get::<_, i16>(3) as usize;
+            let edge = NlheEdge::from(row.get::<_, i64>(4) as u64);
+            let weight = row.get::<_, f32>(5);
+            let regret = row.get::<_, f32>(6);
+            let evalue = row.get::<_, f32>(7);
+            let counts = row.get::<_, i32>(8) as u32;
+            let bucket = NlheInfo::from((subgame, present, choices, position));
             encounters
                 .entry(bucket)
                 .or_insert_with(BTreeMap::default)
@@ -224,18 +227,19 @@ impl rbp_database::Hydrate for NlheProfile {
     }
 }
 
-#[cfg(feature = "database")]
 impl NlheProfile {
-    pub fn rows(self) -> impl Iterator<Item = (i64, i16, i64, i64, f32, f32, f32, i32)> {
+    pub fn rows(self) -> impl Iterator<Item = (i64, i16, i64, i16, i64, f32, f32, f32, i32)> {
         self.encounters.into_iter().flat_map(|(info, edges)| {
             let subgame = i64::from(info.subgame());
             let present = i16::from(info.bucket());
             let choices = i64::from(info.choices());
+            let position = info.position() as i16;
             edges.into_iter().map(move |(edge, encounter)| {
                 (
                     subgame,
                     present,
                     choices,
+                    position,
                     u64::from(edge) as i64,
                     encounter.weight,
                     encounter.regret,
@@ -244,5 +248,92 @@ impl NlheProfile {
                 )
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rbp_cards::*;
+    use rbp_gameplay::*;
+    use rbp_mccfr::Encounter;
+
+    #[cfg(feature = "database")]
+    use rbp_database::{BulkSchema, Schema};
+
+    #[test]
+    fn position_roundtrip_through_rows() {
+        let mut profile = NlheProfile::default();
+
+        let subgame = Path::default();
+        let bucket = NlheSecret::from(Abstraction::from(Street::Pref));
+        let choices = Path::default();
+
+        // Two info sets with identical subgame, bucket, choices but different positions
+        let info0 = NlheInfo::from((subgame, bucket.into(), choices, 0));
+        let info1 = NlheInfo::from((subgame, bucket.into(), choices, 1));
+
+        let edge = NlheEdge::from(Edge::Call);
+
+        // Different weights for each position
+        profile.encounters.entry(info0).or_default().insert(
+            edge,
+            Encounter::new(0.3, 0.1, 0.2, 1),
+        );
+        profile.encounters.entry(info1).or_default().insert(
+            edge,
+            Encounter::new(0.7, 0.2, 0.3, 2),
+        );
+
+        let rows: Vec<_> = profile.rows().collect();
+
+        // Must produce 2 distinct rows (not collapsed into 1)
+        assert_eq!(rows.len(), 2, "position difference must produce distinct rows");
+
+        let row0 = rows.iter().find(|r| r.3 == 0).expect("row for position 0");
+        let row1 = rows.iter().find(|r| r.3 == 1).expect("row for position 1");
+
+        // row shape: (past, present, choices, position, edge, weight, regret, evalue, counts)
+        assert_eq!(row0.3, 0);
+        assert_eq!(row0.5, 0.3); // weight
+        assert_eq!(row0.8, 1);   // counts
+
+        assert_eq!(row1.3, 1);
+        assert_eq!(row1.5, 0.7); // weight
+        assert_eq!(row1.8, 2);   // counts
+    }
+
+    #[test]
+    #[cfg(feature = "database")]
+    fn nlhe_profile_creates_includes_position() {
+        let sql = NlheProfile::creates();
+        assert!(
+            sql.contains("position"),
+            "creates() must include position column; got: {sql}"
+        );
+        assert!(
+            sql.contains("UNIQUE     (past, present, choices, position, edge)"),
+            "creates() must include position in UNIQUE constraint; got: {sql}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "database")]
+    fn nlhe_profile_indices_include_position() {
+        let sql = NlheProfile::indices();
+        assert!(
+            sql.contains("position"),
+            "indices() must include position in upsert index; got: {sql}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "database")]
+    fn nlhe_profile_copy_includes_position() {
+        let sql = NlheProfile::copy();
+        assert!(
+            sql.contains("position"),
+            "copy() must include position column; got: {sql}"
+        );
     }
 }

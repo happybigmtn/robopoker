@@ -37,19 +37,20 @@ impl Source for Client {
             .into()
     }
     async fn memory(&self, info: NlheInfo) -> Memory {
-        const SQL: &str = concatcp!(
+        const SQL: &str = const_format::concatcp!(
             "SELECT edge, ",
                    "weight, ",
                    "regret, ",
                    "evalue, ",
                    "counts ",
             "FROM   ", BLUEPRINT, " ",
-            "WHERE  past    = $1 ",
-            "AND    present = $2 ",
-            "AND    choices = $3"
+            "WHERE  past     = $1 ",
+            "AND    present  = $2 ",
+            "AND    choices  = $3 ",
+            "AND    position = $4"
         );
         let data = self
-            .query(SQL, &[&i64::from(info.subgame()), &i16::from(info.bucket()), &i64::from(info.choices())])
+            .query(SQL, &[&i64::from(info.subgame()), &i16::from(info.bucket()), &i64::from(info.choices()), &(info.position() as i16)])
             .await
             .expect("memory lookup")
             .into_iter()
@@ -65,15 +66,16 @@ impl Source for Client {
         Memory::new(info, data)
     }
     async fn strategy(&self, info: NlheInfo) -> Vec<(Edge, Probability)> {
-        const SQL: &str = concatcp!(
+        const SQL: &str = const_format::concatcp!(
             "SELECT edge, ",
                    "weight ",
             "FROM   ", BLUEPRINT, " ",
-            "WHERE  past    = $1 ",
-            "AND    present = $2 ",
-            "AND    choices = $3"
+            "WHERE  past     = $1 ",
+            "AND    present  = $2 ",
+            "AND    choices  = $3 ",
+            "AND    position = $4"
         );
-        self.query(SQL, &[&i64::from(info.subgame()), &i16::from(info.bucket()), &i64::from(info.choices())])
+        self.query(SQL, &[&i64::from(info.subgame()), &i16::from(info.bucket()), &i64::from(info.choices()), &(info.position() as i16)])
             .await
             .expect("strategy lookup")
             .into_iter()

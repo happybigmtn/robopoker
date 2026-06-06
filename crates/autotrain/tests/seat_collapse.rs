@@ -1,9 +1,9 @@
 //! Repro test for seat-collapse bug (slice 1).
 //!
 //! Two infosets that differ ONLY in player position (seat 0 vs seat 1)
-//! currently map to the same policy key because `NlheInfo` does not
-//! include seat/position. This test asserts they *should* be different;
-//! the assertion fails today, reproducing the bug.
+//! map to the same policy key when `NlheInfo` does not include seat/
+//! position. This test asserts they *must* be different; the assertion
+//! passes after slice 2 threaded position into `NlheInfo`.
 
 use rbp_cards::Street;
 use rbp_gameplay::{Action, Partial, Turn};
