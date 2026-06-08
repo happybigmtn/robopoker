@@ -31,6 +31,13 @@ impl PreTraining {
     /// Run the complete clustering pipeline if needed.
     /// Always runs finalize to ensure derived tables exist.
     pub async fn run(client: &Arc<Client>) {
+        // Ensure clustering tables exist before attempting to stream
+        // clustering artifacts. A completely cold database (no prior
+        // --cluster or --smoke run) would otherwise panic on COPY
+        // into a missing relation.
+        Self::ensure::<Lookup>(client).await;
+        Self::ensure::<Metric>(client).await;
+        Self::ensure::<Future>(client).await;
         let streets = Self::pending(client).await;
         for street in streets.iter().cloned() {
             log::info!("{:<32}{:<32}", "beginning clustering", street);

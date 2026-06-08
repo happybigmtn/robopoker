@@ -45,23 +45,34 @@ pub use traits::*;
 use std::sync::Arc;
 use tokio_postgres::Client;
 
+/// Resolves the database connection URL from environment.
+///
+/// Checks `DB_URL` first, then falls back to `DATABASE_URL`.
+/// Returns an error only when both are unset.
+pub fn db_url() -> Result<String, std::env::VarError> {
+    std::env::var("DB_URL").or_else(|_| std::env::var("DATABASE_URL"))
+}
+
 /// Establishes a database connection.
 ///
-/// Connects to PostgreSQL using the `DB_URL` environment variable.
+/// Connects to PostgreSQL using the `DB_URL` environment variable,
+/// falling back to `DATABASE_URL` if `DB_URL` is not set.
 /// Returns an `Arc<Client>` suitable for sharing across async tasks.
 ///
 /// # Environment
 ///
-/// Requires `DB_URL` to be set (e.g., `postgres://user:pass@host:port/db`).
+/// Requires `DB_URL` or `DATABASE_URL` to be set
+/// (e.g., `postgres://user:***@host:port/db`).
 ///
 /// # Panics
 ///
-/// Panics if `DB_URL` is not set or if connection fails.
+/// Panics if neither `DB_URL` nor `DATABASE_URL` is set, or if
+/// connection fails.
 pub async fn db() -> Arc<Client> {
     log::info!("connecting to database");
     let tls = tokio_postgres::tls::NoTls;
-    let ref url = std::env::var("DB_URL").expect("DB_URL must be set");
-    let (client, connection) = tokio_postgres::connect(url, tls)
+    let url = db_url().expect("DB_URL or DATABASE_URL must be set");
+    let (client, connection) = tokio_postgres::connect(&url, tls)
         .await
         .expect("database connection failed");
     tokio::spawn(connection);
@@ -70,6 +81,93 @@ pub async fn db() -> Arc<Client> {
         .await
         .expect("set client_min_messages");
     Arc::new(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// DATABASE_URL fallback: when only DATABASE_URL is set,
+    /// db_url() resolves to it.
+    #[test]
+    fn db_url_falls_back_to_database_url() {
+        let old_db_url = std::env::var("DB_URL").ok();
+        let old_database_url = std::env::var("DATABASE_URL").ok();
+
+        unsafe {
+            std::env::remove_var("DB_URL");
+        }
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://fallback/db");
+        }
+
+        let result = db_url();
+
+        match old_db_url {
+            Some(v) => unsafe { std::env::set_var("DB_URL", v) },
+            None => unsafe { std::env::remove_var("DB_URL") },
+        }
+        match old_database_url {
+            Some(v) => unsafe { std::env::set_var("DATABASE_URL", v) },
+            None => unsafe { std::env::remove_var("DATABASE_URL") },
+        }
+
+        assert_eq!(result.unwrap(), "postgres://fallback/db");
+    }
+
+    /// DB_URL precedence: when both are set, db_url() prefers DB_URL.
+    #[test]
+    fn db_url_prefers_db_url_when_both_set() {
+        let old_db_url = std::env::var("DB_URL").ok();
+        let old_database_url = std::env::var("DATABASE_URL").ok();
+
+        unsafe {
+            std::env::set_var("DB_URL", "postgres://primary/db");
+        }
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://fallback/db");
+        }
+
+        let result = db_url();
+
+        match old_db_url {
+            Some(v) => unsafe { std::env::set_var("DB_URL", v) },
+            None => unsafe { std::env::remove_var("DB_URL") },
+        }
+        match old_database_url {
+            Some(v) => unsafe { std::env::set_var("DATABASE_URL", v) },
+            None => unsafe { std::env::remove_var("DATABASE_URL") },
+        }
+
+        assert_eq!(result.unwrap(), "postgres://primary/db");
+    }
+
+    /// db_url() errors when neither env var is set.
+    #[test]
+    fn db_url_errors_when_neither_set() {
+        let old_db_url = std::env::var("DB_URL").ok();
+        let old_database_url = std::env::var("DATABASE_URL").ok();
+
+        unsafe {
+            std::env::remove_var("DB_URL");
+        }
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+        }
+
+        let result = db_url();
+
+        match old_db_url {
+            Some(v) => unsafe { std::env::set_var("DB_URL", v) },
+            None => unsafe { std::env::remove_var("DB_URL") },
+        }
+        match old_database_url {
+            Some(v) => unsafe { std::env::set_var("DATABASE_URL", v) },
+            None => unsafe { std::env::remove_var("DATABASE_URL") },
+        }
+
+        assert!(result.is_err());
+    }
 }
 
 /// PostgreSQL error type alias.
