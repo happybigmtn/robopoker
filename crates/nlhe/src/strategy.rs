@@ -124,7 +124,18 @@ impl TryFrom<ApiStrategy> for Strategy {
         let subgame = Path::from(api.history as u64);
         let present = Abstraction::from(api.present);
         let choices = Path::from(api.choices as u64);
-        let info = NlheInfo::from((subgame, present, choices));
+        // SEAT-PERSIST-001 slice 5: thread position through the
+        // round-trip so a `Strategy` reconstructed from an
+        // `ApiStrategy` is seat-aware. The previous 3-arg
+        // `NlheInfo::from((subgame, present, choices))` form
+        // defaulted position to 0 (a back-compat shim for
+        // DB-loaded data that did not yet store position). The
+        // DTO now carries `position` (see
+        // `crates/util/src/dto/response.rs::ApiStrategy`) so the
+        // 3-arg shim is no longer the right constructor on the
+        // wire round-trip path — use the 4-arg form to keep the
+        // seat-aware `NlheInfo` alive across the API surface.
+        let info = NlheInfo::from((subgame, present, choices, api.position));
         let accumulated = api
             .accumulated
             .into_iter()
@@ -271,5 +282,48 @@ mod tests {
         for (_, &p) in s.policy().iter() {
             assert!(p > 0.0 && p <= 1.0);
         }
+    }
+
+    /// SEAT-PERSIST-001 slice 5 — the wire DTO must round-trip
+    /// `position` so a `Strategy` reconstructed from an
+    /// `ApiStrategy` is seat-aware. The 3-arg `NlheInfo::from`
+    /// shim defaulted `position` to 0 (the back-compat path for
+    /// DB rows that pre-date the seat-aware schema), and the
+    /// `TryFrom<ApiStrategy> for Strategy` impl used to call
+    /// that 3-arg form, silently collapsing every wire-side
+    /// strategy to seat 0. This test builds an `ApiStrategy`
+    /// with `position: 1` (the seat the seat-aware blueprint
+    /// chain still distinguishes in slice 1–4), converts it
+    /// back to a `Strategy`, and asserts the reconstructed
+    /// `info().position() == 1` — proving the wire surface
+    /// carries position end-to-end and the server-side
+    /// `api_strategy_from` 4-arg path is symmetric.
+    #[test]
+    fn api_strategy_round_trip_preserves_position() {
+        use rbp_core::ApiStrategy;
+        use std::collections::BTreeMap;
+        // Build an ApiStrategy with position = 1 (the late seat
+        // the seat-aware blueprint chain distinguishes from
+        // position 0). The other fields are arbitrary as long
+        // as they parse cleanly.
+        let api = ApiStrategy {
+            history: 0,
+            present: 0,
+            choices: 0,
+            position: 1,
+            accumulated: BTreeMap::new(),
+            counts: BTreeMap::new(),
+        };
+        let s: Strategy = Strategy::try_from(api)
+            .expect("TryFrom<ApiStrategy> for Strategy must succeed for a minimal payload");
+        // The reconstructed NlheInfo must carry the wire-side
+        // position; the previous 3-arg `NlheInfo::from` shim
+        // defaulted this to 0, which is the seat-collapse
+        // bug slice 5 closes on the API surface.
+        assert_eq!(
+            s.info().position(),
+            1,
+            "wire DTO position must round-trip into info().position()"
+        );
     }
 }

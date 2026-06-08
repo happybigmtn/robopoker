@@ -114,11 +114,20 @@ fn response_dto_round_trip_api_strategy() {
     // `BTreeMap<String, f32 / u32>` — BTreeMap is sorted by key, so
     // the JSON object key order is stable. `history: i64`,
     // `present: i16`, `choices: i64` are the CFR iteration cursor.
+    // `position: usize` is the seat-aware seat/position of the
+    // acting player (SEAT-PERSIST-001 slice 5) — a `0` value
+    // round-trips bit-exactly as `usize` on every serde_json target
+    // and a `1` (or any non-zero) value also round-trips because
+    // `serde_json` does not widen integers. Both seat positions
+    // must be representable on the wire so a future server build
+    // that distinguishes seat 0 from seat 1 strategies does not
+    // silently collapse to a single policy key after the round-trip.
     round_trip::<ApiStrategy>(
         r#"{
             "history": 1024,
             "present": 8,
             "choices": 17,
+            "position": 1,
             "accumulated": {
                 "Bet-1": 0.625,
                 "Check": 0.25,

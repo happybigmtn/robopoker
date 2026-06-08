@@ -41,6 +41,17 @@ fn api_strategy_from(strategy: Strategy) -> ApiStrategy {
         history: i64::from(history),
         present: i16::from(present),
         choices: i64::from(choices),
+        // SEAT-PERSIST-001 slice 5: thread position through the
+        // DTO so a client that round-trips the policy can recover
+        // the seat-aware `NlheInfo` instead of silently defaulting
+        // to position 0 (the seat-collapse back-compat shim the
+        // 3-arg `NlheInfo::from` exposes). The position value
+        // comes from the same `info` the 2-arg constructor in
+        // `policy()` already threads from `recall.pov().position()`,
+        // so a server build that already builds a seat-aware
+        // `NlheInfo` from the recall now exposes that information
+        // on the wire.
+        position: strategy.info().position(),
         accumulated: strategy
             .accumulated()
             .iter()

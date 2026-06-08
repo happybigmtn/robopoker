@@ -21,6 +21,13 @@ pub struct ApiStrategy {
     pub history: i64,
     pub present: i16,
     pub choices: i64,
+    /// Seat/position of the acting player (0 = small blind / first to act,
+    /// 1 = big blind / second to act; the exact seat count is policy-shaped
+    /// in `NlheInfo::position()`). Threaded into the DTO so a client that
+    /// round-trips the policy through the wire format can recover the
+    /// seat-aware `NlheInfo` instead of silently defaulting to position 0
+    /// (the seat-collapse bug the SEAT-PERSIST-001 slice chain is closing).
+    pub position: usize,
     pub accumulated: BTreeMap<String, f32>,
     pub counts: BTreeMap<String, u32>,
 }
