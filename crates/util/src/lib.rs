@@ -178,6 +178,18 @@ pub const SINKHORN_TOLERANCE: Energy = 0.001;
 pub const KMEANS_FLOP_TRAINING_ITERATIONS: usize = 20;
 /// Lloyd's algorithm iterations for turn clustering.
 pub const KMEANS_TURN_TRAINING_ITERATIONS: usize = 24;
+/// STW-077: per-street sample cap for the fast-mode kmeans driver.
+/// Production kmeans iterates the full 1.3M-row flop / 14M-row
+/// turn point set; the fast-mode cap sub-samples to at most this
+/// many rows (default 1024) so a fresh-DB receipt runbook run
+/// reaches the bench step in under 5 minutes per street.
+pub const FAST_KMEANS_SAMPLE_DEFAULT: usize = 1024;
+/// STW-077: per-street iteration cap for the fast-mode kmeans
+/// driver. Production kmeans runs 20 (flop) / 24 (turn) Lloyd
+/// iterations; the fast-mode cap defaults to 8 (well below the
+/// production count) so a fresh-DB receipt runbook run reaches
+/// the bench step in under 5 minutes per street.
+pub const FAST_KMEANS_ITERATIONS_DEFAULT: usize = 8;
 /// Number of flop buckets (distributions over turn clusters).
 pub const KMEANS_FLOP_CLUSTER_COUNT: usize = 128;
 /// Number of turn buckets (distributions over river equity).
@@ -276,6 +288,48 @@ pub fn fast_epochs() -> Option<usize> {
 /// `NlheSolver::batch_size` impl when this returns `None`.
 pub fn fast_batch() -> Option<usize> {
     let raw = std::env::var("RBP_FAST_BATCH").ok()?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// STW-077: read the optional `RBP_TESTNET_FAST` switch. The
+/// testnet-live-proof runbook sets `RBP_TESTNET_FAST=1` to
+/// collapse the chain from hours to minutes; downstream
+/// fast-mode consumers (the kmeans driver, the autotrain
+/// epoch loop, the bench step) gate their caps on this single
+/// flag. Returns `true` when the env var equals `1` (whitespace
+/// trimmed); `false` for any other value (including unset).
+/// The gating is intentionally strict — `RBP_TESTNET_FAST=true`
+/// does NOT activate fast mode, so a worker who fat-fingers the
+/// flag does not silently cap production training.
+pub fn testnet_fast() -> bool {
+    std::env::var("RBP_TESTNET_FAST")
+        .ok()
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// STW-077: read the optional `RBP_FAST_KMEANS_SAMPLE` smoke knob.
+/// Caps the per-street input point count for the fast-mode kmeans
+/// driver. `Some(n)` only when the env var is a positive integer;
+/// `None` otherwise. The default 1024 is the value the
+/// `Layer::cluster` fast-mode path uses when this returns `None`.
+/// The knob is *only* consulted when [`testnet_fast`] is `true`;
+/// a production run (no `RBP_TESTNET_FAST=1`) ignores it.
+pub fn fast_kmeans_sample() -> Option<usize> {
+    let raw = std::env::var("RBP_FAST_KMEANS_SAMPLE").ok()?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// STW-077: read the optional `RBP_FAST_KMEANS_ITERATIONS` smoke
+/// knob. Caps the per-street Lloyd iteration count for the
+/// fast-mode kmeans driver. `Some(n)` only when the env var is a
+/// positive integer; `None` otherwise. The default 8 is the value
+/// the `Layer::cluster` fast-mode path uses when this returns
+/// `None`. The cap replaces (does not add to) the production
+/// iteration count the `Street::t()` constant returns for the
+/// street; production kmeans does NOT consult this knob.
+pub fn fast_kmeans_iterations() -> Option<usize> {
+    let raw = std::env::var("RBP_FAST_KMEANS_ITERATIONS").ok()?;
     raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
 }
 

@@ -162,6 +162,8 @@ fn runbook_doc_lists_every_env_knob() {
         "RBP_BENCH_BLIND",
         "RBP_COMPARE_HANDS",
         "RBP_COMPARE_BLIND",
+        "RBP_FAST_KMEANS_SAMPLE",
+        "RBP_FAST_KMEANS_ITERATIONS",
         "RBP_BENCH_TRANSCRIPT_DIR",
     ];
     let mut missing: Vec<&str> = Vec::new();

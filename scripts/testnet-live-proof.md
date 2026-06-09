@@ -120,7 +120,12 @@ DATABASE_URL=postgres://user:***@host:5432/dbname \
 The script runs in **fast mode** when `RBP_TESTNET_FAST=1` is set,
 using a small-budget chain (2 smoke epochs, 4 bench hands,
 4 compare hands) so a complete run finishes in minutes rather than
-hours. Without the flag the trainer uses its own defaults (larger
+hours. The `--cluster` step's per-street kmeans pass is also capped
+in fast mode (STW-077: 1024-row input sample + 8 Lloyd iterations
+per street, vs. the production 1.3M-row / 14M-row input + 20 / 24
+Lloyd iterations) so a fresh-DB cluster step completes in under
+5 minutes per street — under 30 minutes total for all 4 streets.
+Without the flag the trainer uses its own defaults (larger
 budgets). Override individual env knobs to scale up or down; the
 chain is structurally identical to the production launch path so a
 large budget is just "more hands, more epochs".
@@ -142,6 +147,8 @@ for `cargo test -p rbp-autotrain --features database --test live_proof`:
 | `RBP_BENCH_BLIND` | 2 (when `RBP_TESTNET_FAST=1`) | bench step blind size |
 | `RBP_COMPARE_HANDS` | 4 (when `RBP_TESTNET_FAST=1`) | compare step hand count |
 | `RBP_COMPARE_BLIND` | 2 (when `RBP_TESTNET_FAST=1`) | compare step blind size |
+| `RBP_FAST_KMEANS_SAMPLE` | 1024 (when `RBP_TESTNET_FAST=1`) | STW-077: per-street kmeans input point cap (the production 1.3M-row flop / 14M-row turn pool is sub-sampled to this many rows; operator-overridable) |
+| `RBP_FAST_KMEANS_ITERATIONS` | 8 (when `RBP_TESTNET_FAST=1`) | STW-077: per-street kmeans Lloyd-iteration cap (the production 20 flop / 24 turn iterations are replaced with this cap; operator-overridable) |
 | `RBP_BENCH_TRANSCRIPT_DIR` | (set by runbook) | bench's transcript writer location |
 | `TRAINER_BIN` | `<workspace>/target/debug/trainer` | trainer binary path |
 

@@ -109,6 +109,17 @@ if [[ "${RBP_TESTNET_FAST:-}" == "1" ]]; then
     : "${RBP_BENCH_BLIND:=2}"
     : "${RBP_COMPARE_HANDS:=4}"
     : "${RBP_COMPARE_BLIND:=2}"
+    # STW-077: cap the per-street kmeans driver on a fresh
+    # DB so the cluster step completes in under 5 minutes per
+    # street (the production 1.3M-row flop / 14M-row turn
+    # input + 20/24 Lloyd iterations exhaust the 1-hour
+    # worker budget before the chain reaches --bench). The
+    # sample cap sub-samples the input histogram pool to
+    # 1024 rows; the iteration cap runs 8 Lloyd iterations
+    # (vs. the production 20/24). Both are operator-overridable
+    # via the env vars — the defaults match the STW-077 spec.
+    : "${RBP_FAST_KMEANS_SAMPLE:=1024}"
+    : "${RBP_FAST_KMEANS_ITERATIONS:=8}"
 fi
 
 # --- trainer binary path + on-demand build -------------------------------
@@ -139,6 +150,8 @@ mkdir -p "$RECEIPT_DIR"
     echo "RBP_BENCH_BLIND=${RBP_BENCH_BLIND:-<unset>}"
     echo "RBP_COMPARE_HANDS=${RBP_COMPARE_HANDS:-<unset>}"
     echo "RBP_COMPARE_BLIND=${RBP_COMPARE_BLIND:-<unset>}"
+    echo "RBP_FAST_KMEANS_SAMPLE=${RBP_FAST_KMEANS_SAMPLE:-<unset>}"
+    echo "RBP_FAST_KMEANS_ITERATIONS=${RBP_FAST_KMEANS_ITERATIONS:-<unset>}"
     if [[ -n "${DATABASE_URL:-}" ]]; then
         echo "DATABASE_URL=<redacted: ${#DATABASE_URL} chars>"
     else
