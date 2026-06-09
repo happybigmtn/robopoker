@@ -161,16 +161,32 @@ for P1_FILE in "${P1_FILES[@]}"; do
     checked=$((checked + 1))
     # Is the STW shipped in the plan?
     if grep -qE "^- \[x\].*\`${P1_STW}\`" "${PLAN}"; then
-      # Does the P1 row carry the RESCOPED marker?
-      if grep -qF 'RESCOPED 2026-06-05' <<<"${P1_LINE}"; then
+      # Does the P1 row carry the RESCOPED marker? The
+      # convention is `RESCOPED YYYY-MM-DD` (a generic date;
+      # 2026-06-05 was the first P1-gate's hardcoded date;
+      # later RE-PLANs use the date of their commit).
+      if grep -qE 'RESCOPED [0-9]{4}-[0-9]{2}-[0-9]{2}' <<<"${P1_LINE}"; then
         if [ "${QUIET}" != "1" ]; then
           echo "plan staleness gate: <P1 row ${P1_STW} in ${P1_FILE}> — shipped but RESCOPED (ok)"
         fi
       else
-        ghosts=$((ghosts + 1))
-        ghost_log="${ghost_log}
+        # Is the [x] STW-NNN row the *retirement* (carries a
+        # `RESCOPED <date> by RE-PLAN-NNN` marker)? If so, the
+        # current [ ] row is a re-issue, not a ghost — skip.
+        # The convention: the [x] row says "RESCOPED <date>
+        # by RE-PLAN-XXX" and a later [ ] row re-uses the
+        # same STW-NNN. The gate's job is to not falsely
+        # flag the re-issue as a ghost.
+        if grep -qE "^- \[x\].*\`${P1_STW}\`.*RESCOPED [0-9]{4}-[0-9]{2}-[0-9]{2} by RE-PLAN-[0-9]+" "${PLAN}"; then
+          if [ "${QUIET}" != "1" ]; then
+            echo "plan staleness gate: <P1 row ${P1_STW} in ${P1_FILE}> — re-issue (ok, prior [x] row is RESCOPED)"
+          fi
+        else
+          ghosts=$((ghosts + 1))
+          ghost_log="${ghost_log}
   GHOST: ${P1_LINE}
     duplicates shipped ${P1_STW} (see \`- [x] \`${P1_STW}\`\` in IMPLEMENTATION_PLAN.md)"
+        fi
       fi
     else
       if [ "${QUIET}" != "1" ]; then
