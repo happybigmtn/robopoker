@@ -2458,18 +2458,308 @@ fn dashboard_fixtures_index_json_is_tracked_and_nonempty() {
 }
 
 // ===========================================================================
-// STW-046 dropped-work enforcement
+// STW-078 testnet-postgres-env-provisioning runbook shape contract
 // ===========================================================================
 //
-// The afternoon 2026-06-04 three-lens review (kanban task
-// `t_35186537`) found the morning wave's `STW-040` README
-// `## Try it now` section + `scripts/replay-locally.sh` shim and
-// the companion `STW-041` planning-surface retirement were
-// busywork the testnet north star does not need. STW-046 drops
-// both rows. These negative shape pins ensure the dropped work
-// does not re-enter the tree silently — a future refactor that
-// re-adds the README section or the bash shim fails CI at the
-// cheapest static-check step.
+// `scripts/setup-testnet-postgres.sh` is the pure-bash, idempotent,
+// no-`docker` script the `scripts/testnet-live-proof.sh` runbook
+// assumes when it reads `DATABASE_URL` / `DB_URL` from the env. The
+// receipt `receipts/testnet-live-proof-20260609T060233Z/` (the most
+// recent runbook invocation as of 2026-06-09) shows the `doctor`
+// step failed with `"db_reachable":false,"detail":"SELECT 1 failed:
+// psql: error: connection to server at \"127.0.0.1\", port 5433
+// failed: FATAL:  password authentication failed for user
+// \"rbp_live\""` — the `rbp_live` user's password is not
+// reproducible across reboots, and the *operator-runnable
+// provisioning script* the receipt chain assumes is missing. STW-078
+// ships that script; the two sub-tests below pin its shell-shape
+// contract (no DB required) so a regression in the script's surface
+// (file missing, syntax broken, executable bit cleared, env-file
+// shape drift) fails CI before it ever reaches a live Postgres.
+//
+// The two sub-tests:
+//
+// 1. `setup_testnet_postgres_script_exists_and_parses` (STW-078) —
+//    the script is on disk, has its owner-executable bit set, and
+//    parses with `bash -n`. A regression that drops the file (or
+//    breaks the bash grammar) fails the gate at CI time before a
+//    CI worker can shell out to it.
+// 2. `setup_testnet_postgres_script_writes_env_file` (STW-078) —
+//    the script sources a `cat > "$PG_ENV_FILE" <<ENV ... ENV`
+//    heredoc whose body, after bash interpolation tokens are
+//    substituted, parses as the expected
+//    `DATABASE_URL=postgres://user:***@host:port/dbname` +
+//    `DB_URL=...` + `RBP_TESTNET_PG_*` env-file shape. The
+//    companion runbook doc
+//    `scripts/setup-testnet-postgres.md` must also reference the
+//    script (so a worker reading the doc can find the script by
+//    name). The end-to-end integration test
+//    `crates/autotrain/tests/setup_testnet_postgres.rs` additionally
+//    drives the script against fake Postgres binaries in a clean
+//    tmpdir; that integration test is the behavioural pinner, this
+//    pair is the *no-DB* shape pinner.
+
+fn setup_testnet_postgres_script_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("setup-testnet-postgres.sh")
+}
+
+fn setup_testnet_postgres_doc_path() -> PathBuf {
+    workspace_root()
+        .join("scripts")
+        .join("setup-testnet-postgres.md")
+}
+
+#[test]
+fn setup_testnet_postgres_script_exists_and_parses() {
+    // The provisioning script must be on disk, executable, and
+    // parse with `bash -n`. A regression that drops the file
+    // (or breaks the bash grammar) fails the gate at CI time
+    // before a CI worker can shell out to it.
+    let p = setup_testnet_postgres_script_path();
+    assert!(
+        p.exists(),
+        "STW-078 testnet-postgres provisioning script missing at {}; \
+         the testnet live proof runbook has no env producer",
+        p.display()
+    );
+    let meta = std::fs::metadata(&p).unwrap_or_else(|e| panic!("stat {}: {e}", p.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        // The owner-executable bit must be set; a future
+        // `chmod -x` regression (e.g. a cross-checkout that
+        // strips the bit) fails the test before a worker
+        // tries to shell out to the script.
+        assert!(
+            mode & 0o100 != 0,
+            "STW-078 provisioning script at {} must have its \
+             owner-executable bit set (got mode {mode:o})",
+            p.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix hosts we can only assert the file is
+        // present; the bash -n check below covers the "is
+        // the file actually a bash script" question.
+        let _ = meta;
+    }
+    // `bash -n` parses the script without executing it. A
+    // non-zero exit (a syntax error) fails the test so a
+    // future edit that breaks the bash grammar fails CI
+    // before it reaches a live Postgres.
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(&p)
+        .output()
+        .expect("spawn bash -n scripts/setup-testnet-postgres.sh");
+    assert!(
+        out.status.success(),
+        "STW-078 provisioning script must parse with `bash -n` \
+         (got exit {:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn setup_testnet_postgres_script_writes_env_file() {
+    // The script must source a `cat > "$PG_ENV_FILE" <<ENV ... ENV`
+    // heredoc whose body, after bash interpolation tokens are
+    // substituted, parses as the expected
+    // `DATABASE_URL=postgres://user:***@host:port/dbname` +
+    // `DB_URL=...` + `RBP_TESTNET_PG_*` env-file shape. The
+    // end-to-end `setup_testnet_postgres.rs` integration test
+    // is the *behavioural* pinner (it actually runs the
+    // script with fake `initdb` / `pg_ctl` / `postgres` /
+    // `psql` / `createuser` / `createdb` shims); this test
+    // is the no-DB *shape* pinner that catches a regression
+    // in the heredoc body (e.g. a missing `DB_URL=` line,
+    // or a typo in the `postgres://` URL shape) before
+    // CI ever spins up the fakes.
+    let script = read(&setup_testnet_postgres_script_path());
+    // The script must source a `cat > "$PG_ENV_FILE" <<ENV` heredoc
+    // (unquoted, so bash interpolates `${PG_USER}` /
+    // `${PG_PASSWORD}` / `${PG_PORT}` / `${PG_DATABASE}` at
+    // write time — the operator's `source` of the resulting
+    // file must see literal `host:port:user` values, not bash
+    // variables that resolve to nothing in the operator's shell).
+    assert!(
+        script.contains("cat > \"$PG_ENV_FILE\" <<ENV"),
+        "STW-078 provisioning script must source a `cat > \"$PG_ENV_FILE\" <<ENV ... ENV` \
+         heredoc that writes the env file the runbook reads; a regression that drops the \
+         heredoc makes the `DATABASE_URL` the runbook reads unreproducible"
+    );
+    // The env-file body must carry the four `RBP_TESTNET_PG_*`
+    // operator-knob keys the runbook honours, so a worker
+    // who `source`s the env file gets a known contract.
+    for key in &[
+        "DATABASE_URL=postgres://",
+        "DB_URL=postgres://",
+        "RBP_TESTNET_PG_PORT=",
+        "RBP_TESTNET_PG_USER=",
+        "RBP_TESTNET_PG_PASSWORD=",
+        "RBP_TESTNET_PG_DATABASE=",
+    ] {
+        assert!(
+            script.contains(key),
+            "STW-078 provisioning script env-file heredoc must include `{key}`; \
+             the env file the runbook sources is missing a required contract field"
+        );
+    }
+    // Mechanically extract the heredoc body and substitute the
+    // bash interpolation tokens so the result is a parseable
+    // `KEY=VALUE` env-file (one assignment per line). The
+    // heredoc terminator is unquoted (`<<ENV`) so the
+    // `${PG_USER}` / `${PG_PASSWORD}` / `${PG_PORT}` /
+    // `${PG_DATABASE}` / `${PG_DATA_DIR}` / `${PG_LOG_DIR}`
+    // tokens are *literal text* in the script source. We
+    // find the *last* `<<ENV` (the actual env-file emitter;
+    // the comment block above the emitter also mentions
+    // `<<ENV` in prose, and the generic
+    // `extract_heredoc_body` helper returns the first hit),
+    // substitute each bash token with a known-value
+    // string, and assert the result looks like a real env
+    // file (every non-comment, non-empty line matches
+    // `^KEY=VALUE$`).
+    //
+    // We use a custom extractor here (rather than the
+    // shared `extract_heredoc_body` helper above) because
+    // the script has a *comment* that mentions `<<ENV`
+    // in prose — the shared helper returns the comment's
+    // `<<ENV` token and we want the emitter's `<<ENV` token.
+    fn extract_last_heredoc_body(script: &str, tag: &str) -> Option<String> {
+        let needle = format!("<<{tag}");
+        // Find every line that contains `<<TAG`; pick the
+        // last one (the actual emitter, not the prose
+        // comment above it).
+        let mut last_open_idx: Option<usize> = None;
+        for (i, line) in script.lines().enumerate() {
+            if line.contains(&needle) {
+                last_open_idx = Some(i);
+            }
+        }
+        let open_idx = last_open_idx?;
+        let mut body: Vec<&str> = Vec::new();
+        for line in script.lines().skip(open_idx + 1) {
+            if line.trim() == tag {
+                return Some(body.join("\n"));
+            }
+            body.push(line);
+        }
+        None
+    }
+    let body = extract_last_heredoc_body(&script, "ENV")
+        .expect("STW-078 provisioning script must source a <<ENV ... ENV heredoc");
+    let substituted = body
+        .replace("${PG_USER}", "rbp_live")
+        .replace("${PG_PASSWORD}", "rbp_live")
+        .replace("${PG_PORT}", "5433")
+        .replace("${PG_DATABASE}", "rbp_live")
+        .replace("${PG_DATA_DIR}", "/tmp/rbp-testnet-postgres/data")
+        .replace("${PG_LOG_DIR}", "/tmp/rbp-testnet-postgres/log");
+    let mut saw_database_url = false;
+    let mut saw_db_url = false;
+    let mut saw_port = false;
+    for line in substituted.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Every non-comment, non-empty line must be a
+        // `KEY=VALUE` assignment (no shell metacharacters,
+        // no backticks, no `$(...)` command substitution —
+        // the operator's `source` of the file must be
+        // safe-by-construction).
+        assert!(
+            !trimmed.contains('`') && !trimmed.contains("$("),
+            "STW-078 provisioning script env-file heredoc must not contain shell \
+             metacharacters (` or $(...)) — a regression that re-introduces \
+             command substitution makes `source`ing the env file unsafe. \
+             Offending line: `{trimmed}`"
+        );
+        let eq_idx = trimmed.find('=').unwrap_or_else(|| {
+            panic!(
+                "STW-078 provisioning script env-file heredoc line is not a \
+                 `KEY=VALUE` assignment: `{trimmed}`"
+            )
+        });
+        let key = &trimmed[..eq_idx];
+        let value = &trimmed[eq_idx + 1..];
+        assert!(
+            !key.is_empty()
+                && !value.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+            "STW-078 provisioning script env-file heredoc line has a malformed \
+             `KEY=VALUE` shape: `{trimmed}` (key must be `[A-Z0-9_]+`, value \
+             must be non-empty)"
+        );
+        if key == "DATABASE_URL" {
+            saw_database_url = true;
+            assert!(
+                value.starts_with("postgres://")
+                    && value.contains("rbp_live:rbp_live@127.0.0.1:5433/rbp_live"),
+                "STW-078 env-file `DATABASE_URL` must match the runbook's expected \
+                 `postgres://user:pass@host:port/dbname` shape; got `{value}`"
+            );
+        }
+        if key == "DB_URL" {
+            saw_db_url = true;
+            assert!(
+                value.starts_with("postgres://")
+                    && value.contains("rbp_live:rbp_live@127.0.0.1:5433/rbp_live"),
+                "STW-078 env-file `DB_URL` must match the runbook's expected \
+                 `postgres://user:pass@host:port/dbname` shape; got `{value}`"
+            );
+        }
+        if key == "RBP_TESTNET_PG_PORT" {
+            saw_port = true;
+            assert_eq!(
+                value, "5433",
+                "STW-078 env-file `RBP_TESTNET_PG_PORT` must round-trip to the \
+                 same value the heredoc substituted; got `{value}`"
+            );
+        }
+    }
+    assert!(
+        saw_database_url && saw_db_url && saw_port,
+        "STW-078 provisioning script env-file heredoc must carry `DATABASE_URL` + \
+         `DB_URL` + `RBP_TESTNET_PG_PORT` assignments (saw database_url={saw_database_url} \
+         db_url={saw_db_url} port={saw_port})"
+    );
+    // The companion runbook doc must reference the script
+    // by file name so a worker reading the doc can find it.
+    let doc = read(&setup_testnet_postgres_doc_path());
+    assert!(
+        doc.contains("scripts/setup-testnet-postgres.sh"),
+        "STW-078 provisioning doc at {} must reference the script by file name; \
+         a worker reading the doc would not know how to invoke the provisioner",
+        setup_testnet_postgres_doc_path().display()
+    );
+    // The doc must mention the headline / env-file handoff so
+    // a worker knows the `source .auto/testnet-postgres.env`
+    // step is the contract.
+    assert!(
+        doc.contains(".auto/testnet-postgres.env") || doc.contains("RBP_TESTNET_PG_ENV_FILE"),
+        "STW-078 provisioning doc must reference the env-file handoff the script writes; \
+         a worker reading the doc would not know to `source` the env file"
+    );
+    // The script must print the pinned `testnet-postgres: complete: ...`
+    // headline so a CI dashboard scraper has a stable regex to grep.
+    assert!(
+        script.contains("testnet-postgres: complete: port=")
+            && script.contains("testnet-postgres: already provisioned"),
+        "STW-078 provisioning script must print both the `complete:` and the \
+         `already provisioned` headline lines; a CI dashboard scraper greps the \
+         `complete:` line for the receipt"
+    );
+}
 
 fn readme_path() -> PathBuf {
     workspace_root().join("README.md")
