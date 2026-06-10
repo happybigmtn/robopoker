@@ -4987,7 +4987,7 @@ single-shipment leverage.
   pinned prefix. **`lens:` Design
   (observability audit).**
 
-- [ ] **[P1] ~~`STW-040`~~ `README.md` `## Try it now` —
+- [x] **[P1] ~~`STW-040`~~ `README.md` `## Try it now` — (RESCOPED 2026-06-10 by STW-071)**
   DROPPED 2026-06-04 by STW-046.** The morning wave's
   `## Try it now` + `## Public dashboard` section add +
   `scripts/replay-locally.sh` shim is busywork the
@@ -5133,7 +5133,7 @@ single-shipment leverage.
   north star's "publicly visible"
   requirement).**
 
-- [ ] **[P1] ~~`STW-041`~~ Close the `STW-001` deferred row
+- [x] **[P1] ~~`STW-041`~~ Close the `STW-001` deferred row (RESCOPED 2026-06-10 by STW-071)**
   — DROPPED 2026-06-04 by STW-046.** The morning
   wave's planning-surface retirement task (retire
   the `STW-001` deferred row + add a
@@ -5801,7 +5801,7 @@ leverage.
   changes and no per-arm grep
   prefix drift.**
 
-- [ ] **[P1] `STW-045` `scripts/trainer-observe.sh` wrapper RESCOPED 2026-06-05**
+- [x] **[P1] `STW-045` `scripts/trainer-observe.sh` wrapper (RESCOPED 2026-06-10 by STW-071)** (RESCOPED 2026-06-05)
   that prepends `date +%s%3N` to every stderr
   line the trainer emits and writes a
   `trainer.step.jsonl` per-run timeline
@@ -6055,7 +6055,7 @@ leverage.
   regressing the existing
   per-arm log shape.**
 
-- [ ] **[P1] `STW-046` Drop the morning-wave `STW-040`
+- [x] **[P1] `STW-046` Drop the morning-wave `STW-040` (RESCOPED 2026-06-10 by STW-071)**
   README `## Try it now` + the
   `scripts/replay-locally.sh` shim and
   the morning-wave `STW-041` STW-001
@@ -6624,7 +6624,7 @@ and `STW-048`.
   `placeholder_cells_present` lib test
   *pins* the defect as a feature).**
 
-- [ ] **[P1] ~~`STW-048`~~ `SUPERSEDED 2026-06-04
+- [x] **[P1] ~~`STW-048`~~ `SUPERSEDED 2026-06-04 (RESCOPED 2026-06-10 by STW-071)**
   by STW-050` Replace the `actions` column
   header (render.rs:159) with two per-action column
   headers (`transcript` / `replay`) AND replace the
@@ -6731,7 +6731,7 @@ and `STW-048`.
   visible "this is a test fixture" tell
   in the deployed surface).**
 
-- [ ] **[P1] `STW-045` (carry-over from afternoon wave RESCOPED 2026-06-05**
+- [x] **[P1] `STW-045` (carry-over from afternoon wave (RESCOPED 2026-06-10 by STW-071)** (RESCOPED 2026-06-05
   `t_35186537`) `scripts/trainer-observe.sh` wrapper
   that prepends `date +%s%3N` to every stderr line
   the trainer emits and writes a `trainer.step.jsonl`
@@ -6829,7 +6829,7 @@ and `STW-048`.
   and no risk of regressing the
   existing per-arm log shape.**
 
-- [ ] **[P1] `STW-046` (carry-over from afternoon wave
+- [x] **[P1] `STW-046` (carry-over from afternoon wave (RESCOPED 2026-06-10 by STW-071)**
   `t_35186537`) Drop the morning-wave `STW-040`
   README `## Try it now` + the
   `scripts/replay-locally.sh` shim and the
@@ -7544,7 +7544,7 @@ they are NOT new scope. The new scope is
   autotrain Rust crate changes and no risk of
   regressing the existing per-arm log shape.**
 
-- [ ] **[P1] `STW-046` (carry-over from third
+- [x] **[P1] `STW-046` (carry-over from third (RESCOPED 2026-06-10 by STW-071)**
   pass `t_6df7de4e` and afternoon wave
   `t_35186537`) Drop the morning-wave
   `STW-040` README `## Try it now` + the
@@ -9271,7 +9271,7 @@ scope. The new scope is `STW-054` + `STW-055`
   false-`[ ]` row the fifth pass
   failed to mark).**
 
-- [ ] **[P1] `STW-056` Mark the four open
+- [x] **[P1] `STW-056` Mark the four open (RESCOPED 2026-06-10 by STW-071)**
   prior-wave rows — `STW-039` + `STW-040`
   + `STW-041` + `STW-044` — with
   `RESCOPED 2026-06-04 by STW-056` markers
@@ -9484,7 +9484,7 @@ scope. The new scope is `STW-054` + `STW-055`
   that closes the regression
   gap).**
 
-- [ ] **[P1] `STW-057` The deploy-step
+- [x] **[P1] `STW-057` The deploy-step (RESCOPED 2026-06-10 by STW-071)**
   `live_proof dashboard deploy ...`
   headline contract the existing
   `grep ^live_proof` scrape pattern
@@ -9984,7 +9984,7 @@ deliverables, ordered by leverage:
   RBP_DASHBOARD_DEPLOYED_URL on
   Pages deploy` commit (2026-06-04).**
 
-- [ ] **[P1] `STW-060` The
+- [x] **[P1] `STW-060` The (RESCOPED 2026-06-10 by STW-071)**
   `crates/dashboard/tests/fixtures/INDEX.json`
   demo fixture is wired into the smoke
   test's setup so a `git clean -fdx`
@@ -10331,7 +10331,7 @@ by leverage:
   panic in a log file after minutes of
   wasted work).**
 
-- [ ] **[P1] `STW-066` The
+- [x] **[P1] `STW-066` The (RESCOPED 2026-06-10 by STW-071)**
   `crates/dashboard/static/index.html`
   `deployedUrl` JS-side fallback
   hard-coded at line 392 reads from a new
@@ -10381,7 +10381,7 @@ by leverage:
   extension to existing injection function;
   cache shape unchanged).**
 
-- [ ] **[P1] `STW-068` A new
+- [x] **[P1] `STW-068` A new (RESCOPED 2026-06-10 by STW-071)**
   `scripts/seed-dashboard-local.sh` runbook
   that takes an existing (even incomplete)
   testnet-live-proof receipt directory and
@@ -10818,7 +10818,7 @@ deliverables, ordered by leverage:
   per-request CPU drops by
   ~5x).**
 
-- [ ] **[P1] `STW-063` The
+- [x] **[P1] `STW-063` The (RESCOPED 2026-06-10 by STW-071)**
   `crates/dashboard/src/router.rs
   ::serve_transcript` handler
   caches the per-`id`
@@ -10953,7 +10953,7 @@ deliverables, ordered by leverage:
   current per-request
   `std::fs::read` triggers).**
 
-- [ ] **[P1] `STW-064` The
+- [x] **[P1] `STW-064` The (RESCOPED 2026-06-10 by STW-071)**
   `crates/dashboard/src/router.rs
   ::inject_deployed_url` function
   returns a `Result<String,
@@ -11106,7 +11106,7 @@ deliverables, ordered by leverage:
   crash they have to read
   out of a log file).**
 
-- [ ] **[P1] `STW-065` The RESCOPED 2026-06-05**
+- [x] **[P1] `STW-065` The (RESCOPED 2026-06-10 by STW-071)** (RESCOPED 2026-06-05)
   `scripts/plan-staleness-
   gate.sh` script extends
   its ghost-detection to
@@ -11283,7 +11283,7 @@ deliverables, ordered by leverage:
   mirror the new P1
   pass verbatim).**
 
-- [ ] **[P1] `STW-066` The
+- [x] **[P1] `STW-066` The (RESCOPED 2026-06-10 by STW-071)**
   `crates/dashboard/static
   /index.html` `deployedUrl`
   JS-side fallback

@@ -171,13 +171,16 @@ for P1_FILE in "${P1_FILES[@]}"; do
         fi
       else
         # Is the [x] STW-NNN row the *retirement* (carries a
-        # `RESCOPED <date> by RE-PLAN-NNN` marker)? If so, the
+        # `RESCOPED <date> by RE-PLAN-NNN` or
+        # `RESCOPED <date> by STW-NNN` marker)? If so, the
         # current [ ] row is a re-issue, not a ghost — skip.
         # The convention: the [x] row says "RESCOPED <date>
-        # by RE-PLAN-XXX" and a later [ ] row re-uses the
-        # same STW-NNN. The gate's job is to not falsely
+        # by RE-PLAN-XXX" (or "by STW-XXX", the
+        # STW-071-introduced marker convention for worker-
+        # authored retirements) and a later [ ] row re-uses
+        # the same STW-NNN. The gate's job is to not falsely
         # flag the re-issue as a ghost.
-        if grep -qE "^- \[x\].*\`${P1_STW}\`.*RESCOPED [0-9]{4}-[0-9]{2}-[0-9]{2} by RE-PLAN-[0-9]+" "${PLAN}"; then
+        if grep -qE "^- \[x\].*\`${P1_STW}\`.*RESCOPED [0-9]{4}-[0-9]{2}-[0-9]{2} by (RE-PLAN-[0-9]+|STW-[0-9]+)" "${PLAN}"; then
           if [ "${QUIET}" != "1" ]; then
             echo "plan staleness gate: <P1 row ${P1_STW} in ${P1_FILE}> — re-issue (ok, prior [x] row is RESCOPED)"
           fi

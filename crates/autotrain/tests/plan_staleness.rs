@@ -453,3 +453,147 @@ fn plan_staleness_gate_catches_p1_ghosts() {
     // Cleanup the tempdir.
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+#[test]
+fn plan_staleness_gate_p1_re_issue_marker_is_stw_071_convention() {
+    // STW-071 PLAN-GHOST-RETIRE-001 introduces the
+    // `RESCOPED <date> by STW-NNN` marker convention (in
+    // addition to the existing `by RE-PLAN-NNN` convention)
+    // for worker-authored P1 retirements. The P1 re-issue
+    // exception in `scripts/plan-staleness-gate.sh` must
+    // match both conventions so a `[ ] [P1]` row that
+    // duplicates a `[x] STW-NNN RESCOPED ... by STW-071` row
+    // is treated as a re-issue, not a ghost.
+    //
+    // This sub-test is the positive half of the contract:
+    //   * the plan ships `[x] STW-099 RESCOPED 2026-06-10 by STW-071`
+    //   * the roadmap has `[ ] [P1] STW-099` (a re-issue)
+    //   * the gate must exit 0 with `ghosts=0`
+    //
+    // The negative half (ghost detected when the [x] row
+    // carries NO `RESCOPED` marker) is covered by
+    // `plan_staleness_gate_catches_p1_ghosts` above; this
+    // test pins the NEW marker convention specifically.
+    let scratch = std::env::temp_dir().join(format!(
+        "rbp-plan-staleness-stw-071-marker-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&scratch)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", scratch.display()));
+
+    let roadmap = scratch.join("roadmap.md");
+    let plan = scratch.join("plan.md");
+
+    // Roadmap: an unchecked [P1] row that re-uses a STW id
+    // whose [x] retirement in the plan carries the STW-071
+    // marker convention.
+    std::fs::write(
+        &roadmap,
+        "# fabricated roadmap\n\n\
+         - [ ] [P1] `STW-099` A re-issue of a worker-retired STW.\n",
+    )
+    .expect("write roadmap");
+
+    // Plan: the [x] row carries `RESCOPED 2026-06-10 by STW-071`
+    // (the new STW-071-introduced marker convention).
+    std::fs::write(
+        &plan,
+        "# fabricated plan\n\n\
+         - [x] **`[P1]` `STW-099` `RETIREMENT` RESCOPED 2026-06-10 by STW-071.** \
+         The work was retired in the same RE-PLAN wave as the STW-071 plan-ghost-retire slice; \
+         the [ ] re-issue row above is a stale re-claim attempt.\n",
+    )
+    .expect("write plan");
+
+    let gate = script_path();
+    assert!(
+        gate.exists(),
+        "STW-071 gate script missing at {} (cannot drive STW-071 marker test)",
+        gate.display()
+    );
+
+    // Run the gate: it must exit 0 because the [x] row's
+    // `by STW-071` marker matches the re-issue exception.
+    let out = std::process::Command::new("bash")
+        .arg(&gate)
+        .env("RBP_PLAN_STALENESS_ROADMAP", &roadmap)
+        .env("RBP_PLAN_STALENESS_PLAN", &plan)
+        .env("RBP_PLAN_STALENESS_QUIET", "1")
+        .output()
+        .expect("spawn bash scripts/plan-staleness-gate.sh (stw-071 marker)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "STW-071 P1 re-issue exception must exit 0 when the [x] row carries \
+         `RESCOPED <date> by STW-NNN` (the STW-071 marker convention); the [ ] [P1] \
+         row is a re-issue, not a ghost.\n\
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+    assert!(
+        stdout.contains("plan staleness gate complete: checked=1 ghosts=0"),
+        "STW-071 P1 re-issue exception must report `checked=1 ghosts=0` (one \
+         [ ] [P1] row in the roadmap, no ghosts because the [x] row carries \
+         the STW-071 marker); got stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // With QUIET=1 the per-row log line is suppressed (the
+    // CI dashboard scrapes only the headline + exit code);
+    // re-run with QUIET=0 to assert the per-row log line
+    // names the re-issue so a worker reading stdout sees
+    // *why* the [ ] row passed.
+    let verbose_out = std::process::Command::new("bash")
+        .arg(&gate)
+        .env("RBP_PLAN_STALENESS_ROADMAP", &roadmap)
+        .env("RBP_PLAN_STALENESS_PLAN", &plan)
+        .env("RBP_PLAN_STALENESS_QUIET", "0")
+        .output()
+        .expect("spawn bash scripts/plan-staleness-gate.sh (stw-071 marker verbose)");
+    let verbose_stdout = String::from_utf8_lossy(&verbose_out.stdout);
+    assert!(
+        verbose_stdout.contains("re-issue (ok"),
+        "STW-071 P1 re-issue exception must log the re-issue line in QUIET=0 mode \
+         so a worker reading stdout sees why the [ ] row passed; got stdout:\n{verbose_stdout}"
+    );
+
+    // Negative half: drop the `by STW-071` marker from the
+    // [x] row and assert the gate now flags the [ ] [P1] row
+    // as a ghost. This pins the marker as the *only* exempt
+    // condition (not the mere presence of an [x] sibling).
+    std::fs::write(
+        &plan,
+        "# fabricated plan\n\n\
+         - [x] `STW-099` shipped (no RESCOPED marker).\n",
+    )
+    .expect("write unretired plan");
+
+    let ghost_out = std::process::Command::new("bash")
+        .arg(&gate)
+        .env("RBP_PLAN_STALENESS_ROADMAP", &roadmap)
+        .env("RBP_PLAN_STALENESS_PLAN", &plan)
+        .env("RBP_PLAN_STALENESS_QUIET", "1")
+        .output()
+        .expect("spawn bash scripts/plan-staleness-gate.sh (stw-071 marker negative)");
+    let ghost_stdout = String::from_utf8_lossy(&ghost_out.stdout);
+    let ghost_stderr = String::from_utf8_lossy(&ghost_out.stderr);
+    assert_eq!(
+        ghost_out.status.code(),
+        Some(3),
+        "STW-071 P1 re-issue exception must exit 3 when the [x] row carries NO \
+         RESCOPED marker (the [ ] [P1] row is a real ghost, not a re-issue).\n\
+         --- stdout ---\n{ghost_stdout}\n--- stderr ---\n{ghost_stderr}"
+    );
+    assert!(
+        ghost_stdout.contains("plan staleness gate complete: checked=1 ghosts=1"),
+        "STW-071 P1 re-issue exception must report `checked=1 ghosts=1` when the \
+         [x] sibling has no RESCOPED marker; got stdout:\n{ghost_stdout}\nstderr:\n{ghost_stderr}"
+    );
+    assert!(
+        ghost_stderr.contains("STW-099"),
+        "STW-071 P1 re-issue exception stderr must name the ghosted STW-099 on failure; \
+         got stderr:\n{ghost_stderr}"
+    );
+
+    // Cleanup the tempdir.
+    let _ = std::fs::remove_dir_all(&scratch);
+}
