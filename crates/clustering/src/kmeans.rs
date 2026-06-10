@@ -163,16 +163,42 @@ pub fn run_fast<const K: usize>(
     } else {
         points
     };
+    // STW-086: pre-filter the truncated point set to drop
+    // empty histograms. The kmeans++ init path calls
+    // `metric.emd(centroid, h)` on the *next* iteration's
+    // picked centroid; `Metric::emd` dispatches via
+    // `source.peek().street()` (metric.rs:108), and
+    // `Bins::peek` (bins.rs:95) panics on an empty
+    // support with `"non empty histogram"`. The first
+    // 1024 turn projections of the flop point pool in
+    // production include empty turn isomorphisms (turn
+    // isomorphisms with no observed flops) — if the
+    // first centroid picked by
+    // `WeightedIndex::new(potentials.iter()).sample(rng)`
+    // happens to be one of them, the next iteration's
+    // `metric.emd(empty_centroid, h)` panics. The same
+    // guard also has to apply to the Lloyd iterations
+    // below: `step_elkan_slice` calls `metric.emd`
+    // between a (non-empty) centroid and every point in
+    // `truncated`, so leaving empty points in `truncated`
+    // after the init fix would still cause `peek()` to
+    // be reached on the empty target's Bin (producing
+    // NaN in Sinkhorn, not a panic, but a degenerate
+    // result that is not what the spec promises).
+    // Filtering at the `run_fast` entry point keeps the
+    // kmeans++ init *and* the Lloyd iterations on a
+    // consistent (non-empty) point set.
+    let non_empty: Vec<Histogram> = truncated.iter().filter(|h| h.n() > 0).cloned().collect();
     // Effective iteration cap: never raises `street.t()`.
     let iters = caps.iterations.min(street.t());
     log::info!(
         "{:<32}sample={} iters={} (street.t()={})",
         "kmeans fast",
-        truncated.len(),
+        non_empty.len(),
         iters,
         street.t()
     );
-    if truncated.is_empty() {
+    if non_empty.is_empty() {
         // An empty point pool cannot drive kmeans++ init; the
         // production driver would panic on `WeightedIndex::new`
         // with an empty weights array. The fast-mode driver
@@ -184,8 +210,8 @@ pub fn run_fast<const K: usize>(
         // clustered.
         return std::array::from_fn(|_| Histogram::empty(street));
     }
-    // Kmeans++ initialization on the truncated point set.
-    let mut centroids = init_kmeans_plus_plus::<K>(truncated, metric, street);
+    // Kmeans++ initialization on the (non-empty) point set.
+    let mut centroids = init_kmeans_plus_plus::<K>(&non_empty, metric, street);
     if iters == 0 {
         return centroids;
     }
@@ -193,16 +219,17 @@ pub fn run_fast<const K: usize>(
     // reassigns points to the nearest centroid (with bound
     // pruning) and recomputes centroids as the absorb-merge of
     // the assigned points. The bound update at the end of each
-    // iteration lowers the per-point distance bounds by the
-    // centroid movement (so a future iteration can prune more
-    // work).
-    let mut bounds: Vec<Bounds<K>> = (0..truncated.len())
+    // iteration lowers the per-point upper bound and
+    // subtracts from each per-point lower bound in
+    // `Bounds::update`, so the pruning in the next
+    // iteration has tighter bounds to work with.
+    let mut bounds: Vec<Bounds<K>> = (0..non_empty.len())
         .into_par_iter()
-        .map(|i| neighbor::<K>(truncated, &centroids, metric, i))
+        .map(|i| neighbor::<K>(&non_empty, &centroids, metric, i))
         .map(Bounds::from)
         .collect();
     for _ in 0..iters {
-        centroids = step_elkan_slice::<K>(truncated, &centroids, &mut bounds, metric);
+        centroids = step_elkan_slice::<K>(&non_empty, &centroids, &mut bounds, metric);
     }
     centroids
 }
@@ -218,11 +245,37 @@ fn init_kmeans_plus_plus<const K: usize>(
     metric: &Metric,
     street: Street,
 ) -> [Histogram; K] {
+    // STW-086: pre-filter the input slice to drop empty
+    // histograms. The kmeans++ loop below calls
+    // `metric.emd(centroid, h)` on the *next* iteration's
+    // picked centroid; `Metric::emd` dispatches via
+    // `source.peek().street()` (metric.rs:108), and
+    // `Bins::peek` (bins.rs:95) panics on an empty support
+    // with `"non empty histogram"`. The first 1024 turn
+    // projections of the flop point pool include empty
+    // turn isomorphisms (turn isomorphisms with no
+    // observed flops) — if the first centroid picked by
+    // `WeightedIndex::new(potentials.iter()).sample(rng)`
+    // happens to be one of them, the next iteration's
+    // `metric.emd(empty_centroid, h)` panics. Mirrors
+    // the production `Layer::init_kmeans` defensive
+    // guard (layer.rs) so both paths are bounded.
+    let non_empty: Vec<Histogram> = points.iter().filter(|h| h.n() > 0).cloned().collect();
+    if non_empty.is_empty() {
+        // No non-empty input — mirror the
+        // `truncated.is_empty()` early-return on kmeans.rs:175
+        // and return K empty centroids so a downstream
+        // `lookup` / `metric` / `future` consumer sees a
+        // well-formed (degenerate) result instead of a
+        // crash. Deterministic per-street seed: the empty
+        // return path is independent of the seed.
+        return std::array::from_fn(|_| Histogram::empty(street));
+    }
     // Deterministic per-street seed.
     let ref mut hasher = DefaultHasher::default();
     street.hash(hasher);
     let ref mut rng = SmallRng::seed_from_u64(hasher.finish());
-    let n = points.len();
+    let n = non_empty.len();
     let mut potentials = vec![1.0_f32; n];
     let mut centroids: Vec<Histogram> = Vec::with_capacity(K);
     while centroids.len() < K {
@@ -236,12 +289,12 @@ fn init_kmeans_plus_plus<const K: usize>(
         let idx = WeightedIndex::new(potentials.iter())
             .expect("valid weights array")
             .sample(rng);
-        let centroid = points[idx].clone();
+        let centroid = non_empty[idx].clone();
         centroids.push(centroid);
         potentials[idx] = 0.0;
         // Update potentials: each point's potential is
         // min(potential, d^2 to the just-chosen centroid).
-        potentials = points
+        potentials = non_empty
             .par_iter()
             .enumerate()
             .map(|(i, h)| {

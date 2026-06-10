@@ -291,3 +291,96 @@ fn production_mode_unchanged_when_fast_unset() {
         "STW-077: FAST_KMEANS_ITERATIONS_DEFAULT must remain 8 per the spec"
     );
 }
+
+// ---------------------------------------------------------------------
+// STW-086: empty-histogram defensive guard regression test
+// ---------------------------------------------------------------------
+
+/// STW-086: `fast_mode_handles_empty_point_in_prefix` pins the
+/// empty-histogram defensive guard in `kmeans::init_kmeans_plus_plus`.
+/// The kmeans++ init path calls `metric.emd(centroid, h)` on
+/// the *next* iteration's picked centroid; `Metric::emd`
+/// dispatches via `source.peek().street()` (metric.rs:108), and
+/// `Bins::peek` (bins.rs:95) panics on an empty support with
+/// `"non empty histogram"`. The first 1024 turn projections of
+/// the flop point pool in production include empty turn
+/// isomorphisms (turn isomorphisms with no observed flops);
+/// if the first centroid picked by
+/// `WeightedIndex::new(potentials.iter()).sample(rng)` happens
+/// to be one of them, the next iteration's `metric.emd` call
+/// panics. STW-086's fix is a pre-filter in
+/// `init_kmeans_plus_plus` that drops empty histograms before
+/// the kmeans++ loop. The test mirrors the real-world shape
+/// (1024 points, 16 empty prefix, K=4, turn street) and asserts
+/// `run_fast` returns K centroids cleanly + stays under the
+/// existing 2 s wall-clock budget (a regression to the
+/// pre-fix panic would crash the test process; a regression
+/// to a no-op guard would still pass the assertion but blow
+/// the budget).
+#[test]
+fn fast_mode_handles_empty_point_in_prefix() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    unsetenv("RBP_FAST_KMEANS_SAMPLE");
+    unsetenv("RBP_FAST_KMEANS_ITERATIONS");
+    // Use the spec's fast-mode cap so the regression test
+    // exercises the same code path the receipt runbook does
+    // (the panic the receipt captured fired inside
+    // `kmeans::init_kmeans_plus_plus` called from `run_fast`).
+    setenv("RBP_FAST_KMEANS_SAMPLE", "1024");
+    setenv("RBP_FAST_KMEANS_ITERATIONS", "8");
+    let caps = FastKmeansCaps::resolve(TEST_STREET);
+    assert_eq!(caps.sample, 1024);
+    assert_eq!(caps.iterations, 8);
+    // Build a 1024-row input whose first 16 entries are
+    // `Histogram::empty(TEST_STREET)` (turn, the street
+    // the production panic fired on) and the rest are
+    // synthetic non-empty turn histograms. The pre-fix
+    // `run_fast` would panic in
+    // `init_kmeans_plus_plus` when the first centroid
+    // picked from the uniform weights array was one of
+    // the empty prefix slots — the next iteration's
+    // `metric.emd(empty_centroid, h)` call dispatched
+    // into `Bins::peek` on an empty support and panicked.
+    // STW-086's pre-filter drops the empty prefix before
+    // the kmeans++ loop, so the picked centroid is always
+    // a non-empty histogram and the next iteration's
+    // `metric.emd` call is well-defined.
+    const EMPTY_PREFIX: usize = 16;
+    let mut points: Vec<Histogram> = (0..EMPTY_PREFIX)
+        .map(|_| Histogram::empty(TEST_STREET))
+        .collect();
+    points.extend((EMPTY_PREFIX..N).map(|_| Histogram::from(Observation::from(TEST_STREET))));
+    assert_eq!(points.len(), N);
+    assert_eq!(points.iter().filter(|h| h.n() == 0).count(), EMPTY_PREFIX);
+    // The fast-mode kmeans driver must return K centroids
+    // without panicking. The pre-fix path panics with
+    // `"non empty histogram"` at `bins.rs:95`; the
+    // post-fix path returns a well-formed degenerate
+    // result (the kmeans++ picks K non-empty centroids
+    // from the filtered pool — the empty prefix is
+    // silently dropped, never used as a centroid).
+    let start = Instant::now();
+    let centroids = run_fast::<K>(&points, &Metric::default(), TEST_STREET, caps);
+    let elapsed = start.elapsed();
+    assert_eq!(
+        centroids.len(),
+        K,
+        "STW-086: run_fast on a 1024-row input with a 16-row empty \
+         prefix must return exactly K centroids (the pre-filter \
+         drops the empty slots, so the kmeans++ loop picks K \
+         non-empty centroids); pre-fix the test would panic with \
+         `\"non empty histogram\"` at `bins.rs:95`."
+    );
+    assert!(
+        elapsed < FAST_WALLCLOCK_BUDGET,
+        "STW-086: fast-mode kmeans on N={N} + K={K} with a 16-row \
+         empty prefix must complete in under {:?}; took \
+         {elapsed:?}. A regression that re-introduces the panic \
+         would crash the test (not the budget), but a regression \
+         that re-introduces the O(N) pre-filter cost without the \
+         cap is the most likely wall-clock cause.",
+        FAST_WALLCLOCK_BUDGET
+    );
+    unsetenv("RBP_FAST_KMEANS_SAMPLE");
+    unsetenv("RBP_FAST_KMEANS_ITERATIONS");
+}

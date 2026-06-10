@@ -140,12 +140,46 @@ impl<const K: usize, const N: usize> Elkan<K, N> for Layer<K, N> {
             debug_assert!(N == K);
             return std::array::from_fn(|i| self.points()[i]);
         }
+        // STW-086: zero out the weight slot for any input
+        // point whose support is empty. The kmeans++ loop
+        // below calls `self.distance(&x, &h)` on the *next*
+        // iteration's picked centroid; `self.distance` is
+        // `Metric::emd` (layer.rs:124), which dispatches
+        // via `source.peek().street()` (metric.rs:108), and
+        // `Bins::peek` (bins.rs:95) panics on an empty
+        // support with `"non empty histogram"`. The
+        // production 1.3M-row pool is large enough that
+        // the empty-prefix luck-out has not fired yet, but
+        // a future production run on a fresh DB with
+        // sparse observations will hit it (the fast-mode
+        // path that *did* hit it is `kmeans.rs`, fixed
+        // with the parallel pre-filter in
+        // `init_kmeans_plus_plus`). Mirroring the guard
+        // here keeps both paths bounded.
+        let mut potentials = vec![1.; N];
+        for (i, h) in self.points().iter().enumerate() {
+            if h.n() == 0 {
+                potentials[i] = 0.;
+            }
+        }
+        // All-zero weights would panic `WeightedIndex::new`
+        // (it requires at least one positive weight). An
+        // input where every point is empty is a degenerate
+        // case the same way `kmeans.rs` handles it: return
+        // K empty centroids so a downstream consumer sees
+        // a well-formed (degenerate) result instead of a
+        // crash. (This branch is unreachable in practice
+        // on a non-degenerate production pool — the guard
+        // is here for the same "don't panic on sparse
+        // data" reason `kmeans.rs` ships the mirror.)
+        if potentials.iter().all(|&p| p == 0.) {
+            return std::array::from_fn(|_| Histogram::empty(self.street().next()));
+        }
         // deterministic pseudo-random clustering
         let ref mut hasher = DefaultHasher::default();
         self.street().hash(hasher);
         let ref mut rng = SmallRng::seed_from_u64(hasher.finish());
         // kmeans++ initialization
-        let mut potentials = vec![1.; N];
         let mut histograms = Vec::with_capacity(K);
         while histograms.len() < K {
             let i = WeightedIndex::new(potentials.iter())
