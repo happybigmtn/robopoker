@@ -384,20 +384,74 @@ fn step_elkan_slice<const K: usize>(
     // currently assigned to j. The `Absorb` impl on
     // `Histogram` is associative + commutative, so the
     // fold order is irrelevant.
+    //
+    // STW-087: if a cluster slot j received zero points
+    // in the reassign pass, the fold returns the
+    // `centroids[j].identity()` (= `Histogram::empty(...)`)
+    // and the subsequent drift calculation
+    // `metric.emd(empty, &centroids[j])` would panic
+    // on `Bins::peek` ("non empty histogram" at
+    // bins.rs:95). This is the classical k-means
+    // "empty cluster" pathology: a Lloyd step
+    // concentrates all points into fewer than K
+    // clusters (production evidence: the flop
+    // `RBP_TESTNET_FAST=1` runbook receipt
+    // `receipts/testnet-live-proof-20260610T032421Z/`
+    // panicked at bins.rs:95 on the flop street
+    // after the kmeans++ init returned K non-empty
+    // centroids + the first Lloyd step left at least
+    // one cluster slot with zero assignments). The
+    // classical fix is to keep the OLD centroid for any
+    // cluster slot that landed zero points this
+    // iteration (mirrors the production `TestLayer::heal`
+    // in `tests.rs:64-70`, which replaces empty
+    // centroids with a random histogram after each
+    // step; the slice-based fast-mode path uses the
+    // old centroid instead of a fresh sample because
+    // the fast-mode driver is byte-stable and a
+    // fresh sample would introduce a second source
+    // of non-determinism). The new centroid is
+    // therefore *guaranteed* non-empty for every
+    // cluster slot — the drift calculation is
+    // well-defined.
     let new_centroids: [Histogram; K] = std::array::from_fn(|j| {
-        let identity = centroids[j].identity();
-        bounds
+        let mut assigned = 0usize;
+        let new = bounds
             .iter()
             .enumerate()
             .filter(|(_, b)| b.j() == j)
-            .map(|(i, _)| points[i].clone())
-            .fold(identity, |acc, h| acc.absorb(&h))
+            .map(|(i, _)| {
+                assigned += 1;
+                points[i].clone()
+            })
+            .fold(centroids[j].identity(), |acc, h| acc.absorb(&h));
+        if assigned == 0 {
+            // Empty cluster: keep the old centroid
+            // (the classical k-means "empty cluster"
+            // fix). The old centroid is non-empty by
+            // invariant (kmeans++ seeds centroids
+            // from the non-empty input pool, and
+            // every prior step's empty-cluster guard
+            // preserved non-emptiness), so the
+            // returned `[Histogram; K]` is uniformly
+            // non-empty and the subsequent drift
+            // calculation never panics on
+            // `Bins::peek`.
+            centroids[j]
+        } else {
+            new
+        }
     });
     // Drift: how far each centroid moved this iteration.
     // The drift is added to the per-point upper bound and
     // subtracted from each per-point lower bound in
     // `Bounds::update`, so the pruning in the next
-    // iteration has tighter bounds to work with.
+    // iteration has tighter bounds to work with. The
+    // STW-087 empty-cluster guard above guarantees
+    // `new_centroids[i]` is non-empty for every i, so
+    // the `metric.emd` call's `Bins::peek` dispatch
+    // (`metric.rs:108` → `bins.rs:95`) never reaches
+    // the empty-support panic.
     let drift: [f32; K] = std::array::from_fn(|i| metric.emd(&new_centroids[i], &centroids[i]));
     bounds.par_iter_mut().for_each(|b| b.update(&drift));
     new_centroids

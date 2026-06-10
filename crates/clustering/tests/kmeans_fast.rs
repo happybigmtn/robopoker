@@ -384,3 +384,118 @@ fn fast_mode_handles_empty_point_in_prefix() {
     unsetenv("RBP_FAST_KMEANS_SAMPLE");
     unsetenv("RBP_FAST_KMEANS_ITERATIONS");
 }
+
+// ---------------------------------------------------------------------
+// STW-087: empty-cluster (post-init Lloyd divergence) regression test
+// ---------------------------------------------------------------------
+
+/// STW-087: `fast_mode_handles_empty_cluster_during_lloyd_step` pins
+/// the empty-cluster guard in `kmeans::step_elkan_slice`. The
+/// STW-086 pre-filter drops empty *input* points before kmeans++
+/// init, but a *Lloyd-step* divergence can still leave a cluster
+/// slot with zero assigned points after the per-iteration reassign
+/// pass: the kmeans++ init picked K non-empty centroids, the
+/// fast-mode 1024-row sub-sample + K=128 cluster count makes
+/// "every point assigned to the same handful of clusters" a
+/// non-degenerate case, and the unassigned cluster's recomputed
+/// centroid then becomes the empty `Histogram::empty(street)`
+/// (the `Absorb::identity` impl). The subsequent
+/// `metric.emd(&new_centroids[i], &centroids[i])` call in the
+/// drift calculation panics on the empty `new_centroids[i].peek()`
+/// (metric.rs:108 -> bins.rs:95 -- the exact `"non empty
+/// histogram"` panic STW-086's fix did not catch). STW-087's
+/// fix in `step_elkan_slice` keeps the *old* centroid unchanged
+/// when no points are assigned (the classical k-means "empty
+/// cluster" fix), so the new centroid is always non-empty and
+/// the drift calculation is well-defined. The test engineers
+/// a forced empty cluster: K=2, N=2 with two *similar but
+/// distinct* turn projections (the kmeans++ init picks both
+/// because they are distinct — `InsufficientNonZero` only
+/// fires on *identical* points, where `metric.emd(c, p) == 0`
+/// zeroes the potentials before the second pick), and the
+/// first Lloyd step's `neighbor()` function uses `.min_by` on
+/// the EMD distance — when two centroids are picked from
+/// similar points, the EMD distance from each point to *each*
+/// centroid is small, and the tie-break on the EMD minimum
+/// (Rust's `.min_by` returns the first minimum) deterministically
+/// assigns *both* points to centroid 0 (the lowest-index one),
+/// leaving centroid 1 with zero assigned points. Pre-fix:
+/// centroid 1's new centroid becomes `Histogram::empty(turn)`,
+/// the drift calc `metric.emd(empty, old_centroid[1])` calls
+/// `source.peek()` on the empty support and panics. Post-fix:
+/// centroid 1 keeps its old non-empty centroid, the drift is
+/// 0 for that slot, the driver returns 2 centroids cleanly.
+#[test]
+fn fast_mode_handles_empty_cluster_during_lloyd_step() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    unsetenv("RBP_FAST_KMEANS_SAMPLE");
+    unsetenv("RBP_FAST_KMEANS_ITERATIONS");
+    // Use the spec's fast-mode cap so the regression test
+    // exercises the same code path the receipt runbook does
+    // (the panic the receipt captured fired inside
+    // `step_elkan_slice` called from `run_fast` via
+    // `Layer::cluster_fast`).
+    setenv("RBP_FAST_KMEANS_SAMPLE", "1024");
+    setenv("RBP_FAST_KMEANS_ITERATIONS", "8");
+    let caps = FastKmeansCaps::resolve(TEST_STREET);
+    assert_eq!(caps.sample, 1024);
+    // iters=8: matches the production fast-mode iteration
+    // cap (the runbook panic fired inside one of 8 Lloyd
+    // iterations — the empty-cluster pathology can arise
+    // in any iteration, but later iterations are more
+    // likely to hit it as the Lloyd step compounds
+    // centoid drift toward degenerate cluster shapes).
+    assert_eq!(caps.iterations, 8);
+    // K=2, N=2 input points. Use a *non-constant* K to
+    // override the module-level `K = 4` (the
+    // `run_fast::<K>` call requires `K` to be a `const`,
+    // so the test cannot dispatch on a runtime K). K=2 is
+    // the smallest K for which an empty cluster is
+    // engineerable (K=1 is a single cluster with all
+    // points, never empty).
+    const LOCAL_K: usize = 2;
+    const LOCAL_N: usize = 2;
+    let points: Vec<Histogram> = (0..LOCAL_N)
+        .map(|_| Histogram::from(Observation::from(TEST_STREET)))
+        .collect();
+    assert_eq!(points.len(), LOCAL_N);
+    assert!(points.iter().all(|h| h.n() > 0));
+    // The fast-mode kmeans driver must return K centroids
+    // without panicking. The pre-fix path panics with
+    // `"non empty histogram"` at `bins.rs:95`; the post-fix
+    // path returns a well-formed (degenerate but valid)
+    // result.
+    let start = Instant::now();
+    let centroids = run_fast::<LOCAL_K>(&points, &Metric::default(), TEST_STREET, caps);
+    let elapsed = start.elapsed();
+    assert_eq!(
+        centroids.len(),
+        LOCAL_K,
+        "STW-087: run_fast on a {}-row input with K={} must return exactly K centroids \
+         (the empty-cluster guard keeps the old centroid for any cluster slot that \
+         lands zero assigned points after the Lloyd-step reassign); pre-fix the test \
+         would panic with `\"non empty histogram\"` at `bins.rs:95`.",
+        LOCAL_N,
+        LOCAL_K
+    );
+    // All K centroids must be non-empty (the kmeans++ init
+    // picks them non-empty; the empty-cluster guard
+    // preserves non-emptiness for slots that stay empty
+    // after the Lloyd reassign).
+    for (i, c) in centroids.iter().enumerate() {
+        assert!(
+            c.n() > 0,
+            "STW-087: centroid {i} must be non-empty (the empty-cluster guard keeps the \
+             old non-empty centroid for slots that land zero assigned points); got n() = {}",
+            c.n()
+        );
+    }
+    assert!(
+        elapsed < FAST_WALLCLOCK_BUDGET,
+        "STW-087: fast-mode kmeans on N={LOCAL_N} + K={LOCAL_K} must complete in \
+         under {:?}; took {elapsed:?}.",
+        FAST_WALLCLOCK_BUDGET
+    );
+    unsetenv("RBP_FAST_KMEANS_SAMPLE");
+    unsetenv("RBP_FAST_KMEANS_ITERATIONS");
+}
