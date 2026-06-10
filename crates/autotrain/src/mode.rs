@@ -102,6 +102,14 @@ pub enum Mode {
     /// "next-next slice if a v3 trained config proves
     /// meaningfully different from the v1 / v2 pair".
     Compare3,
+    /// Export a trained robopoker blueprint table to the Arena
+    /// Starter Kit `--blueprint-path` JSON contract. Defaults to
+    /// the latest v3 table unless `--blueprint v1|v2|v3` is
+    /// provided.
+    ExportBlueprint {
+        path: PathBuf,
+        blueprint: ExportBlueprintVariant,
+    },
     /// STW-028: re-verify a testnet live launch proof
     /// receipt bundle on disk (the directory the
     /// `scripts/testnet-live-proof.sh` runbook writes
@@ -480,6 +488,7 @@ impl Mode {
             | Self::Slow
             | Self::Reset
             | Self::Doctor
+            | Self::ExportBlueprint { .. }
             | Self::Integrity => None,
         }
     }
@@ -541,6 +550,30 @@ impl Mode {
                 "--bench" => return Self::Bench,
                 "--compare" => return Self::Compare,
                 "--compare3" => return Self::Compare3,
+                "--export-blueprint" => {
+                    let path = match iter.next() {
+                        Some(p) => PathBuf::from(p),
+                        None => PathBuf::new(),
+                    };
+                    let mut blueprint = ExportBlueprintVariant::default();
+                    while let Some(flag) = iter.peek() {
+                        match flag.as_str() {
+                            "--blueprint" | "--variant" => {
+                                iter.next();
+                                let raw = iter.next().unwrap_or_default();
+                                blueprint =
+                                    ExportBlueprintVariant::from_arg(&raw).unwrap_or_else(|| {
+                                        eprintln!(
+                                            "Usage: trainer --export-blueprint <out.json> [--blueprint v1|v2|v3]"
+                                        );
+                                        std::process::exit(2);
+                                    });
+                            }
+                            _ => break,
+                        }
+                    }
+                    return Self::ExportBlueprint { path, blueprint };
+                }
                 "--verify-receipt" => {
                     // The value is the next argv (matches
                     // the `trainer --replay` style of not
@@ -908,7 +941,9 @@ impl Mode {
         eprintln!(
             "  PUBLISH:    publish | verify-receipt | publish-remote | verify-remote | publish-index | verify-index | publish-index-remote | verify-index-remote"
         );
-        eprintln!("  UTIL:       status | reset | doctor | integrity");
+        eprintln!(
+            "  UTIL:       status | reset | doctor | integrity | export-blueprint <out.json>"
+        );
         std::process::exit(1);
     }
 
@@ -1578,6 +1613,12 @@ impl Mode {
                 std::process::exit(2);
             }
         }
+        if let Self::ExportBlueprint { path, .. } = Self::from_args()
+            && path.as_os_str().is_empty()
+        {
+            eprintln!("Usage: trainer --export-blueprint <out.json> [--blueprint v1|v2|v3]");
+            std::process::exit(2);
+        }
         let client = rbp_database::db().await;
         let mode = Self::from_args();
         let step = mode.to_step().and_then(StepLogger::new);
@@ -1661,6 +1702,15 @@ impl Mode {
             // compare3 integration tests in the
             // same CI run.
             Self::Compare3 => crate::bench::run_compare3(client).await,
+            Self::ExportBlueprint { path, blueprint } => {
+                match crate::export_blueprint(&client, &path, blueprint).await {
+                    Ok(report) => print!("{}", report.headline()),
+                    Err(e) => {
+                        eprintln!("blueprint export error: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             // Slice 4: standalone integrity gate. Loads the v1
             // blueprint from DB and runs the seat-aware sanity
             // check. Exits 0 on green, 2 on red.
