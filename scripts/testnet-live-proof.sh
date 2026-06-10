@@ -120,6 +120,24 @@ if [[ "${RBP_TESTNET_FAST:-}" == "1" ]]; then
     # via the env vars — the defaults match the STW-077 spec.
     : "${RBP_FAST_KMEANS_SAMPLE:=1024}"
     : "${RBP_FAST_KMEANS_ITERATIONS:=8}"
+    # STW-091: cap the per-street lookup input prefix on a
+    # fresh DB. The kmeans cap (STW-077) sub-samples the
+    # kmeans input, but the lookup construction runs
+    # immediately after kmeans and iterates the full
+    # `N = N_FLOP = 1_286_792` flop isomorphism space
+    # (and `N = N_TURN = 13_960_050` for turn) without a
+    # cap. The 2026-06-10 11:20 receipt
+    # (`receipts/testnet-live-proof-20260610T112026Z/cluster/stdout.txt`)
+    # captured a hang at `calculating lookup flop` AFTER
+    # kmeans completed — the kmeans cap was the right
+    # *kind* of fix but the wrong *layer*. The lookup cap
+    # mirrors the kmeans cap (default 1024, operator-
+    # overridable via the env var) so the per-street lookup
+    # completes in < 1 s instead of hanging on the full
+    # 1.3M-row flop / 14M-row turn pool. The cap is
+    # strictly fast-mode-only (production `Layer::lookup`
+    # is byte-identical when `RBP_TESTNET_FAST` is unset).
+    : "${RBP_FAST_LOOKUP_SAMPLE:=1024}"
 fi
 
 # --- trainer binary path + on-demand build -------------------------------
@@ -152,6 +170,7 @@ mkdir -p "$RECEIPT_DIR"
     echo "RBP_COMPARE_BLIND=${RBP_COMPARE_BLIND:-<unset>}"
     echo "RBP_FAST_KMEANS_SAMPLE=${RBP_FAST_KMEANS_SAMPLE:-<unset>}"
     echo "RBP_FAST_KMEANS_ITERATIONS=${RBP_FAST_KMEANS_ITERATIONS:-<unset>}"
+    echo "RBP_FAST_LOOKUP_SAMPLE=${RBP_FAST_LOOKUP_SAMPLE:-<unset>}"
     if [[ -n "${DATABASE_URL:-}" ]]; then
         echo "DATABASE_URL=<redacted: ${#DATABASE_URL} chars>"
     else

@@ -125,6 +125,17 @@ in fast mode (STW-077: 1024-row input sample + 8 Lloyd iterations
 per street, vs. the production 1.3M-row / 14M-row input + 20 / 24
 Lloyd iterations) so a fresh-DB cluster step completes in under
 5 minutes per street — under 30 minutes total for all 4 streets.
+STW-091 adds a third cap on top of STW-077: the per-street
+`Layer::lookup` construction (which runs immediately after kmeans)
+is also prefix-capped in fast mode (1024 rows by default, mirroring
+the kmeans cap; the production lookup iterates the full
+`N = N_FLOP = 1_286_792` flop isomorphism space / `N = N_TURN =
+13_960_050` for turn — a 2026-06-10 11:20 receipt captured a hang
+at `calculating lookup flop` AFTER kmeans completed, because
+STW-077's kmeans cap was the right *kind* of fix but the wrong
+*layer*). With all three caps the cluster step completes in
+under 5 minutes per street; the lookup is the no-longer-blocking
+step in the chain.
 Without the flag the trainer uses its own defaults (larger
 budgets). Override individual env knobs to scale up or down; the
 chain is structurally identical to the production launch path so a
@@ -149,6 +160,7 @@ for `cargo test -p rbp-autotrain --features database --test live_proof`:
 | `RBP_COMPARE_BLIND` | 2 (when `RBP_TESTNET_FAST=1`) | compare step blind size |
 | `RBP_FAST_KMEANS_SAMPLE` | 1024 (when `RBP_TESTNET_FAST=1`) | STW-077: per-street kmeans input point cap (the production 1.3M-row flop / 14M-row turn pool is sub-sampled to this many rows; operator-overridable) |
 | `RBP_FAST_KMEANS_ITERATIONS` | 8 (when `RBP_TESTNET_FAST=1`) | STW-077: per-street kmeans Lloyd-iteration cap (the production 20 flop / 24 turn iterations are replaced with this cap; operator-overridable) |
+| `RBP_FAST_LOOKUP_SAMPLE` | 1024 (when `RBP_TESTNET_FAST=1`) | STW-091: per-street lookup input prefix cap (the production `Layer::lookup` iterates the full `N = N_FLOP = 1_286_792` flop isomorphism space / `N = N_TURN = 13_960_050` for turn; the fast-mode cap truncates the prefix to this many rows so the per-street lookup completes in < 1 s instead of hanging on the full N; operator-overridable) |
 | `RBP_BENCH_TRANSCRIPT_DIR` | (set by runbook) | bench's transcript writer location |
 | `TRAINER_BIN` | `<workspace>/target/debug/trainer` | trainer binary path |
 

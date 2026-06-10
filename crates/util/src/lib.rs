@@ -190,6 +190,17 @@ pub const FAST_KMEANS_SAMPLE_DEFAULT: usize = 1024;
 /// production count) so a fresh-DB receipt runbook run reaches
 /// the bench step in under 5 minutes per street.
 pub const FAST_KMEANS_ITERATIONS_DEFAULT: usize = 8;
+/// STW-091: per-street input-prefix cap for the fast-mode
+/// `Layer::lookup` construction. Production lookup iterates
+/// the full `N = N_FLOP = 1_286_792` flop isomorphism space
+/// (and `N = N_TURN = 13_960_050` for turn); the fast-mode cap
+/// caps the prefix at this many rows (default 1024) so a
+/// fresh-DB receipt runbook run reaches the bench step in
+/// under 5 minutes per street. Mirrors
+/// [`FAST_KMEANS_SAMPLE_DEFAULT`] — the lookup cap and the
+/// kmeans cap are structurally parallel (both bound an
+/// O(N) step on a fresh DB).
+pub const FAST_LOOKUP_SAMPLE_DEFAULT: usize = 1024;
 /// Number of flop buckets (distributions over turn clusters).
 pub const KMEANS_FLOP_CLUSTER_COUNT: usize = 128;
 /// Number of turn buckets (distributions over river equity).
@@ -330,6 +341,22 @@ pub fn fast_kmeans_sample() -> Option<usize> {
 /// street; production kmeans does NOT consult this knob.
 pub fn fast_kmeans_iterations() -> Option<usize> {
     let raw = std::env::var("RBP_FAST_KMEANS_ITERATIONS").ok()?;
+    raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
+}
+
+/// STW-091: read the optional `RBP_FAST_LOOKUP_SAMPLE` smoke
+/// knob. Caps the per-street input prefix for the fast-mode
+/// `Layer::lookup` construction. `Some(n)` only when the env
+/// var is a positive integer; `None` otherwise. The default
+/// 1024 is the value the `Layer::lookup` fast-mode path uses
+/// when this returns `None`. Mirrors [`fast_kmeans_sample`]
+/// semantically — the kmeans cap and the lookup cap are
+/// structurally parallel (both bound an O(N) step on a fresh
+/// DB; both are operator-overridable; both honor the
+/// `RBP_TESTNET_FAST=1` gate). Production `Layer::lookup`
+/// does NOT consult this knob.
+pub fn fast_lookup_sample() -> Option<usize> {
+    let raw = std::env::var("RBP_FAST_LOOKUP_SAMPLE").ok()?;
     raw.trim().parse::<usize>().ok().filter(|n| *n > 0)
 }
 

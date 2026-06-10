@@ -240,7 +240,19 @@ pub fn run_fast<const K: usize>(
 /// closest already-chosen centroid. Deterministic per street
 /// (the `SmallRng` is seeded from a `DefaultHasher` of the
 /// street).
-fn init_kmeans_plus_plus<const K: usize>(
+///
+/// **Public API (STW-088):** the function is exposed to the
+/// `kmeans_property.rs` integration test as the production-path
+/// kmeans++ init driver the property test exercises. The
+/// production `Layer::init_kmeans` (layer.rs:128-203) is
+/// structurally identical (same `WeightedIndex` pick + same
+/// per-iteration `metric.emd` call + same `potentials[idx] = 0.0`
+/// zero-out), so the property test on this function gives the
+/// same defensive coverage the production-path kmeans++ init
+/// needs. The function is `pub` (not `pub(crate)`) so the
+/// integration test in `tests/` (which compiles as a separate
+/// crate) can reach it.
+pub fn init_kmeans_plus_plus<const K: usize>(
     points: &[Histogram],
     metric: &Metric,
     street: Street,
@@ -279,13 +291,55 @@ fn init_kmeans_plus_plus<const K: usize>(
     let mut potentials = vec![1.0_f32; n];
     let mut centroids: Vec<Histogram> = Vec::with_capacity(K);
     while centroids.len() < K {
-        // Pick the next centroid index from the weighted
-        // distribution. `WeightedIndex::new` panics on an
-        // empty / all-zero weights array, but the loop
-        // maintains `potentials[i] = 0.0` for every already-
-        // chosen index `i` so the weights array is never
-        // all-zero after the first iteration (and is `1.0`-
-        // uniform on the first iteration).
+        // If we've already picked every non-empty input
+        // point (a degenerate `n < K` case — the
+        // kmeans++ init cannot seed more centroids than
+        // there are non-empty inputs), the `potentials`
+        // array is all zeros and `WeightedIndex::new`
+        // would panic with `InsufficientNonZero`. Pad
+        // the remaining centroid slots with a clone of
+        // the most-recently-picked centroid (the kmeans
+        // literature's standard "fewer-than-K points"
+        // handling — duplicate the last picked point
+        // so the resulting K-tuple has K-n duplicates
+        // at the tail). Duplicates are non-empty by
+        // construction (the picked centroid was in the
+        // non-empty pool), so the downstream Lloyd step
+        // in `step_elkan_slice` (which calls
+        // `metric.emd(centroid_i, centroid_j)` on every
+        // pair) is well-defined: `Bins::peek` on the
+        // `source` side of the EMD call never reaches
+        // the empty-support panic at `bins.rs:95`. The
+        // empty-cluster guard at `step_elkan_slice`'s
+        // recompute step keeps the duplicates in place
+        // across Lloyd iterations (a centroid with no
+        // reassigned points this iteration keeps its
+        // old value, which is the duplicate), so the
+        // K-n duplicate slots are stable across the
+        // iteration loop. The early-return at
+        // kmeans.rs:276-285 (the all-empty input case)
+        // is the only path that returns truly empty
+        // centroids — that path is reached *only* when
+        // `n == 0`, and the corresponding `run_fast`
+        // branch short-circuits the Lloyd step on the
+        // same condition.
+        if potentials.iter().all(|p| *p == 0.0) {
+            // SAFETY: this branch is reachable only
+            // after at least one `centroids.push` has
+            // fired (potentials started as `vec![1.0; n]`
+            // so the all-zeros check can fire only after
+            // the n-th pick has zeroed its slot). The
+            // most-recently-picked centroid is the last
+            // element of the `centroids` Vec.
+            let last = centroids
+                .last()
+                .cloned()
+                .expect("K>N guard reachable only after first pick");
+            while centroids.len() < K {
+                centroids.push(last.clone());
+            }
+            break;
+        }
         let idx = WeightedIndex::new(potentials.iter())
             .expect("valid weights array")
             .sample(rng);

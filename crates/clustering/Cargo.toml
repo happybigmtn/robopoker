@@ -26,3 +26,17 @@ async-trait    = { version = "0.1", optional = true }
 rayon          = "1.10"
 rand           = { version = "0.9.1", features = ["small_rng"] }
 log            = "0.4"
+
+[dev-dependencies]
+# STW-088: property-test layer for the kmeans fast-mode driver
+# (`run_fast`) + the production-path `init_kmeans` shape
+# (mirrored by `TestLayer::init_kmeans`). The 5 sub-tests
+# in `crates/clustering/tests/kmeans_property.rs` exercise
+# the no-panic contract on randomized inputs across both
+# paths, complementing the 4 example tests in
+# `crates/clustering/tests/kmeans_fast.rs` (STW-077/086/087)
+# that pin the known panic families. `proptest` is the
+# Rust ecosystem's standard property-test crate (the
+# minimum that gives a property-test framework without
+# pulling in `quickcheck` / `arbitrary` / `criterion`).
+proptest        = "1.4"

@@ -34,6 +34,34 @@ pub struct Layer<const K: usize, const N: usize> {
 }
 
 impl<const K: usize, const N: usize> Layer<K, N> {
+    /// Test-only constructor for the lookup prefix regression
+    /// test (`crates/clustering/tests/lookup_fast.rs`). Builds
+    /// a `Layer` from a caller-supplied street + points +
+    /// kmeans + metric so the test can drive `lookup()` /
+    /// `lookup_with_prefix()` without a real Postgres sidecar.
+    /// Production code uses the `async fn build` constructor
+    /// below (which reads from the database); the test
+    /// constructor is `pub` so the integration test can pin
+    /// the lookup prefix cap contract end-to-end (it pins the
+    /// cap helper, the prefix length, the lookup result
+    /// shape, the wall-clock budget, and the env-knob
+    /// reader — all without a DB).
+    #[doc(hidden)]
+    pub fn synthetic_for_test(
+        street: Street,
+        points: Box<[Histogram; N]>,
+        kmeans: Box<[Histogram; K]>,
+        metric: Metric,
+    ) -> Self {
+        Self {
+            street,
+            metric: Box::new(metric),
+            kmeans,
+            points,
+            bounds: vec![Bounds::default(); N].try_into().expect("N"),
+        }
+    }
+
     /// Returns the betting street for this layer.
     fn street(&self) -> Street {
         self.street
@@ -47,7 +75,65 @@ impl<const K: usize, const N: usize> Layer<K, N> {
 
 impl<const K: usize, const N: usize> Layer<K, N> {
     /// Builds a lookup table mapping each isomorphism to its nearest cluster abstraction.
-    fn lookup(&self) -> Lookup
+    ///
+    /// STW-091: the input prefix is capped in fast mode (see
+    /// the body). The cap is structurally parallel to STW-077's
+    /// kmeans cap — both bound an O(N) step on a fresh DB;
+    /// both honor the `RBP_TESTNET_FAST=1` gate; both
+    /// default to 1024 rows; both are operator-overridable
+    /// via the `RBP_FAST_*_SAMPLE` env knobs.
+    ///
+    /// The cap is exposed via the `prefix` parameter on
+    /// [`Self::lookup_with_prefix`] so the
+    /// `crates/clustering/tests/lookup_fast.rs` regression
+    /// test can pin the cap behavior without going through
+    /// the env-knob reader (the test pins the env-knob
+    /// reader in isolation in
+    /// `crates/clustering/tests/lookup_fast.rs::lookup_production_unchanged_when_fast_unset`).
+    pub fn lookup(&self) -> Lookup
+    where
+        Self: Elkan<K, N>,
+    {
+        self.lookup_with_prefix(self.lookup_prefix())
+    }
+
+    /// Resolves the lookup input prefix for the current
+    /// fast-mode state. Returns the full `N` when
+    /// `RBP_TESTNET_FAST` is unset (production path is
+    /// byte-identical); returns `min(N, RBP_FAST_LOOKUP_SAMPLE)`
+    /// when the switch is set. Mirrors the
+    /// `Layer::cluster` fast-mode gate at
+    /// `layer.rs:225-242` — the kmeans cap and the lookup
+    /// cap share one gate, one default, one env-knob
+    /// shape, one log line.
+    fn lookup_prefix(&self) -> usize
+    where
+        Self: Elkan<K, N>,
+    {
+        if rbp_core::testnet_fast() {
+            let cap =
+                rbp_core::fast_lookup_sample().unwrap_or(rbp_core::FAST_LOOKUP_SAMPLE_DEFAULT);
+            log::info!(
+                "{:<32}sample={} (production would be N={})",
+                "STW-091 fast-mode lookup",
+                cap.min(N),
+                N
+            );
+            cap.min(N)
+        } else {
+            N
+        }
+    }
+
+    /// Test-facing entry point that exposes the prefix-control
+    /// surface of the lookup construction. The production
+    /// entry point is [`Self::lookup`], which delegates here
+    /// with the env-resolved prefix; the integration test
+    /// in `crates/clustering/tests/lookup_fast.rs` calls
+    /// this directly with a synthetic prefix to pin the
+    /// cap contract without going through the env-knob
+    /// reader.
+    pub fn lookup_with_prefix(&self, prefix: usize) -> Lookup
     where
         Self: Elkan<K, N>,
     {
@@ -56,7 +142,7 @@ impl<const K: usize, const N: usize> Layer<K, N> {
         use rayon::iter::ParallelIterator;
         match self.street() {
             Street::Pref | Street::Rive => Lookup::grow(self.street()),
-            Street::Flop | Street::Turn => (0..N)
+            Street::Flop | Street::Turn => (0..prefix.min(N))
                 .into_par_iter()
                 .map(|i| self.neighbor(i))
                 .collect::<Vec<(usize, f32)>>()
