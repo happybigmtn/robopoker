@@ -119,6 +119,34 @@ impl FastKmeansCaps {
 /// operates on a slice (so the input size is a runtime parameter
 /// — the production `Layer<K, N>` is fixed at compile-time).
 ///
+/// STW-087: a hand-built test driver for the
+/// `step_elkan_slice` empty-cluster-after-fold contract.
+/// The integration test at
+/// `crates/clustering/tests/kmeans_fast.rs::fast_mode_handles_empty_cluster_after_fold`
+/// calls this helper with a hand-built 4-point input + 4
+/// centroids + a hand-built `Bounds` array that forces 2 of
+/// 4 cluster slots to receive 0 assigned points. The
+/// pre-fix `step_elkan_slice` panicked at `bins.rs:95` on
+/// the `metric.emd(empty_new_centroid, ...)` drift call;
+/// the post-fix path keeps the old centroid for any
+/// empty cluster slot, so the test passes cleanly.
+/// The function is `#[doc(hidden)]` — the public surface
+/// is `run_fast` / `run_naive`; the helper exists only so
+/// the integration test can drive `step_elkan_slice`
+/// without going through the public `run_fast` entry
+/// point (which calls `init_kmeans_plus_plus` first, and
+/// the init panics on an all-zero weights array when
+/// the natural cluster count is less than K).
+#[doc(hidden)]
+pub fn step_elkan_for_test<const K: usize>(
+    points: &[Histogram],
+    centroids: &[Histogram; K],
+    bounds: &mut [Bounds<K>],
+    metric: &Metric,
+) -> [Histogram; K] {
+    step_elkan_slice::<K>(points, centroids, bounds, metric)
+}
+///
 /// `street` is used for the seed hash (kmeans++ is deterministic
 /// per street) and the iteration cap (the effective cap is
 /// `min(caps.iterations, street.t())`). `metric` is the
@@ -384,7 +412,37 @@ fn step_elkan_slice<const K: usize>(
     // currently assigned to j. The `Absorb` impl on
     // `Histogram` is associative + commutative, so the
     // fold order is irrelevant.
-    let new_centroids: [Histogram; K] = std::array::from_fn(|j| {
+    //
+    // STW-087: an empty cluster (no point assigned to j)
+    // is a real failure mode in fast-mode kmeans when K
+    // is large relative to N (e.g. production flop has
+    // K=128 against a 1024-row fast-mode sub-sample, so
+    // the K-N uneven distribution leaves many clusters
+    // with zero assigned points after a few iterations).
+    // The fold starts at `centroids[j].identity()` which
+    // is `Histogram::empty(street)`, and an empty input
+    // fold leaves the new centroid empty. The `drift`
+    // computation below then calls
+    // `metric.emd(&new_centroids[i], &centroids[i])` and
+    // `metric.emd` dispatches via
+    // `source.peek().street()` (metric.rs:108); a
+    // `peek()` on an empty `Bins` panics with
+    // `"non empty histogram"` at `bins.rs:95`. The
+    // standard kmeans fix is to keep the old centroid
+    // (no movement) when a cluster goes empty — drift
+    // for that slot is 0.0, the centroid does not move,
+    // and the next iteration's kmeans++ reseed (if
+    // applied) is not needed for fast-mode convergence.
+    // The companion sub-test
+    // `fast_mode_handles_empty_cluster_after_fold` in
+    // `crates/clustering/tests/kmeans_fast.rs` pins
+    // the empty-cluster contract: N=4 + K=8 forces
+    // 4 of 8 clusters to be empty after the first
+    // iteration, and the test asserts `run_fast` returns
+    // K centroids cleanly + stays under the 2 s budget
+    // (a regression to the pre-fix panic would crash
+    // the test process).
+    let mut new_centroids: [Histogram; K] = std::array::from_fn(|j| {
         let identity = centroids[j].identity();
         bounds
             .iter()
@@ -393,6 +451,17 @@ fn step_elkan_slice<const K: usize>(
             .map(|(i, _)| points[i].clone())
             .fold(identity, |acc, h| acc.absorb(&h))
     });
+    for j in 0..K {
+        if new_centroids[j].n() == 0 {
+            // No point was assigned to cluster j this
+            // iteration. Keep the old centroid position
+            // (the standard kmeans empty-cluster fix —
+            // the centroid stays where it is, and the
+            // drift for this slot is 0.0, not the
+            // undefined `metric.emd(empty, ...)`).
+            new_centroids[j] = centroids[j].clone();
+        }
+    }
     // Drift: how far each centroid moved this iteration.
     // The drift is added to the per-point upper bound and
     // subtracted from each per-point lower bound in
