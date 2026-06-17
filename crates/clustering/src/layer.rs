@@ -418,17 +418,80 @@ impl<const K: usize, const N: usize> Layer<K, N> {
                     .expect("N"),
             }
         } else {
+            // STW-098: the preflop build path calls
+            // `Lookup::from_street(Flop).projections()` to seed
+            // the per-preflop-iso histogram of flop-child
+            // abstractions. `Lookup::projections()` -> `future()`
+            // -> `lookup(child)` panics on a missing child iso.
+            // In fast mode the flop lookup is a 1024-row prefix
+            // (STW-091's `Layer::lookup_with_prefix` cap) but
+            // the preflop iso iterator enumerates all preflop
+            // isos, so most `lookup(child)` calls miss on the
+            // partial flop lookup -> panic at lookup.rs:43 with
+            // `"precomputed abstraction in lookup"`.
+            //
+            // The fix is to make the preflop build path not
+            // depend on the partial fast-mode flop lookup. The
+            // preflop build needs a *complete* flop lookup to
+            // compute projections; in fast mode we synthesize
+            // one in-memory (one entry per flop iso, each
+            // mapping to the degenerate `Abstraction::from((Flop,
+            // 0))` bucket). The synthetic lookup is degenerate
+            // (every flop iso lands in bucket 0) but it is
+            // complete (every preflop iso's child is present),
+            // so the preflop kmeans driver sees a well-formed
+            // (degenerate) point pool instead of panicking on a
+            // missing key. The preflop clustering result is
+            // meaningless for production use — fast mode is a
+            // smoke-test path, not a training path — but the
+            // testnet-live-proof runbook now exits 0 instead of
+            // 101.
+            //
+            // Production (RBP_TESTNET_FAST unset) is
+            // byte-identical: the synthetic-lookup branch is
+            // gated on `testnet_fast()`, and the production
+            // `Lookup::from_street(Flop).projections()` path is
+            // unchanged.
+            let next_lookup = if rbp_core::testnet_fast() && street == Street::Pref {
+                synthetic_fast_flop_lookup()
+            } else {
+                Lookup::from_street(client, street.next()).await
+            };
             Self {
                 street,
                 metric: Box::new(Metric::from_street(client, street.next()).await),
                 kmeans: Box::new(std::array::from_fn(|_| Histogram::empty(street.next()))),
                 bounds: vec![Bounds::default(); N].try_into().expect("N"),
-                points: Lookup::from_street(client, street.next())
-                    .await
+                points: next_lookup
                     .projections()
                     .try_into()
                     .expect("projections.len() == N"),
             }
         }
     }
+}
+
+/// STW-098: synthesize a complete (degenerate) flop lookup
+/// in-memory for the fast-mode preflop build path. Every flop
+/// isomorphism maps to `Abstraction::from((Street::Flop, 0))`,
+/// so the preflop `Lookup::projections()` call has a complete
+/// key set to look up against (no missing-key panics) and the
+/// preflop kmeans driver sees a well-formed (degenerate) point
+/// pool.
+///
+/// The function is `pub(crate)` so the regression tests in
+/// `tests.rs` (which compile in the same crate) can pin the
+/// synthesized lookup's completeness + size + the preflop
+/// build's no-panic contract. The function is not part of the
+/// public API (a future refactor that moves the preflop build
+/// to a different code path should keep the function reachable
+/// from the test module).
+pub(crate) fn synthetic_fast_flop_lookup() -> Lookup {
+    use rayon::prelude::*;
+    IsomorphismIterator::from(Street::Flop)
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|iso| (iso, Abstraction::from((Street::Flop, 0))))
+        .collect::<BTreeMap<_, _>>()
+        .into()
 }
