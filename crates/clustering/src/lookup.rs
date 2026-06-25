@@ -157,7 +157,13 @@ impl Lookup {
             .await
             .expect("query")
             .into_iter()
-            .map(|row| (row.get::<_, i64>(0), row.get::<_, i16>(1), row.get::<_, i32>(2)))
+            .map(|row| {
+                (
+                    row.get::<_, i64>(0),
+                    row.get::<_, i16>(1),
+                    row.get::<_, i32>(2),
+                )
+            })
             .filter(|(obs, _, _)| Street::from(*obs) == street)
             .map(|(obs, abs, _position)| (Isomorphism::from(obs), Abstraction::from(abs)))
             .collect::<BTreeMap<_, _>>()

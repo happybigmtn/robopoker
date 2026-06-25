@@ -69,13 +69,20 @@ impl rbp_mccfr::Encoder for NlheEncoder {
 impl rbp_database::Hydrate for NlheEncoder {
     async fn hydrate(client: std::sync::Arc<tokio_postgres::Client>) -> Self {
         log::info!("{:<32}{:<32}", "loading isomorphism", "from database");
-        let sql = const_format::concatcp!("SELECT obs, abs, position FROM ", rbp_database::ISOMORPHISM);
+        let sql =
+            const_format::concatcp!("SELECT obs, abs, position FROM ", rbp_database::ISOMORPHISM);
         let lookup = client
             .query(sql, &[])
             .await
             .expect("isomorphism query")
             .into_iter()
-            .map(|row| (row.get::<_, i64>(0), row.get::<_, i16>(1), row.get::<_, i32>(2)))
+            .map(|row| {
+                (
+                    row.get::<_, i64>(0),
+                    row.get::<_, i16>(1),
+                    row.get::<_, i32>(2),
+                )
+            })
             .map(|(obs, abs, _position)| (Isomorphism::from(obs), Abstraction::from(abs)))
             .collect::<BTreeMap<Isomorphism, Abstraction>>();
         Self(lookup)

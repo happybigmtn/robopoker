@@ -276,19 +276,25 @@ mod tests {
         let edge = NlheEdge::from(Edge::Call);
 
         // Different weights for each position
-        profile.encounters.entry(info0).or_default().insert(
-            edge,
-            Encounter::new(0.3, 0.1, 0.2, 1),
-        );
-        profile.encounters.entry(info1).or_default().insert(
-            edge,
-            Encounter::new(0.7, 0.2, 0.3, 2),
-        );
+        profile
+            .encounters
+            .entry(info0)
+            .or_default()
+            .insert(edge, Encounter::new(0.3, 0.1, 0.2, 1));
+        profile
+            .encounters
+            .entry(info1)
+            .or_default()
+            .insert(edge, Encounter::new(0.7, 0.2, 0.3, 2));
 
         let rows: Vec<_> = profile.rows().collect();
 
         // Must produce 2 distinct rows (not collapsed into 1)
-        assert_eq!(rows.len(), 2, "position difference must produce distinct rows");
+        assert_eq!(
+            rows.len(),
+            2,
+            "position difference must produce distinct rows"
+        );
 
         let row0 = rows.iter().find(|r| r.3 == 0).expect("row for position 0");
         let row1 = rows.iter().find(|r| r.3 == 1).expect("row for position 1");
@@ -296,11 +302,11 @@ mod tests {
         // row shape: (past, present, choices, position, edge, weight, regret, evalue, counts)
         assert_eq!(row0.3, 0);
         assert_eq!(row0.5, 0.3); // weight
-        assert_eq!(row0.8, 1);   // counts
+        assert_eq!(row0.8, 1); // counts
 
         assert_eq!(row1.3, 1);
         assert_eq!(row1.5, 0.7); // weight
-        assert_eq!(row1.8, 2);   // counts
+        assert_eq!(row1.8, 2); // counts
     }
 
     #[test]

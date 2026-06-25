@@ -285,8 +285,12 @@ mod tests {
         let old_database_url = std::env::var("DATABASE_URL").ok();
 
         // Clear DB_URL, set only DATABASE_URL.
-        unsafe { std::env::remove_var("DB_URL"); }
-        unsafe { std::env::set_var("DATABASE_URL", "postgres://user:***@localhost:1/db"); }
+        unsafe {
+            std::env::remove_var("DB_URL");
+        }
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://user:***@localhost:1/db");
+        }
 
         let report = run();
 

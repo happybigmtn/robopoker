@@ -60,10 +60,7 @@ async fn position_persistence_roundtrip() {
 
     // Use a temporary table so we do not touch production blueprint data.
     client
-        .execute(
-            "DROP TABLE IF EXISTS blueprint",
-            &[],
-        )
+        .execute("DROP TABLE IF EXISTS blueprint", &[])
         .await
         .expect("drop temp blueprint");
 
@@ -108,14 +105,20 @@ async fn position_persistence_roundtrip() {
     assert_eq!(strat0.len(), 1, "position 0 must have exactly one edge");
     let (edge0, weight0) = strat0[0];
     assert_eq!(edge0, Edge::Call);
-    assert!((weight0 - 0.30).abs() < 1e-6, "position 0 weight must be 0.30, got {weight0}");
+    assert!(
+        (weight0 - 0.30).abs() < 1e-6,
+        "position 0 weight must be 0.30, got {weight0}"
+    );
 
     // Read back position 1.
     let strat1 = Source::strategy(&client, info1).await;
     assert_eq!(strat1.len(), 1, "position 1 must have exactly one edge");
     let (edge1, weight1) = strat1[0];
     assert_eq!(edge1, Edge::Call);
-    assert!((weight1 - 0.70).abs() < 1e-6, "position 1 weight must be 0.70, got {weight1}");
+    assert!(
+        (weight1 - 0.70).abs() < 1e-6,
+        "position 1 weight must be 0.70, got {weight1}"
+    );
 
     // Verify the rows are physically distinct in the table.
     let rows = client
