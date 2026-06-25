@@ -37,10 +37,13 @@ with the same regex.
 ## Receipt layout
 
 After `bash scripts/testnet-live-proof.sh` completes against a live
-Postgres, the runbook drops a directory tree:
+Postgres, the runbook drops a directory tree under a `_v3`-suffixed
+basename (STW-095) so a fresh green receipt never collides with the
+archived failure-history set the same runbook moved into
+`receipts/_archive/failed/`:
 
 ```
-receipts/testnet-live-proof-20260604T050000Z/
+receipts/testnet-live-proof-20260604T050000Z_v3/
 ├── SUMMARY.txt                    # headline + per-step exit codes
 ├── ENV.txt                        # env the chain ran with (secrets redacted)
 ├── recipe.json                    # machine-readable manifest (STW-023)
@@ -209,6 +212,42 @@ use rbp_autotrain::LiveProofReceipt;
 LiveProofReceipt::read_and_verify(receipt_root)
     .expect("operator receipt is green");
 ```
+
+## Receipts archive (`receipts/_archive/failed/`) — STW-095
+
+The `receipts/_archive/failed/` directory is the committed audit
+trail of pre-`STW-095` failed/partial runbook runs. After STW-095
+landed, the runbook moved 33 failed/partial
+`receipts/testnet-live-proof-2026060{4..10}T*` directories into
+`receipts/_archive/failed/` (the move preserves the receipts
+on-disk; only the git-tracked surface changes — see
+`.gitignore`'s `!receipts/_archive/` exception). A planner
+scanning the `receipts/` dir sees only one fresh
+`testnet-live-proof-<UTC>_v3/` green receipt + the
+`receipts/_archive/failed/` summary (with the
+`INDEX.md` per-receipt failure-mode audit trail), not 33
+confusing stale dirs + 0 green ones.
+
+The `INDEX.md` is the failure-history a future planner reads
+to understand *why* the prior 33 runs failed without re-running
+them: one bullet per archived receipt + the failure mode + the
+slice that fixed it. The summary entries are organized
+chronologically (oldest first) and tagged with the
+`STW-NNN` slice that closed each failure family (e.g.
+`STW-075` deterministic `Check::clustered` + `STW-077`
+fast-mode kmeans cap + `STW-086` kmeans++ empty-histogram
+pre-filter + `STW-087` empty-cluster guard + `STW-091`/`STW-094`
+lookup fast-mode cap).
+
+The STW-095 receipt chain is *evidence only*: the dependency
+chain is `STW-075` + `STW-077` + `STW-078` + `STW-086` + `STW-087` +
+`STW-094` (the v1→v10 testnet chain is structurally complete
+*and* kmeans-panic-blocked *and* lookup-hang-blocked — the
+green receipt is the operator-visible proof all six layers
+hold in a real Postgres run). If a fresh runbook run fails
+after STW-095, the worker reports the failure as a new
+`[P0]`-ranked next slice (or blocks for human input) rather
+than silently fixing the runbook in the STW-095 commit.
 
 ## Re-verifying a receipt with the trainer binary (STW-028)
 

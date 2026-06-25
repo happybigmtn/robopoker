@@ -152,8 +152,20 @@ if [[ ! -x "$TRAINER_BIN" ]]; then
 fi
 
 # --- receipt bundle directory --------------------------------------------
+# STW-095: append a `_v3` suffix on the live receipt dir so a
+# future receipt never collides with the archived `_archive/failed/`
+# set the same runbook moved into the archive. The `_v3` shape
+# reflects the post-STW-094 receipt content (the runbook now exports
+# `RBP_FAST_LOOKUP_SAMPLE` in `ENV.txt` + `recipe.json`'s
+# `redacted_env` summary, so a `_v3` receipt is a strictly-newer
+# shape than the `_v2` shape the STW-085 spec had imagined). A
+# fresh `_v3` receipt landing on a clean `receipts/` dir (with the
+# older `testnet-live-proof-<UTC>/` archived under
+# `receipts/_archive/failed/`) is the operator-visible signal the
+# receipt chain is "post-cleanup". STW-096 (DASHBOARD-LATEST-RECEIPT-
+# ROUTE) reads from this `_v3` namespace.
 UTC_ISO="$(date -u +%Y%m%dT%H%M%SZ)"
-RECEIPT_DIR="$WORKSPACE_ROOT/receipts/testnet-live-proof-$UTC_ISO"
+RECEIPT_DIR="$WORKSPACE_ROOT/receipts/testnet-live-proof-${UTC_ISO}_v3"
 mkdir -p "$RECEIPT_DIR"
 
 # Snapshot the env that drove the chain so a reviewer can reproduce

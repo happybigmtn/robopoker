@@ -10,6 +10,16 @@
 
 # STW-019 runbook receipts (runtime output of `bash scripts/testnet-live-proof.sh`)
 /receipts/
+# STW-095 archive exception — the `receipts/_archive/failed/INDEX.md`
+# audit trail + the archived per-receipt subdirs (renamed in
+# STW-095, not deleted) are the operator-visible "what went wrong"
+# history a future planner reads without re-running the 33 failed
+# receipts. The exception is scoped to the `_archive/` subdir only
+# — a fresh runbook run still writes to a non-tracked
+# `receipts/testnet-live-proof-<UTC>_v3/` (the parent dir is
+# gitignored; the operator commits the receipt path explicitly in
+# the STW-095 slice via `git add -f`).
+!receipts/_archive/
 # STW-020 runbook runtime logs (output of `bash scripts/workspace-parallel-proof.sh`)
 /logs/
 # `auto steward` planning artifacts (canonical source is /tmp/.../<STEWARD-...>/)
